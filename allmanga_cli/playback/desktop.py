@@ -113,6 +113,7 @@ def play_desktop(
                 stream_type=stream.get("type", "mp4"),
                 title=media_title,
                 subtitles=subtitles,
+                target_player="mpv",
             )
             replace_active_local_proxy(proxy_server)
         except Exception:

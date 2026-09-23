@@ -210,7 +210,7 @@ def _compute_ep_data_version(ep_data: dict) -> str:
     return hashlib.md5(content.encode()).hexdigest()[:12]
 
 
-def _clear_streams(key=None):
+def _clear_streams(key=None, clear_cache=False):
     global _streams_generation, _active_stream_key
     with _streams_lock:
         _streams_generation += 1
@@ -218,11 +218,13 @@ def _clear_streams(key=None):
         if key is not None:
             k = _normalize_key(key)
             _streams_cache.pop(k, None)
-        else:
+        elif clear_cache:
             _active_stream_key = None
             _streams_cache.clear()
             # Stop revalidation timer when all streams cleared
             _stop_revalidation_timer()
+        else:
+            _active_stream_key = None
         return _streams_generation
 
 
@@ -282,6 +284,16 @@ def _stream_snapshot(show_id=None, ep=None, ttype="sub", provider_id=None, quali
 
 def _stream_count(show_id=None, ep=None, ttype="sub", provider_id=None, quality="best") -> int:
     return len(_stream_snapshot(show_id, ep, ttype, provider_id, quality))
+
+
+def is_stream_cache_ready(show_id=None, ep=None, ttype="sub", provider_id=None, quality="best") -> bool:
+    """Return True if streams for this key have already been resolved (READY or FAILED)."""
+    with _streams_lock:
+        k = make_stream_key(show_id, ep, ttype, provider_id, quality)
+        entry = _streams_cache.get(k)
+        if not entry:
+            return False
+        return entry.get("state") in ("READY", "FAILED")
 
 
 def _prune_dead_stream(key, stream_link: str):

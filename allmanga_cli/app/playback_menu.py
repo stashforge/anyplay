@@ -489,7 +489,6 @@ def handle_action_menu_state(
             episode_ids = new_ids
             ms.total_eps = len(episode_ids)
             ms.selected_stream = None
-            app_core._clear_streams()
             app_core.prepare_show_display_state(action_show, ttype)
             ms.current_ep_index = episode_index_for_id(
                 episode_ids, ms.current_ep, labels=ui.ui_show_ctx.get("_episode_labels")
@@ -1250,6 +1249,7 @@ def handle_mirrors_state(
             exclude_names.add(s["raw_source_name"])
         if s.get("source_name"):
             raw_sname = s["source_name"]
+            exclude_names.add(raw_sname)
             base_name = re.sub(
                 r"\s*(?:\(\s*)?\b(?:\d+p|\d+k|adaptive|source)\b.*$",
                 "",
@@ -1264,40 +1264,17 @@ def handle_mirrors_state(
         bg_alive = bool(streams._bg_thread and streams._bg_thread.is_alive())
         is_same_active_key = streams._active_stream_key == cur_key
 
+    cache_ready = streams.is_stream_cache_ready(
+        ms.show_id, ms.current_ep, ttype, target_pid, quality
+    )
     total_sources = (
         len(cached_ep_data.get("episode", {}).get("sourceUrls", []))
         if cached_ep_data
         else 0
     )
-
-    exclude_names = set()
-    for s in cached_streams:
-        if s.get("source_parent_name"):
-            exclude_names.add(s["source_parent_name"])
-        if s.get("raw_source_name"):
-            exclude_names.add(s["raw_source_name"])
-        if s.get("source_name"):
-            raw_sname = s["source_name"]
-            base_name = re.sub(
-                r"\s*(?:\(\s*)?\b(?:\d+p|\d+k|adaptive|source)\b.*$",
-                "",
-                raw_sname,
-                flags=re.I,
-            ).strip()
-            if base_name:
-                exclude_names.add(base_name)
-            exclude_names.add(raw_sname.split(" (")[0].strip())
-
-    with streams._bg_lock:
-        bg_alive = bool(streams._bg_thread and streams._bg_thread.is_alive())
-        is_same_active_key = streams._active_stream_key == cur_key
-
-    total_sources = (
-        len(cached_ep_data.get("episode", {}).get("sourceUrls", []))
-        if cached_ep_data
-        else 0
+    all_resolved = cache_ready or (
+        total_sources > 0 and len(exclude_names) >= total_sources
     )
-    all_resolved = total_sources > 0 and len(exclude_names) >= total_sources
 
     if not (bg_alive and is_same_active_key) and not all_resolved:
         streams.start_bg_resolve(

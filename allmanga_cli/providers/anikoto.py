@@ -22,6 +22,61 @@ _logger = logging.getLogger(__name__)
 _MEGAPLAY_KEY = b"i?LMTAx0Q6,:}50U".ljust(32, b"\x00")
 _MEGAPLAY_IV = b"W0;27ToaUpl_P%'c"
 
+_EXCHANGE_KEY_1 = ["AP6GeR8H0lwUz1", "UAz8Gwl10P6ReH"]
+_KEY_1 = "ItFKjuWokn4ZpB"
+_KEY_2 = "fOyt97QWFB3"
+_EXCHANGE_KEY_2 = ["1majSlPQd2M5", "da1l2jSmP5QM"]
+_EXCHANGE_KEY_3 = ["CPYvHj09Au3", "0jHA9CPYu3v"]
+_KEY_3 = "736y1uTJpBLUX"
+
+
+def _rc4(key: bytes, data: bytes) -> bytes:
+    s = list(range(256))
+    j = 0
+    out = bytearray(len(data))
+    for i in range(256):
+        j = (j + s[i] + key[i % len(key)]) % 256
+        s[i], s[j] = s[j], s[i]
+    i = j = 0
+    for k in range(len(data)):
+        i = (i + 1) % 256
+        j = (j + s[i]) % 256
+        s[i], s[j] = s[j], s[i]
+        out[k] = data[k] ^ s[(s[i] + s[j]) % 256]
+    return bytes(out)
+
+
+def _b64_url_safe(data: bytes) -> str:
+    import base64
+    return base64.urlsafe_b64encode(data).decode("utf-8")
+
+
+def _exchange(input_str: str, key1: str, key2: str) -> str:
+    res = []
+    for c in input_str:
+        idx = key1.find(c)
+        res.append(key2[idx] if idx != -1 else c)
+    return "".join(res)
+
+
+def _vrf_encrypt(input_val: str) -> str:
+    if not input_val:
+        return ""
+    try:
+        vrf = str(input_val)
+        vrf = _exchange(vrf, _EXCHANGE_KEY_1[0], _EXCHANGE_KEY_1[1])
+        vrf = _b64_url_safe(_rc4(_KEY_1.encode("utf-8"), vrf.encode("utf-8")))
+        vrf = _b64_url_safe(_rc4(_KEY_2.encode("utf-8"), vrf.encode("utf-8")))
+        vrf = _exchange(vrf, _EXCHANGE_KEY_2[0], _EXCHANGE_KEY_2[1])
+        vrf = _exchange(vrf, _EXCHANGE_KEY_3[0], _EXCHANGE_KEY_3[1])
+        vrf = vrf[::-1]
+        vrf = _b64_url_safe(_rc4(_KEY_3.encode("utf-8"), vrf.encode("utf-8")))
+        vrf = _b64_url_safe(vrf.encode("utf-8"))
+        return urllib.parse.quote(vrf, safe="")
+    except Exception as e:
+        _logger.debug("Anikoto VRF encrypt error: %s", e)
+        return ""
+
 
 def _decrypt_megaplay_enc(enc: str) -> dict | None:
     if not enc:
@@ -91,19 +146,154 @@ class AnikotoProvider:
         return self.metadata.get("name", "Anikoto")
 
     def _fetch_media(self, provider_id: str) -> dict[str, Any] | None:
+        pid_clean = str(provider_id).strip()
+        if pid_clean in self._media_cache:
+            return self._media_cache[pid_clean]
+
+        token = ""
         try:
             from ..core.storage import load_config
             from ..services.anilist_auth import stored_anilist_token
             token = stored_anilist_token(load_config())
         except Exception:
             token = ""
+
+        # Numeric ID: fetch directly from AniList
+        if pid_clean.isdigit():
+            if token:
+                try:
+                    res = anilist.fetch_one(urllib.request.urlopen, json.load, token, anilist_id=int(pid_clean))
+                    if res:
+                        self._media_cache[pid_clean] = res
+                        return res
+                except Exception as e:
+                    _logger.debug("Anikoto fetch_one with token failed (likely expired/invalid): %s", e)
+
+            try:
+                res = anilist.fetch_one(urllib.request.urlopen, json.load, "", anilist_id=int(pid_clean))
+                if res:
+                    self._media_cache[pid_clean] = res
+                    return res
+            except Exception as e:
+                _logger.debug("Anikoto fetch_one unauthenticated failed: %s", e)
+        else:
+            # Slug or title passed as provider_id: search AniList fallback
+            try:
+                from ..core.anilist_fallback import search_anilist_with_fallback
+                fallback_res = search_anilist_with_fallback(pid_clean)
+                media_list = fallback_res.get("data", {}).get("Page", {}).get("media", [])
+                if media_list:
+                    res = media_list[0]
+                    self._media_cache[pid_clean] = res
+                    if "id" in res:
+                        self._media_cache[str(res["id"])] = res
+                    return res
+            except Exception as e:
+                _logger.debug("Anikoto fallback title search failed: %s", e)
+
+        return self._media_cache.get(pid_clean)
+
+    def _get_anime_page(self, provider_id: str) -> tuple[str | None, str | None]:
+        pid_clean = str(provider_id).strip()
+        if pid_clean in self._anime_page_cache:
+            return self._anime_page_cache[pid_clean]
+
+        # If provider_id is already a direct watch URL or path
+        if pid_clean.startswith("/watch/") or pid_clean.startswith("http"):
+            watch_url = pid_clean if pid_clean.startswith("http") else f"{self.anikoto_url}{pid_clean}"
+            try:
+                req_watch = urllib.request.Request(watch_url, headers={**self.headers, "Referer": f"{self.anikoto_url}/"})
+                w_html = urllib.request.urlopen(req_watch, timeout=6).read().decode("utf-8", errors="ignore")
+                w_soup = BeautifulSoup(w_html, "html.parser")
+                main_div = w_soup.find(id="watch-main")
+                anime_id = main_div.get("data-id") if main_div else None
+                if anime_id and watch_url:
+                    self._anime_page_cache[pid_clean] = (anime_id, watch_url)
+                    return anime_id, watch_url
+            except Exception as e:
+                _logger.debug("Anikoto direct watch_url resolve failed: %s", e)
+
+        media = self._fetch_media(provider_id)
+        if not media:
+            return None, None
+
+        titles = [media.get("title", {}).get(k) for k in ["english", "romaji", "userPreferred"] if media.get("title", {}).get(k)]
+        if not titles and isinstance(media.get("title"), str):
+            titles = [media["title"]]
+        for alt in media.get("synonyms") or []:
+            if alt and alt not in titles:
+                titles.append(alt)
+
+        main_title = titles[0] if titles else pid_clean
+        s_m = re.search(r'season\s*(\d+)|(\d+)(?:nd|rd|th)\s*season', main_title, re.I)
+        target_season = int(s_m.group(1) or s_m.group(2)) if s_m else 1
+
+        clean_q = re.sub(r'[^a-zA-Z0-9\s]', ' ', main_title)
+        short_q = ' '.join(clean_q.split()[:4])
+        vrf_q = _vrf_encrypt(short_q)
+        search_url = f"{self.anikoto_url}/filter?keyword={urllib.parse.quote_plus(short_q)}"
+        if vrf_q:
+            search_url += f"&vrf={vrf_q}"
+
         try:
-            res = anilist.fetch_one(urllib.request.urlopen, json.load, token, anilist_id=provider_id)
-            if res:
-                return res
+            req_search = urllib.request.Request(search_url, headers={**self.headers, "Referer": f"{self.anikoto_url}/"})
+            html_search = urllib.request.urlopen(req_search, timeout=6).read().decode('utf-8', errors='ignore')
+            soup_search = BeautifulSoup(html_search, "html.parser")
+
+            candidates = []
+            seen_candidates = set()
+            for a in soup_search.find_all("a", href=True):
+                if "/watch/" in a["href"] and a.text.strip():
+                    txt = a.text.strip()
+                    if not re.match(r'^\d+(\.\d+)?\s+(TV|Movie|Special|OVA|ONA)', txt) and not re.match(r'^\d+\s+\d+', txt):
+                        if a["href"] not in seen_candidates:
+                            seen_candidates.add(a["href"])
+                            candidates.append((txt, a["href"]))
+
+            def _score_match(c_title: str, t_title: str, t_season: int) -> float:
+                c_norm = re.sub(r'[^a-z0-9]', '', c_title.lower())
+                t_norm = re.sub(r'[^a-z0-9]', '', t_title.lower())
+                if c_norm == t_norm:
+                    return 100.0
+                if t_season:
+                    if f'season{t_season}' in c_norm or f'{t_season}ndseason' in c_norm or f'{t_season}rdseason' in c_norm:
+                        pass
+                    elif t_season == 1 and not any(f'season{i}' in c_norm for i in range(2, 10)):
+                        pass
+                    else:
+                        return 0.0
+                c_words = set(re.findall(r'[a-z0-9]+', c_title.lower()))
+                t_words = set(re.findall(r'[a-z0-9]+', t_title.lower()))
+                if not t_words:
+                    return 0.0
+                overlap = len(c_words & t_words) / len(t_words)
+                extra_penalty = 0.0
+                for unwanted in ['special', 'specials', 'movie', 'oad', 'ova', 'reawakening']:
+                    if unwanted in c_words and unwanted not in t_words:
+                        extra_penalty += 0.3
+                return max(0.0, overlap - extra_penalty)
+
+            scored = [(max(_score_match(c_txt, t, target_season) for t in titles), c_txt, c_href) for c_txt, c_href in candidates]
+            scored.sort(key=lambda x: x[0], reverse=True)
+
+            if scored and scored[0][0] > 0.1:
+                best_href = scored[0][2]
+                watch_url = f"{self.anikoto_url}{best_href}" if best_href.startswith("/") else best_href
+
+                req_watch = urllib.request.Request(watch_url, headers={**self.headers, "Referer": f"{self.anikoto_url}/"})
+                w_html = urllib.request.urlopen(req_watch, timeout=6).read().decode('utf-8', errors='ignore')
+                w_soup = BeautifulSoup(w_html, "html.parser")
+                main_div = w_soup.find(id="watch-main")
+                anime_id = main_div.get("data-id") if main_div else None
+                if anime_id and watch_url:
+                    self._anime_page_cache[pid_clean] = (anime_id, watch_url)
+                    if "id" in media:
+                        self._anime_page_cache[str(media["id"])] = (anime_id, watch_url)
+                    return anime_id, watch_url
         except Exception as e:
-            _logger.debug("Anikoto fetch_one error: %s", e)
-        return self._media_cache.get(str(provider_id))
+            _logger.debug("Anikoto _get_anime_page error: %s", e)
+
+        return None, None
 
     def search(self, query: str, ttype: str = "sub") -> list[dict[str, Any]]:
         try:
@@ -166,6 +356,54 @@ class AnikotoProvider:
 
     def episode_catalog(self, provider_id: str, ttype: str = "sub") -> dict[str, Any]:
         try:
+            # 1. Try resolving actual episode catalog from Anikoto website
+            anime_id, watch_url = self._get_anime_page(provider_id)
+            if anime_id and watch_url:
+                vrf_param = f"?vrf={_vrf_encrypt(anime_id)}"
+                ep_url = f"{self.anikoto_url}/ajax/episode/list/{anime_id}{vrf_param}"
+                req_ep = urllib.request.Request(ep_url, headers={**self.headers, "Referer": watch_url, "X-Requested-With": "XMLHttpRequest"})
+                ep_res = json.loads(urllib.request.urlopen(req_ep, timeout=6).read().decode('utf-8'))
+                ep_soup = BeautifulSoup(ep_res.get("result", ""), "html.parser")
+
+                sub_ids = []
+                dub_ids = []
+                labels = {}
+                for a in ep_soup.select("div.episodes ul > li > a") or ep_soup.find_all("a"):
+                    num = a.get("data-num") or a.get("data-number") or a.get("data-slug")
+                    if not num:
+                        continue
+                    num_str = str(num)
+                    is_sub = a.get("data-sub") == "1"
+                    is_dub = a.get("data-dub") == "1"
+                    if not is_sub and not is_dub:
+                        is_sub = True
+                    if is_sub:
+                        sub_ids.append(num_str)
+                    if is_dub:
+                        dub_ids.append(num_str)
+
+                    title_span = a.find("span", class_="d-title")
+                    tooltip = (a.parent or {}).get("title", "") if hasattr(a, "parent") and a.parent else ""
+                    ep_name = title_span.text.strip() if title_span and title_span.text.strip() else ""
+                    if not ep_name and tooltip:
+                        ep_name = tooltip.split("Release:")[0].split("Softsub")[0].strip()
+                    labels[num_str] = f"{num_str}. {ep_name}" if ep_name and ep_name != num_str else num_str
+
+                if sub_ids or dub_ids:
+                    active_ids = dub_ids if ttype.lower() == "dub" else sub_ids
+                    if not active_ids:
+                        active_ids = sub_ids or dub_ids
+                    detail = {
+                        "sub": sub_ids,
+                        "dub": dub_ids,
+                        "raw": [],
+                    }
+                    return normalize_episode_catalog({"ids": active_ids, "detail": detail, "labels": labels}, provider_id=self.id, provider_title_id=provider_id)
+        except Exception as e:
+            _logger.debug("Anikoto site episode catalog resolution failed: %s", e)
+
+        # 2. Fallback to AniList metadata
+        try:
             media = self._fetch_media(provider_id)
             if not media:
                 return normalize_episode_catalog({"ids": []}, provider_id=self.id, provider_title_id=provider_id)
@@ -176,13 +414,12 @@ class AnikotoProvider:
                 if next_airing and next_airing.get("episode"):
                     total = next_airing["episode"] - 1
                 else:
-                    total = 1  # Fallback
+                    total = 1
 
             ids = [str(ep) for ep in range(1, total + 1)]
-
             detail = {
                 "sub": ids,
-                "dub": ids if ttype == "dub" else [],
+                "dub": ids,
                 "raw": [],
             }
             return normalize_episode_catalog({"ids": ids, "detail": detail}, provider_id=self.id, provider_title_id=provider_id)
@@ -434,76 +671,11 @@ class AnikotoProvider:
 
         # 1. Multi-Server Extraction via anikototv.to
         try:
-            cache_key = (provider_id, ttype)
-            anime_id, watch_url = self._anime_page_cache.get(cache_key, (None, None))
-
-            if not anime_id or not watch_url:
-                media = self._fetch_media(provider_id)
-                if media:
-                    titles = [media.get("title", {}).get(k) for k in ["english", "romaji", "userPreferred"] if media.get("title", {}).get(k)]
-                    main_title = titles[0] if titles else ""
-
-                    s_m = re.search(r'season\s*(\d+)|(\d+)(?:nd|rd|th)\s*season', main_title, re.I)
-                    target_season = int(s_m.group(1) or s_m.group(2)) if s_m else 1
-
-                    clean_q = re.sub(r'[^a-zA-Z0-9\s]', ' ', main_title)
-                    short_q = ' '.join(clean_q.split()[:4])
-
-                    search_url = f"{self.anikoto_url}/filter?keyword={urllib.parse.quote_plus(short_q)}"
-                    req_search = urllib.request.Request(search_url, headers={**self.headers, "Referer": f"{self.anikoto_url}/"})
-                    html_search = urllib.request.urlopen(req_search, timeout=6).read().decode('utf-8', errors='ignore')
-                    soup_search = BeautifulSoup(html_search, "html.parser")
-
-                    candidates = []
-                    seen_candidates = set()
-                    for a in soup_search.find_all("a", href=True):
-                        if "/watch/" in a["href"] and a.text.strip():
-                            txt = a.text.strip()
-                            if not re.match(r'^\d+(\.\d+)?\s+(TV|Movie|Special|OVA|ONA)', txt) and not re.match(r'^\d+\s+\d+', txt):
-                                if a["href"] not in seen_candidates:
-                                    seen_candidates.add(a["href"])
-                                    candidates.append((txt, a["href"]))
-
-                    def _score_match(c_title: str, t_title: str, t_season: int) -> float:
-                        c_norm = re.sub(r'[^a-z0-9]', '', c_title.lower())
-                        t_norm = re.sub(r'[^a-z0-9]', '', t_title.lower())
-                        if c_norm == t_norm:
-                            return 100.0
-                        if t_season:
-                            if f'season{t_season}' in c_norm or f'{t_season}ndseason' in c_norm or f'{t_season}rdseason' in c_norm:
-                                pass
-                            elif t_season == 1 and not any(f'season{i}' in c_norm for i in range(2, 10)):
-                                pass
-                            else:
-                                return 0.0
-                        c_words = set(re.findall(r'[a-z0-9]+', c_title.lower()))
-                        t_words = set(re.findall(r'[a-z0-9]+', t_title.lower()))
-                        if not t_words:
-                            return 0.0
-                        overlap = len(c_words & t_words) / len(t_words)
-                        extra_penalty = 0.0
-                        for unwanted in ['special', 'specials', 'movie', 'oad', 'ova', 'reawakening']:
-                            if unwanted in c_words and unwanted not in t_words:
-                                extra_penalty += 0.3
-                        return max(0.0, overlap - extra_penalty)
-
-                    scored = [(max(_score_match(c_txt, t, target_season) for t in titles), c_txt, c_href) for c_txt, c_href in candidates]
-                    scored.sort(key=lambda x: x[0], reverse=True)
-
-                    if scored and scored[0][0] > 0.1:
-                        best_href = scored[0][2]
-                        watch_url = f"{self.anikoto_url}{best_href}" if best_href.startswith("/") else best_href
-
-                        req_watch = urllib.request.Request(watch_url, headers={**self.headers, "Referer": f"{self.anikoto_url}/"})
-                        w_html = urllib.request.urlopen(req_watch, timeout=6).read().decode('utf-8', errors='ignore')
-                        w_soup = BeautifulSoup(w_html, "html.parser")
-                        main_div = w_soup.find(id="watch-main")
-                        anime_id = main_div.get("data-id") if main_div else None
-                        if anime_id and watch_url:
-                            self._anime_page_cache[cache_key] = (anime_id, watch_url)
+            anime_id, watch_url = self._get_anime_page(provider_id)
 
             if anime_id and watch_url:
-                ep_url = f"{self.anikoto_url}/ajax/episode/list/{anime_id}"
+                vrf_param = f"?vrf={_vrf_encrypt(anime_id)}"
+                ep_url = f"{self.anikoto_url}/ajax/episode/list/{anime_id}{vrf_param}"
                 req_ep = urllib.request.Request(ep_url, headers={**self.headers, "Referer": watch_url, "X-Requested-With": "XMLHttpRequest"})
                 ep_res = json.loads(urllib.request.urlopen(req_ep, timeout=6).read().decode('utf-8'))
                 ep_soup = BeautifulSoup(ep_res.get("result", ""), "html.parser")

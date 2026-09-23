@@ -9,7 +9,8 @@ from .shared.base import Provider
 from .shared.models import normalize_episode_catalog, normalize_episode_sources, normalize_title
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:146.0) Gecko/20100101 Firefox/146.0",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+    "Accept": "application/json",
 }
 
 class Senshi(Provider):
@@ -24,7 +25,7 @@ class Senshi(Provider):
 
     @property
     def base_url(self) -> str:
-        return self.domains[0] if getattr(self, 'domains', None) else "https://senshi.live"
+        return self.domains[0] if getattr(self, 'domains', None) else "https://senshi.to"
 
     @property
     def name(self) -> str:
@@ -47,7 +48,62 @@ class Senshi(Provider):
             return []
 
     def search(self, query: str, ttype: str = "sub") -> list[dict[str, Any]]:
-        # AniList GraphQL query to search and retrieve idMal
+        # 1. Try Senshi native filter endpoint
+        try:
+            payload = json.dumps({
+                "searchTerm": query,
+                "types": [],
+                "genres": [],
+                "status": [],
+                "seasons": [],
+                "year": "",
+                "studios": [],
+                "producers": [],
+                "languages": [],
+                "page": 1,
+                "limit": 20,
+                "sortBy": "score_desc",
+                "languagePreference": "EN",
+            }).encode("utf-8")
+            headers = dict(HEADERS)
+            headers["Referer"] = f"{self.base_url}/"
+            headers["Content-Type"] = "application/json"
+            req = urllib.request.Request(f"{self.base_url}/anime/filter", data=payload, headers=headers)
+            with urllib.request.urlopen(req, timeout=7) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                media_list = data.get("data") or []
+                if media_list:
+                    results = []
+                    for item in media_list:
+                        mal_id = item.get("id")
+                        if not mal_id:
+                            continue
+                        name = item.get("title_english") or item.get("title") or "Unknown"
+                        pic = item.get("anime_picture") or ""
+                        if pic.startswith("/"):
+                            pic = f"{self.base_url}{pic}"
+                        results.append(normalize_title(
+                            {
+                                "_id": str(mal_id),
+                                "malId": mal_id,
+                                "name": name,
+                                "romajiName": item.get("title") or "",
+                                "englishName": item.get("title_english") or "",
+                                "nativeName": "",
+                                "thumbnail": pic,
+                                "type": "anime",
+                                "format": item.get("type"),
+                                "status": item.get("ani_status") or "Finished",
+                            },
+                            provider_id=self.id,
+                            provider_name=self.name,
+                        ))
+                    if results:
+                        return results
+        except Exception as e:
+            logging.debug("Senshi native search error: %s", e)
+
+        # 2. AniList GraphQL fallback to search and retrieve idMal
         graphql_query = """
         query($search: String) {
           Page(page: 1, perPage: 20) {
@@ -109,13 +165,14 @@ class Senshi(Provider):
                 provider_title_id=provider_id,
             )
 
-        # episodes_data is a list of {"ep_id": 1, "ep_title": "...", ...}
         eps_formatted = []
         ids = []
         labels = {}
 
         for ep in episodes_data:
             ep_num = str(ep.get("ep_id"))
+            if not ep_num or ep_num == "None":
+                continue
 
             ids.append(ep_num)
             labels[ep_num] = ep_num
@@ -128,7 +185,6 @@ class Senshi(Provider):
             try: return float(val)
             except ValueError: return 0.0
 
-        # sort by number
         eps_formatted.sort(key=lambda x: _parse_ep(x["id"]))
         ids = [ep["id"] for ep in eps_formatted]
 
@@ -143,76 +199,186 @@ class Senshi(Provider):
             provider_title_id=provider_id,
         )
 
-    def episode_sources(self, provider_id: str, episode: str, ttype: str = "sub") -> dict[str, Any] | None:
-        embeds = self._fetch_json(f"{self.base_url}/episode-embeds/{provider_id}/{episode}")
-        if not embeds:
-            return None
+    _sources_cache: dict[tuple[str, str, str], Any] = {}
 
-        want_dub = (ttype.lower() == "dub")
-
-        # Filter by status (HardSub vs Dub)
-        def is_dub(status):
-            return str(status).lower() == "dub"
-
-        # Try to find a matching source
-        source = None
-        for emb in embeds:
-            if is_dub(emb.get("status")) == want_dub:
-                source = emb
-                break
-
-        # Fallback if preferred audio not found
-        if not source and embeds:
-            source = embeds[0]
-
-        if not source:
-            return None
-
+    def _extract_embed_sources(self, matching_embeds: list, is_dub: bool) -> list[dict]:
         all_sources = []
+        for emb in matching_embeds:
+            status = emb.get("status") or ("Dub" if is_dub else "Sub")
+            remote_id = emb.get("remote_source_id") or emb.get("remoteSourceId")
 
-        # 1. Direct Senshi M3U8 (Highest Priority)
-        senshi_url = source.get("url")
-        if senshi_url:
-            all_sources.append({
-                "sourceName": "Senshi",
-                "link": senshi_url,
-                "resolution": "auto",
-                "type": "hls",
-                "priority": 5,
-                "headers": {"Referer": f"{self.base_url}/"}
-            })
+            # 1. Direct Vidcloud source via remote_source_id
+            if remote_id:
+                try:
+                    vheaders = {
+                        "User-Agent": HEADERS["User-Agent"],
+                        "Referer": f"{self.base_url}/",
+                        "Origin": self.base_url,
+                        "Accept": "application/json",
+                    }
+                    vreq = urllib.request.Request(
+                        f"https://s.vidcloud.se/_v1/sources?id={remote_id}",
+                        headers=vheaders,
+                    )
+                    with urllib.request.urlopen(vreq, timeout=7) as vresp:
+                        entries = json.loads(vresp.read().decode("utf-8"))
+                        for entry in entries:
+                            src_info = entry.get("source") or {}
+                            src_url = src_info.get("src")
+                            if src_url:
+                                tracks = entry.get("tracks") or []
+                                subtitles = [
+                                    {
+                                        "url": t.get("vtt_url") or t.get("url"),
+                                        "file": t.get("vtt_url") or t.get("url"),
+                                        "label": t.get("label") or "English",
+                                        "default": t.get("default", False),
+                                    }
+                                    for t in tracks
+                                    if t.get("url") or t.get("vtt_url")
+                                ]
+                                quality = src_info.get("quality") or "1080p"
 
-        # 2. Server 2 (StreamNin)
-        server2 = source.get("server2")
-        if server2:
-            all_sources.append({
-                "sourceName": "StreamNin (Embed)",
-                "link": server2,
-                "resolution": "auto",
-                "type": "embed",
-                "priority": 3,
-                "headers": {"Referer": f"{self.base_url}/"}
-            })
+                                # Parse all stream resolutions from master playlist
+                                resolutions = []
+                                try:
+                                    mreq = urllib.request.Request(src_url, headers=vheaders)
+                                    with urllib.request.urlopen(mreq, timeout=5) as mresp:
+                                        m_body = mresp.read().decode("utf-8", errors="replace")
+                                        if m_body.startswith("EM3U8v1:"):
+                                            from ..media.decryption import decrypt_em3u8
+                                            dec = decrypt_em3u8(m_body)
+                                            if dec:
+                                                m_body = dec
+                                        import re
+                                        for line in m_body.splitlines():
+                                            if line.startswith("#EXT-X-STREAM-INF:"):
+                                                m_res = re.search(r"RESOLUTION=\d+x(\d+)", line)
+                                                if m_res:
+                                                    r_str = f"{m_res.group(1)}p"
+                                                    if r_str not in resolutions:
+                                                        resolutions.append(r_str)
+                                except Exception:
+                                    pass
 
-        # 3. Server FM (FileMoon)
-        serverFM = source.get("serverFM")
-        if serverFM:
-            all_sources.append({
-                "sourceName": "FileMoon (Embed)",
-                "link": serverFM,
-                "resolution": "auto",
-                "type": "embed",
-                "priority": 2,
-                "headers": {"Referer": f"{self.base_url}/"}
-            })
+                                if not resolutions:
+                                    resolutions = [quality]
 
-        return normalize_episode_sources({
-            "episode": {
-                "sourceUrls": all_sources
-            }
-        }, provider_id=self.id, provider_title_id=provider_id, episode=episode)
+                                for res in resolutions:
+                                    all_sources.append({
+                                        "sourceName": f"Senshi ({status} - {res})",
+                                        "link": f"{src_url}&hls_res={res}",
+                                        "sourceUrl": f"{src_url}&hls_res={res}",
+                                        "resolution": res,
+                                        "type": "hls",
+                                        "priority": 1 if res == "1080p" else 2,
+                                        "referer": f"{self.base_url}/",
+                                        "headers": {
+                                            "Referer": f"{self.base_url}/",
+                                            "Origin": self.base_url,
+                                            "User-Agent": HEADERS["User-Agent"],
+                                        },
+                                        "requires_proxy": True,
+                                        "subtitles": subtitles,
+                                    })
+                except Exception as exc:
+                    logging.debug("Senshi vidcloud fetch error: %s", exc)
+
+            # 2. Server 2 (StreamNin)
+            server2 = emb.get("server2")
+            if server2:
+                all_sources.append({
+                    "sourceName": f"StreamNin ({status})",
+                    "link": server2,
+                    "resolution": "auto",
+                    "type": "embed",
+                    "priority": 3,
+                    "headers": {"Referer": f"{self.base_url}/"},
+                })
+
+            # 3. Server FM (FileMoon)
+            serverFM = emb.get("serverFM")
+            if serverFM:
+                all_sources.append({
+                    "sourceName": f"FileMoon ({status})",
+                    "link": serverFM,
+                    "resolution": "auto",
+                    "type": "embed",
+                    "priority": 4,
+                    "headers": {"Referer": f"{self.base_url}/"},
+                })
+        return all_sources
+
+    def episode_sources(self, provider_id: str, episode: str, ttype: str = "sub") -> dict[str, Any] | None:
+        cache_key = (str(provider_id), str(episode), str(ttype).lower())
+        if cache_key in self._sources_cache:
+            return self._sources_cache[cache_key]
+
+        embeds = self._fetch_json(f"{self.base_url}/episode-embeds/{provider_id}/{episode}")
+        if not embeds or not isinstance(embeds, list):
+            self._sources_cache[cache_key] = None
+            return None
+
+        want_dub = (str(ttype).lower() == "dub")
+        sub_embeds = [
+            emb for emb in embeds
+            if str(emb.get("status") or "").lower() != "dub"
+        ]
+        dub_embeds = [
+            emb for emb in embeds
+            if str(emb.get("status") or "").lower() == "dub"
+        ]
+
+        if not dub_embeds:
+            self._sources_cache[(str(provider_id), str(episode), "dub")] = None
+        if not sub_embeds:
+            self._sources_cache[(str(provider_id), str(episode), "sub")] = None
+
+        target_embeds = dub_embeds if want_dub else sub_embeds
+        other_embeds = sub_embeds if want_dub else dub_embeds
+        other_ttype = "sub" if want_dub else "dub"
+        other_key = (str(provider_id), str(episode), other_ttype)
+
+        if other_embeds and other_key not in self._sources_cache:
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                fut_target = executor.submit(self._extract_embed_sources, target_embeds, want_dub) if target_embeds else None
+                fut_other = executor.submit(self._extract_embed_sources, other_embeds, not want_dub)
+
+                if fut_target:
+                    sources = fut_target.result()
+                    res_target = normalize_episode_sources({
+                        "episode": {"sourceUrls": sources}
+                    }, provider_id=self.id, provider_title_id=provider_id, episode=episode) if sources else None
+                else:
+                    res_target = None
+                self._sources_cache[cache_key] = res_target
+
+                try:
+                    oth_sources = fut_other.result()
+                    self._sources_cache[other_key] = normalize_episode_sources({
+                        "episode": {"sourceUrls": oth_sources}
+                    }, provider_id=self.id, provider_title_id=provider_id, episode=episode) if oth_sources else None
+                except Exception:
+                    pass
+        else:
+            if not target_embeds:
+                self._sources_cache[cache_key] = None
+                res_target = None
+            else:
+                sources = self._extract_embed_sources(target_embeds, is_dub=want_dub)
+                res_target = normalize_episode_sources({
+                    "episode": {"sourceUrls": sources}
+                }, provider_id=self.id, provider_title_id=provider_id, episode=episode) if sources else None
+                self._sources_cache[cache_key] = res_target
+
+        return res_target
 
     def browser_url(self, *, provider_id: str = "", episode: str = "") -> str:
+        if provider_id and episode:
+            return f"{self.base_url}/watch/{provider_id}/{episode}"
+        if provider_id:
+            return f"{self.base_url}/watch/{provider_id}/1"
         return self.base_url
 
 PROVIDER_CLASS = Senshi

@@ -115,6 +115,9 @@ def update_available_count_from_episode_ids(show: dict, ttype: str, episode_ids:
     show["availableEpisodes"] = available
     show["_episode_ids"] = list(episode_ids)
     show["_episode_ids_ttype"] = ttype
+    if "_episode_ids_by_ttype" not in show or not isinstance(show["_episode_ids_by_ttype"], dict):
+        show["_episode_ids_by_ttype"] = {}
+    show["_episode_ids_by_ttype"][ttype] = list(episode_ids)
     if labels is not None:
         show["_episode_labels"] = {
             str(key): str(value)
@@ -189,6 +192,14 @@ def ensure_episode_ids(show: dict, ttype: str, status_cb: Callable[[str], None] 
         cached_ids = _normalize_episode_ids(eps)
         if cached_ids:
             show["_episode_ids_ttype"] = ttype
+
+    if not cached_ids:
+        by_ttype = show.get("_episode_ids_by_ttype") or {}
+        if ttype in by_ttype:
+            cached_ids = _normalize_episode_ids(by_ttype[ttype])
+            if cached_ids:
+                show["_episode_ids_ttype"] = ttype
+                show["_episode_ids"] = list(cached_ids)
 
     if cached_ids:
         show["_episode_catalog_state"] = "loaded"

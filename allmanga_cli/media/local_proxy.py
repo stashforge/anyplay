@@ -37,7 +37,7 @@ def _debug_warn(context, error):
 # realistic browser UA passes.
 _DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+    "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
 )
 
 
@@ -52,7 +52,13 @@ class _ThreadedHTTPServer(http.server.ThreadingHTTPServer):
 
 
 def _is_playlist(url, content_type):
-    return ".m3u8" in url.lower() or "mpegurl" in str(content_type or "").lower()
+    u = url.lower()
+    return (
+        ".m3u8" in u
+        or "master.txt" in u
+        or "playlist.txt" in u
+        or "mpegurl" in str(content_type or "").lower()
+    )
 
 
 def _ass_to_vtt(text: str, mpegts_pts: int = 133508) -> str:
@@ -126,7 +132,78 @@ def _add_vtt_padding(vtt_text: str) -> str:
     )
 
 
-def _ensure_vtt(data_bytes: bytes) -> bytes:
+def _add_vlc_vtt_padding(vtt_text: str) -> str:
+    """Adjust cue vertical position for VLC so single-line is at line:88% and
+    multi-line is lifted (e.g. line:83% for 2 lines) without bottom clipping.
+    """
+    lines = vtt_text.splitlines()
+    new_lines = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if "-->" in line:
+            j = i + 1
+            t_count = 0
+            while j < len(lines) and lines[j].strip():
+                t_count += 1
+                j += 1
+            pos_pct = max(70, 88 - (t_count - 1) * 5)
+            timing_base = line.split("line:")[0].strip()
+            new_lines.append(f"{timing_base} line:{pos_pct}%")
+            i += 1
+        else:
+            new_lines.append(line)
+            i += 1
+    return "\n".join(new_lines)
+
+
+def _shift_vtt_timestamps(vtt_text: str, offset_seconds: float) -> str:
+    """Shift WebVTT cue timestamps by offset_seconds (for players like MPV that ignore X-TIMESTAMP-MAP)."""
+    if not offset_seconds:
+        return vtt_text
+
+    def _parse_time(ts: str) -> float:
+        parts = ts.replace(",", ".").split(":")
+        if len(parts) == 3:
+            return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+        if len(parts) == 2:
+            return int(parts[0]) * 60 + float(parts[1])
+        return float(parts[0])
+
+    def _format_time(seconds: float) -> str:
+        s = max(0.0, seconds)
+        h = int(s // 3600)
+        m = int((s % 3600) // 60)
+        rem = s % 60
+        return f"{h:02d}:{m:02d}:{rem:06.3f}"
+
+    lines = vtt_text.splitlines()
+    new_lines = []
+    for line in lines:
+        if "-->" in line:
+            parts = line.split("-->")
+            s_raw = parts[0].strip()
+            rest = parts[1].strip()
+            e_parts = rest.split(None, 1)
+            e_raw = e_parts[0]
+            extra = (" " + e_parts[1]) if len(e_parts) > 1 else ""
+            try:
+                s_shifted = _format_time(_parse_time(s_raw) + offset_seconds)
+                e_shifted = _format_time(_parse_time(e_raw) + offset_seconds)
+                new_lines.append(f"{s_shifted} --> {e_shifted}{extra}")
+            except Exception:
+                new_lines.append(line)
+        else:
+            new_lines.append(line)
+    return "\n".join(new_lines)
+
+
+def _ensure_vtt(
+    data_bytes: bytes,
+    mpegts_pts: int | None = 133508,
+    client_ua: str = "",
+    target_player: str | None = None,
+) -> bytes:
     if not data_bytes:
         return b"WEBVTT\n\n"
     if data_bytes.startswith(b"\x1f\x8b"):
@@ -137,15 +214,52 @@ def _ensure_vtt(data_bytes: bytes) -> bytes:
             pass
     text = data_bytes.decode("utf-8", errors="replace").strip()
     clean_text = text.lstrip("\ufeff")
+    ua = (client_ua or "").lower()
+    t_player = (target_player or "").lower()
+    is_mpv = t_player in ("mpv", "mpvrex") or "mpv" in ua or "lavf" in ua
+    is_vlc = t_player == "vlc" or "vlc" in ua
+
     if "[Events]" in clean_text or "[Script Info]" in clean_text:
-        return _ass_to_vtt(clean_text).encode("utf-8")
+        pts_for_ass = None if is_mpv else mpegts_pts
+        vtt = _ass_to_vtt(clean_text, mpegts_pts=pts_for_ass)
+        if is_vlc:
+            # Strip line:92%,end for VLC multi-line compatibility and apply VLC padding
+            vtt = re.sub(r"\s+line:\d+%,end", "", vtt)
+            vtt = _add_vlc_vtt_padding(vtt)
+        if is_mpv and mpegts_pts:
+            vtt = _shift_vtt_timestamps(vtt, mpegts_pts / 90000.0)
+        return vtt.encode("utf-8")
+
     if clean_text.startswith("WEBVTT"):
-        return _add_vtt_padding(clean_text).encode("utf-8")
+        padded = _add_vlc_vtt_padding(clean_text) if is_vlc else _add_vtt_padding(clean_text)
+        if is_mpv and mpegts_pts:
+            # MPV/FFmpeg ignores X-TIMESTAMP-MAP (FFmpeg #8825); shift cues directly
+            padded = _shift_vtt_timestamps(padded, mpegts_pts / 90000.0)
+        elif mpegts_pts is not None and "X-TIMESTAMP-MAP" not in padded:
+            # ExoPlayer (Next Player) & VLC follow RFC 8216 and parse X-TIMESTAMP-MAP
+            lines = padded.splitlines()
+            for idx, line in enumerate(lines):
+                if line.strip().startswith("WEBVTT"):
+                    lines.insert(idx + 1, f"X-TIMESTAMP-MAP=MPEGTS:{mpegts_pts},LOCAL:00:00:00.000")
+                    break
+            padded = "\n".join(lines)
+        return padded.encode("utf-8")
+
     # If it's an SRT subtitle or text cues, convert commas to dots and prepend WEBWTT
     clean_text = re.sub(r"(\d{1,2}:\d{2}:\d{2}),(\d{3})", r"\1.\2", clean_text)
     clean_text = re.sub(r"(\d{2}:\d{2}),(\d{3})", r"\1.\2", clean_text)
-    clean_text = _add_vtt_padding(clean_text)
-    return f"WEBVTT\n\n{clean_text}\n".encode()
+    clean_text = _add_vlc_vtt_padding(clean_text) if is_vlc else _add_vtt_padding(clean_text)
+
+    if is_mpv and mpegts_pts:
+        clean_text = _shift_vtt_timestamps(clean_text, mpegts_pts / 90000.0)
+        return f"WEBVTT\n\n{clean_text}\n".encode("utf-8")
+
+    header = ["WEBVTT"]
+    if mpegts_pts is not None:
+        header.append(f"X-TIMESTAMP-MAP=MPEGTS:{mpegts_pts},LOCAL:00:00:00.000")
+    header.append("")
+    return ("\n".join(header) + "\n" + clean_text + "\n").encode("utf-8")
+
 
 
 def _prepare_subtitle_entries(subtitles):
@@ -208,12 +322,14 @@ def _prepare_subtitle_entries(subtitles):
 
 def _guess_ext(url):
     path = urllib.parse.urlsplit(url).path
-    name = path.rsplit("/", 1)[-1]
+    name = path.rsplit("/", 1)[-1].lower()
     if "." in name:
         ext = name.rsplit(".", 1)[-1].lower()
         if ext in ("m3u8", "vtt", "mp4", "m4s", "aac", "mp3", "ts"):
             return ext
-    return "m3u8" if ".m3u8" in url.lower() else "vtt" if ".vtt" in url.lower() else "ts"
+        if "master" in name or "playlist" in name:
+            return "m3u8"
+    return "m3u8" if (".m3u8" in url.lower() or "master.txt" in url.lower() or "playlist.txt" in url.lower()) else "vtt" if ".vtt" in url.lower() else "ts"
 
 
 def _build_proxy_server(initial_entries, timeout):
@@ -260,6 +376,11 @@ def _build_proxy_server(initial_entries, timeout):
         return path
 
     def rewrite_playlist(text, base_url, ref, hdrs):
+        if text.startswith("EM3U8v1:"):
+            from .decryption import decrypt_em3u8
+            dec = decrypt_em3u8(text)
+            if dec:
+                text = dec
         base = base_url.rsplit("/", 1)[0] + "/"
         out = []
         for line in text.splitlines():
@@ -387,7 +508,15 @@ def _build_proxy_server(initial_entries, timeout):
                     )
                     if method == "GET" and is_vtt:
                         raw_data = response.read()
-                        vtt_data = _ensure_vtt(raw_data)
+                        client_ua = self.headers.get("User-Agent", "")
+                        pts = entry.get("mpegts_pts", 133508 if entry.get("is_hls", True) else None)
+                        target_player = entry.get("target_player")
+                        vtt_data = _ensure_vtt(
+                            raw_data,
+                            mpegts_pts=pts,
+                            client_ua=client_ua,
+                            target_player=target_player,
+                        )
                         try:
                             self.send_response(200)
                             self.send_header("Content-Type", "text/vtt; charset=utf-8")
@@ -523,7 +652,15 @@ def _build_proxy_server(initial_entries, timeout):
                             raw_chunks = []
                             for chunk in resp.iter_content(65536):
                                 raw_chunks.append(chunk)
-                            vtt_data = _ensure_vtt(b"".join(raw_chunks))
+                            client_ua = self.headers.get("User-Agent", "")
+                            pts = entry.get("mpegts_pts", 133508 if entry.get("is_hls", True) else None)
+                            target_player = entry.get("target_player")
+                            vtt_data = _ensure_vtt(
+                                b"".join(raw_chunks),
+                                mpegts_pts=pts,
+                                client_ua=client_ua,
+                                target_player=target_player,
+                            )
                             try:
                                 self.send_response(200)
                                 self.send_header("Content-Type", "text/vtt; charset=utf-8")
@@ -650,15 +787,26 @@ def _build_proxy_server(initial_entries, timeout):
 
 def start_local_proxy(
         target_url, referer, headers=None, timeout=15,
-        stream_type="mp4", title="stream", subtitles=None):
+        stream_type="mp4", title="stream", subtitles=None,
+        target_player=None):
     validate_http_url(target_url)
     is_hls = str(stream_type).lower() == "hls"
     extension = "m3u8" if is_hls else "mp4"
     base_secret = new_proxy_secret_path(extension, title=title)
     forwarded_headers = proxy_filtered_headers(headers)
 
-    # If HLS and subtitles are provided, generate synthetic master M3U8 with #EXT-X-MEDIA:TYPE=SUBTITLES
-    if is_hls and subtitles:
+    target_fetch_url = target_url
+    hls_res_filter = None
+    if "hls_res=" in target_url:
+        m_res = re.search(r"[?&]hls_res=(\d+p?)", target_url)
+        if m_res:
+            hls_res_filter = m_res.group(1).rstrip("p")
+        target_fetch_url = re.sub(r"[?&]hls_res=[^&]+", "", target_url)
+        if "?" not in target_fetch_url and "&" in target_fetch_url:
+            target_fetch_url = target_fetch_url.replace("&", "?", 1)
+
+    # If HLS and (subtitles or resolution filter) are provided, generate synthetic master M3U8
+    if is_hls and (subtitles or hls_res_filter):
         master_secret = base_secret
         video_secret = new_proxy_secret_path("m3u8")
 
@@ -666,13 +814,13 @@ def start_local_proxy(
             master_secret: {"kind": "synthetic", "text": ""},
             video_secret: {
                 "kind": "fetch",
-                "url": target_url,
+                "url": target_fetch_url,
                 "ref": referer,
                 "hdrs": dict(forwarded_headers),
             },
         }
 
-        sub_list = _prepare_subtitle_entries(subtitles)
+        sub_list = _prepare_subtitle_entries(subtitles) if subtitles else []
         sub_entries = []
         for s in sub_list:
             if s["is_m3u8"]:
@@ -692,6 +840,9 @@ def start_local_proxy(
                     "ref": referer,
                     "hdrs": dict(forwarded_headers),
                     "content_type": "text/vtt; charset=utf-8",
+                    "mpegts_pts": 133508 if is_hls else None,
+                    "is_hls": is_hls,
+                    "target_player": target_player,
                 }
                 initial[m3u8_secret] = {
                     "kind": "synthetic",
@@ -728,21 +879,37 @@ def start_local_proxy(
                 f'LANGUAGE="{sub["lang"]}",DEFAULT={sub["default"]},AUTOSELECT={sub["default"]},FORCED=NO,URI="{sub_m3u8_url}"'
             )
 
-        master_lines.append("")
+        if sub_entries:
+            master_lines.append("")
 
         # Inspect target_url to see if it's already a master or a single stream
         video_local_url = f"http://127.0.0.1:{port}{video_secret}"
+
         try:
-            req = urllib.request.Request(target_url)
+            req = urllib.request.Request(target_fetch_url)
             req.add_header("User-Agent", forwarded_headers.get("User-Agent", _DEFAULT_UA))
             if referer:
                 req.add_header("Referer", referer)
+                if "Origin" not in forwarded_headers and "origin" not in forwarded_headers:
+                    parsed_ref = urllib.parse.urlparse(referer)
+                    req.add_header("Origin", f"{parsed_ref.scheme}://{parsed_ref.netloc}")
+            for key, value in forwarded_headers.items():
+                if key.casefold() in ("user-agent", "referer"):
+                    continue
+                req.add_header(key, value)
             with urllib.request.urlopen(req, context=SSL_CTX_SECURE, timeout=max(1, float(timeout))) as resp:
                 body = resp.read().decode("utf-8", errors="replace")
 
+            if body.startswith("EM3U8v1:"):
+                from .decryption import decrypt_em3u8
+                dec = decrypt_em3u8(body)
+                if dec:
+                    body = dec
+
             if "#EXT-X-STREAM-INF" in body:
-                base_target = target_url.rsplit("/", 1)[0] + "/"
+                base_target = target_fetch_url.rsplit("/", 1)[0] + "/"
                 pending_inf = None
+                skip_next_var = False
                 for line in body.splitlines():
                     stripped = line.strip()
                     if not stripped:
@@ -758,26 +925,42 @@ def start_local_proxy(
                         master_lines.append(stripped)
                         continue
                     if stripped.startswith("#EXT-X-STREAM-INF:"):
-                        if 'SUBTITLES="' in stripped:
-                            pending_inf = re.sub(r'SUBTITLES="[^"]*"', 'SUBTITLES="subs"', stripped)
+                        if hls_res_filter:
+                            res_m = re.search(r"RESOLUTION=\d+x(\d+)", stripped)
+                            if res_m and res_m.group(1) != hls_res_filter:
+                                pending_inf = None
+                                skip_next_var = True
+                                continue
+                        skip_next_var = False
+                        if sub_entries:
+                            if 'SUBTITLES="' in stripped:
+                                pending_inf = re.sub(r'SUBTITLES="[^"]*"', 'SUBTITLES="subs"', stripped)
+                            else:
+                                pending_inf = f'{stripped},SUBTITLES="subs"'
                         else:
-                            pending_inf = f'{stripped},SUBTITLES="subs"'
+                            pending_inf = stripped
                         master_lines.append(pending_inf)
                         continue
                     if stripped.startswith("#"):
                         if not stripped.startswith("#EXTM3U") and not stripped.startswith("#EXT-X-VERSION"):
                             master_lines.append(stripped)
                         continue
-                    if pending_inf is not None:
+                    if pending_inf is not None and not skip_next_var:
                         var_abs = urllib.parse.urljoin(base_target, stripped)
                         var_path = _register(var_abs, referer, forwarded_headers)
                         master_lines.append(f"http://127.0.0.1:{port}{var_path}")
                         pending_inf = None
             else:
-                master_lines.append('#EXT-X-STREAM-INF:BANDWIDTH=2889119,RESOLUTION=1920x1080,SUBTITLES="subs"')
+                if sub_entries:
+                    master_lines.append('#EXT-X-STREAM-INF:BANDWIDTH=2889119,RESOLUTION=1920x1080,SUBTITLES="subs"')
+                else:
+                    master_lines.append('#EXT-X-STREAM-INF:BANDWIDTH=2889119,RESOLUTION=1920x1080')
                 master_lines.append(video_local_url)
         except Exception:
-            master_lines.append('#EXT-X-STREAM-INF:BANDWIDTH=2889119,RESOLUTION=1920x1080,SUBTITLES="subs"')
+            if sub_entries:
+                master_lines.append('#EXT-X-STREAM-INF:BANDWIDTH=2889119,RESOLUTION=1920x1080,SUBTITLES="subs"')
+            else:
+                master_lines.append('#EXT-X-STREAM-INF:BANDWIDTH=2889119,RESOLUTION=1920x1080')
             master_lines.append(video_local_url)
 
         master_lines.append("")
@@ -787,7 +970,7 @@ def start_local_proxy(
     initial = {
         base_secret: {
             "kind": "fetch",
-            "url": target_url,
+            "url": target_fetch_url,
             "ref": referer,
             "hdrs": dict(forwarded_headers),
         }
@@ -800,7 +983,7 @@ def start_local_proxy(
 def start_local_dual_proxy(
         video_url, audio_url, referer, headers=None, timeout=15,
         width=1280, height=720, bandwidth=2_400_000, title="stream",
-        subtitles=None, audio_tracks=None):
+        subtitles=None, audio_tracks=None, target_player=None):
     """Like start_local_proxy, but for sources that split video and audio
     into two separate HLS manifests (Dailymotion does this) with no
     combined master. Builds the master ourselves; both sub-manifests go
@@ -877,6 +1060,9 @@ def start_local_dual_proxy(
                 "ref": referer,
                 "hdrs": dict(forwarded_headers),
                 "content_type": "text/vtt; charset=utf-8",
+                "mpegts_pts": 133508,
+                "is_hls": True,
+                "target_player": target_player,
             }
             initial[m3u8_secret] = {
                 "kind": "synthetic",

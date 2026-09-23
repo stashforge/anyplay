@@ -162,6 +162,7 @@ def play_android(
                 title=media_title,
                 subtitles=subtitles,
                 audio_tracks=stream.get("audio_tracks"),
+                target_player=player,
             )
             replace_active_local_proxy(proxy_server)
             intent_type = "video/*"
@@ -185,6 +186,7 @@ def play_android(
                 title=media_title,
                 subtitles=subtitles,
                 audio_tracks=stream.get("audio_tracks"),
+                target_player=player,
             )
             replace_active_local_proxy(proxy_server)
             intent_type = "video/*"
@@ -204,6 +206,7 @@ def play_android(
                 stream_type=stream.get("type", "mp4"),
                 title=media_title,
                 subtitles=subtitles,
+                target_player=player,
             )
             replace_active_local_proxy(proxy_server)
             intent_type = "video/*"

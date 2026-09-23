@@ -42,7 +42,7 @@
       "domains": ["https://mkissa.to", "https://allanime.to"],
       "type": "anime",
       "languages": ["sub", "dub"],
-      "status": "active",
+      "status": "disabled",
       "engine": "hybrid",
       "features": ["anilist_sync", "search", "fallback_servers"]
     },
@@ -75,10 +75,10 @@
     },
     "senshi": {
       "name": "Senshi",
-      "domains": ["https://senshi.live", "https://senshi.tv"],
+      "domains": ["https://senshi.to"],
       "type": "anime",
       "languages": ["sub", "dub"],
-      "status": "disabled",
+      "status": "active",
       "engine": "api",
       "features": ["search"]
     },
