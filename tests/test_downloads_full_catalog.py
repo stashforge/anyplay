@@ -3,9 +3,9 @@ from unittest.mock import MagicMock, patch
 import os
 import tempfile
 
-from allmanga_cli.context import MachineState, UiState, CliFlags
-from allmanga_cli.app import downloads, playback_episodes, playback_menu
-from allmanga_cli.domain.episodes import build_progress_entries
+from media_cli.context import MachineState, UiState, CliFlags
+from media_cli.app import downloads, playback_episodes, playback_menu
+from media_cli.domain.episodes import build_progress_entries
 
 
 class TestDownloadsFullCatalog(unittest.TestCase):
@@ -41,13 +41,13 @@ class TestDownloadsFullCatalog(unittest.TestCase):
             cfg = {"download_dir": tmpdir}
             flags = CliFlags()
 
-            with patch("allmanga_cli.app.downloads.load_downloads_db", return_value=db_data), \
-                 patch("allmanga_cli.app.downloads.save_downloads_db"), \
-                 patch("allmanga_cli.app.downloads.tui_pick", return_value=0), \
-                 patch("allmanga_cli.app_core.is_online", return_value=False), \
-                 patch("allmanga_cli.app_core.get_history_entry", return_value=None), \
-                 patch("allmanga_cli.core.storage.load_history", return_value=[]), \
-                 patch("allmanga_cli.app.downloads.set_ui_context") as mock_set_ctx:
+            with patch("media_cli.app.downloads.load_downloads_db", return_value=db_data), \
+                 patch("media_cli.app.downloads.save_downloads_db"), \
+                 patch("media_cli.app.downloads.tui_pick", return_value=0), \
+                 patch("media_cli.app_core.is_online", return_value=False), \
+                 patch("media_cli.app_core.get_history_entry", return_value=None), \
+                 patch("media_cli.core.storage.load_history", return_value=[]), \
+                 patch("media_cli.app.downloads.set_ui_context") as mock_set_ctx:
 
                 res = downloads.handle_downloads_state(flags, ui, ms, cfg, MagicMock(), "sub", MagicMock(return_value=False))
 
@@ -125,8 +125,8 @@ class TestDownloadsFullCatalog(unittest.TestCase):
             captured_hints_fn = kwargs.get("hints")
             return -2  # return to details
 
-        with patch("allmanga_cli.app_core.ensure_episode_ids", return_value=eids), \
-             patch("allmanga_cli.app.playback_episodes.tui_pick", side_effect=fake_tui_pick):
+        with patch("media_cli.app_core.ensure_episode_ids", return_value=eids), \
+             patch("media_cli.app.playback_episodes.tui_pick", side_effect=fake_tui_pick):
 
             res = playback_episodes.handle_episode_state(flags, ui, ms, cfg, MagicMock(), "sub", MagicMock(return_value=False))
             self.assertEqual(res, "DETAILS")
@@ -175,8 +175,8 @@ class TestDownloadsFullCatalog(unittest.TestCase):
                     return i
             return -2
 
-        with patch("allmanga_cli.app.playback_menu.tui_pick", side_effect=pick_action), \
-             patch("allmanga_cli.app_core.save_config") as mock_save:
+        with patch("media_cli.app.playback_menu.tui_pick", side_effect=pick_action), \
+             patch("media_cli.app_core.save_config") as mock_save:
 
             playback_menu.handle_action_menu_state(flags, ui, ms, cfg, MagicMock(), "sub", MagicMock(return_value=False))
             self.assertTrue(ms.auto_download_next)
@@ -190,8 +190,8 @@ class TestDownloadsFullCatalog(unittest.TestCase):
                     return i
             return -2
 
-        with patch("allmanga_cli.app.playback_menu.tui_pick", side_effect=pick_delete), \
-             patch("allmanga_cli.app_core.save_config") as mock_save:
+        with patch("media_cli.app.playback_menu.tui_pick", side_effect=pick_delete), \
+             patch("media_cli.app_core.save_config") as mock_save:
 
             playback_menu.handle_action_menu_state(flags, ui, ms, cfg, MagicMock(), "sub", MagicMock(return_value=False))
             self.assertTrue(ms.auto_delete_watched)
@@ -231,9 +231,9 @@ class TestDownloadsFullCatalog(unittest.TestCase):
             captured_hints_fn = kwargs.get("hints")
             return -2
 
-        with patch("allmanga_cli.app_core.ensure_episode_ids", return_value=eids), \
-             patch("allmanga_cli.app_core.find_offline_file_for_episode", return_value=None), \
-             patch("allmanga_cli.app.playback_episodes.tui_pick", side_effect=fake_tui_pick):
+        with patch("media_cli.app_core.ensure_episode_ids", return_value=eids), \
+             patch("media_cli.app_core.find_offline_file_for_episode", return_value=None), \
+             patch("media_cli.app.playback_episodes.tui_pick", side_effect=fake_tui_pick):
 
             res = playback_episodes.handle_episode_state(flags, ui, ms, cfg, MagicMock(), "sub", MagicMock(return_value=False))
             self.assertEqual(res, "DETAILS")

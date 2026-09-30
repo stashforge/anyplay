@@ -1,11 +1,11 @@
 import unittest
 
-from allmanga_cli.domain.episodes import (
+from media_cli.domain.episodes import (
     build_episode_map,
     create_episode_entry,
     extract_episode_tags,
 )
-from allmanga_cli.providers.shared.schema import build_catalog
+from media_cli.providers.shared.schema import build_catalog
 
 
 class TestEpisodeMap(unittest.TestCase):

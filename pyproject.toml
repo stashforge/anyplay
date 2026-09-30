@@ -1,7 +1,7 @@
 [project]
-name = "allmanga-cli"
+name = "anyplay"
 version = "0.8.7"
-description = "Terminal anime stream player"
+description = "Terminal media stream player"
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
@@ -11,8 +11,8 @@ dependencies = [
 ]
 
 [project.scripts]
-allmanga-cli = "allmanga_cli.cli.main:run"
-allmanga = "allmanga_cli.cli.main:run"
+anyplay = "media_cli.cli.main:run"
+allmanga-cli = "media_cli.cli.main:run"
 
 [project.optional-dependencies]
 allanime = [
@@ -33,7 +33,7 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["allmanga_cli*"]
+include = ["media_cli*"]
 
 [tool.setuptools.package-data]
 "*" = ["*.json"]
@@ -81,10 +81,10 @@ implicit_optional = false
 ignore_missing_imports = true
 namespace_packages = true
 explicit_package_bases = true
-files = ["allmanga_cli"]
+files = ["media_cli"]
 
 [[tool.mypy.overrides]]
-module = ["allmanga_cli.*"]
+module = ["media_cli.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
@@ -95,7 +95,7 @@ addopts = "-v --tb=short"
 pythonpath = ["."]
 
 [tool.coverage.run]
-source = ["allmanga_cli"]
+source = ["media_cli"]
 omit = ["tests/*", "*/__pycache__/*"]
 
 [tool.coverage.report]

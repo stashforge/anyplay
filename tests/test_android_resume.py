@@ -3,8 +3,8 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
-from allmanga_cli.media.local_proxy import _build_proxy_server
-from allmanga_cli.playback.android import play_android
+from media_cli.media.local_proxy import _build_proxy_server
+from media_cli.playback.android import play_android
 
 
 class TestAndroidResume(unittest.TestCase):
@@ -45,7 +45,7 @@ class TestAndroidResume(unittest.TestCase):
             "/seg1.ts": {"kind": "fetch", "url": "https://cdn.example.com/seg1.ts", "ref": "", "hdrs": {}, "time_offset": 45.0},
             "/seg2.ts": {"kind": "fetch", "url": "https://cdn.example.com/seg2.ts", "ref": "", "hdrs": {}, "time_offset": 47.0},
         }
-        with patch("allmanga_cli.core.storage.save_resume_time") as mock_save:
+        with patch("media_cli.core.storage.save_resume_time") as mock_save:
             port, registry, register, server = _build_proxy_server(
                 initial, timeout=5, show_id="show_abc", episode=2
             )
@@ -87,8 +87,8 @@ class TestAndroidResume(unittest.TestCase):
                 server.server_close()
 
     @patch("subprocess.run")
-    @patch("allmanga_cli.playback.android.start_local_proxy")
-    @patch("allmanga_cli.core.storage.get_resume_time")
+    @patch("media_cli.playback.android.start_local_proxy")
+    @patch("media_cli.core.storage.get_resume_time")
     def test_play_android_resume_intent_extras_next_mpv_mpvrex(
         self, mock_get_resume, mock_proxy, mock_run
     ):
@@ -144,8 +144,8 @@ class TestAndroidResume(unittest.TestCase):
         self.assertEqual(cmd_mpvrx[pos_idx + 1], "90000")
 
     @patch("subprocess.run")
-    @patch("allmanga_cli.playback.android.start_local_proxy")
-    @patch("allmanga_cli.core.storage.get_resume_time")
+    @patch("media_cli.playback.android.start_local_proxy")
+    @patch("media_cli.core.storage.get_resume_time")
     def test_play_android_vlc_excludes_resume_extras(
         self, mock_get_resume, mock_proxy, mock_run
     ):
@@ -163,8 +163,8 @@ class TestAndroidResume(unittest.TestCase):
         self.assertNotIn("position", cmd_vlc)
 
     @patch("subprocess.run")
-    @patch("allmanga_cli.playback.android.start_local_proxy")
-    @patch("allmanga_cli.core.storage.get_resume_time")
+    @patch("media_cli.playback.android.start_local_proxy")
+    @patch("media_cli.core.storage.get_resume_time")
     def test_play_android_passes_show_id_and_episode_to_proxy(
         self, mock_get_resume, mock_proxy, mock_run
     ):
@@ -217,7 +217,7 @@ class TestAndroidResume(unittest.TestCase):
             # Segment requested at 7m40s (460s) -> playhead around 7m20s (440s)
             "/seg_740.ts": {"kind": "fetch", "url": "https://cdn.example.com/seg_740.ts", "ref": "", "hdrs": {}, "time_offset": 460.0},
         }
-        with patch("allmanga_cli.core.storage.save_resume_time") as mock_save:
+        with patch("media_cli.core.storage.save_resume_time") as mock_save:
             port, registry, register, server = _build_proxy_server(
                 initial, timeout=5, show_id="show_lead", episode=4
             )
@@ -239,13 +239,13 @@ class TestAndroidResume(unittest.TestCase):
 
     def test_dynamic_action_hints_fn_evaluates_live_resume_time(self):
         """Verify action menu hints callback dynamically reads latest resume timestamp."""
-        from allmanga_cli import app_core
+        from media_cli import app_core
 
         # Test the dynamic hint evaluation logic
         opts = ["Continue", "Play Next", "Mirrors"]
         cur_rt = 440  # 07:20
 
-        with patch("allmanga_cli.app_core.get_resume_time", return_value=cur_rt):
+        with patch("media_cli.app_core.get_resume_time", return_value=cur_rt):
             # If resume is 440s (> 35s), eff_r = 440 - 30 = 410s (06:50)
             eff_r = cur_rt - 30
             expected_str = f"resume EP 4 from {app_core.format_video_time(eff_r)}"
@@ -255,7 +255,7 @@ class TestAndroidResume(unittest.TestCase):
 
     def test_handle_progress_completion_updates_action_show_and_resets_resume(self):
         """Verify on_progress completion updates action_show in memory and resets resume time to 0."""
-        from allmanga_cli.playback.android import play_android
+        from media_cli.playback.android import play_android
 
         action_show = {
             "_id": "show_123",
@@ -281,9 +281,9 @@ class TestAndroidResume(unittest.TestCase):
             "duration": 1439,
         }
 
-        with patch("allmanga_cli.playback.android.start_local_dual_proxy", side_effect=mock_proxy), \
-             patch("allmanga_cli.core.storage.save_resume_time") as mock_save_resume, \
-             patch("allmanga_cli.core.storage.save_history") as mock_save_hist, \
+        with patch("media_cli.playback.android.start_local_dual_proxy", side_effect=mock_proxy), \
+             patch("media_cli.core.storage.save_resume_time") as mock_save_resume, \
+             patch("media_cli.core.storage.save_history") as mock_save_hist, \
              patch("subprocess.run") as mock_subproc:
             mock_subproc.return_value = MagicMock(returncode=0, stdout="Starting: Intent")
 
@@ -313,8 +313,8 @@ class TestAndroidResume(unittest.TestCase):
 
     def test_action_menu_live_fn_updates_options_on_completion(self):
         """Verify action menu live_fn replaces Continue with Play Next and updates Mark Watched to Mark Unwatched."""
-        from allmanga_cli.context import CliFlags, UiState, MachineState
-        from allmanga_cli.app.playback_menu import handle_action_menu_state
+        from media_cli.context import CliFlags, UiState, MachineState
+        from media_cli.app.playback_menu import handle_action_menu_state
 
         flags = CliFlags()
         ui = UiState()
@@ -352,10 +352,10 @@ class TestAndroidResume(unittest.TestCase):
         def mock_get_resume(sid, ep):
             return resume_dict.get((sid, str(ep)), 0)
 
-        with patch("allmanga_cli.app_core.get_resume_time", side_effect=mock_get_resume), \
-             patch("allmanga_cli.core.storage.get_resume_time", side_effect=mock_get_resume), \
-             patch("allmanga_cli.app.playback_menu.tui_pick", side_effect=mock_tui_pick), \
-             patch("allmanga_cli.app_core.build_info_panel"):
+        with patch("media_cli.app_core.get_resume_time", side_effect=mock_get_resume), \
+             patch("media_cli.core.storage.get_resume_time", side_effect=mock_get_resume), \
+             patch("media_cli.app.playback_menu.tui_pick", side_effect=mock_tui_pick), \
+             patch("media_cli.app_core.build_info_panel"):
 
             handle_action_menu_state(flags, ui, ms, {}, MagicMock(), "sub", lambda *a: False)
 

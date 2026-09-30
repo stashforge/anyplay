@@ -3,14 +3,14 @@ import tempfile
 from unittest.mock import MagicMock, patch
 import pytest
 
-from allmanga_cli.ui.modals import _show_needs_enrichment
-from allmanga_cli.core import storage
-from allmanga_cli.domain.metadata import apply_provider_metadata_to_history_show
-from allmanga_cli.core.anilist import (
+from media_cli.ui.modals import _show_needs_enrichment
+from media_cli.core import storage
+from media_cli.domain.metadata import apply_provider_metadata_to_history_show
+from media_cli.core.anilist import (
     get_show_anilist_id,
     refresh_history_anilist_airing_batch,
 )
-from allmanga_cli.state import paths
+from media_cli.state import paths
 
 
 def test_show_needs_enrichment():
@@ -165,8 +165,8 @@ def test_refresh_history_anilist_airing_batch_enriches_full_metadata(tmp_path):
         }
     ]
 
-    with patch("allmanga_cli.services.anilist.fetch", return_value=mock_raw_media), \
-         patch("allmanga_cli.core.anilist._provider_catalog_refresh_fn", None):
+    with patch("media_cli.services.anilist.fetch", return_value=mock_raw_media), \
+         patch("media_cli.core.anilist._provider_catalog_refresh_fn", None):
         changed = refresh_history_anilist_airing_batch(history_entries)
         assert changed is True
 

@@ -5,21 +5,21 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from allmanga_cli.domain.history import (
+from media_cli.domain.history import (
     history_entry_category,
     refresh_history_entry_provider_catalog,
 )
-from allmanga_cli.core import storage
-from allmanga_cli.state import paths
-from allmanga_cli.domain.metadata import (
+from media_cli.core import storage
+from media_cli.state import paths
+from media_cli.domain.metadata import (
     format_next_airing,
     apply_provider_metadata_to_history_show,
 )
-from allmanga_cli.providers.shared.wordpress import (
+from media_cli.providers.shared.wordpress import (
     parse_series,
     WordPressAnimeProvider,
 )
-from allmanga_cli.core.terminal import display_width as _display_width
+from media_cli.core.terminal import display_width as _display_width
 
 
 def test_history_caught_up_to_active_transition():
@@ -243,7 +243,7 @@ def test_wordpress_parse_series_drops_unreleased_countdown():
 
 def test_poster_footer_line_when_cover_ready():
     import hashlib
-    from allmanga_cli.ui.poster import PosterManager
+    from media_cli.ui.poster import PosterManager
 
     pm = PosterManager(
         enabled=lambda: True,
@@ -268,7 +268,7 @@ def test_poster_footer_line_when_cover_ready():
 
 def test_poster_footer_line_preserves_navigation_during_loading():
     import time
-    from allmanga_cli.ui.poster import PosterManager
+    from media_cli.ui.poster import PosterManager
 
     pm = PosterManager(
         enabled=lambda: True,
@@ -293,7 +293,7 @@ def test_poster_footer_line_preserves_navigation_during_loading():
 
 
 def test_poster_footer_line_clears_loading_if_raw_exists_even_if_status_lagged():
-    from allmanga_cli.ui.poster import PosterManager
+    from media_cli.ui.poster import PosterManager
 
     pm = PosterManager(
         enabled=lambda: True,
@@ -318,7 +318,7 @@ def test_poster_footer_line_clears_loading_if_raw_exists_even_if_status_lagged()
 
 def test_poster_footer_line_clears_loading_if_cached_in_raw_cache():
     import hashlib
-    from allmanga_cli.ui.poster import PosterManager
+    from media_cli.ui.poster import PosterManager
 
     pm = PosterManager(
         enabled=lambda: True,
@@ -345,7 +345,7 @@ def test_poster_footer_line_clears_loading_if_cached_in_raw_cache():
 
 
 def test_cached_header_fn_clears_enriching_metadata():
-    from allmanga_cli.ui.panels import render_search_header
+    from media_cli.ui.panels import render_search_header
 
     shows = [{
         "_id": "1",
@@ -384,7 +384,7 @@ def test_cached_header_fn_clears_enriching_metadata():
 
 
 def test_search_header_shows_loading_screen_when_results_empty():
-    from allmanga_cli.ui.panels import render_search_header
+    from media_cli.ui.panels import render_search_header
 
     # When search is initiated, shows list is empty ([]), selected_idx is -1
     shows = []
@@ -404,7 +404,7 @@ def test_search_header_shows_loading_screen_when_results_empty():
 
 
 def test_write_history_progress_url_episode_clears_has_new_release(monkeypatch):
-    from allmanga_cli.core.storage import write_history_progress, load_history
+    from media_cli.core.storage import write_history_progress, load_history
 
     show = {
         "_id": "test-wp-show",
@@ -420,7 +420,7 @@ def test_write_history_progress_url_episode_clears_has_new_release(monkeypatch):
 
 
 def test_history_provider_is_completed_checks_anilist_status():
-    from allmanga_cli.domain.history import history_provider_is_completed, history_full_episode_count
+    from media_cli.domain.history import history_provider_is_completed, history_full_episode_count
 
     show_al_finished = {
         "_id": "test-show",
@@ -433,7 +433,7 @@ def test_history_provider_is_completed_checks_anilist_status():
     assert history_full_episode_count(entry) == 24
 
 def test_app_core_download_episode_and_process_exports():
-    import allmanga_cli.app_core as app_core
+    import media_cli.app_core as app_core
     from unittest.mock import patch, MagicMock
 
     assert hasattr(app_core, "download_episode")
@@ -496,7 +496,7 @@ def test_cursor_solid_during_movement():
 
 def test_download_episode_uses_local_proxy_for_cloudflare_stream():
     from unittest.mock import patch, MagicMock
-    from allmanga_cli.media.download import download_episode
+    from media_cli.media.download import download_episode
 
     mock_stream = {
         "link": "https://vault-16.owocdn.top/stream/123/uwu.m3u8",
@@ -507,8 +507,8 @@ def test_download_episode_uses_local_proxy_for_cloudflare_stream():
 
     mock_server = MagicMock()
     with patch("shutil.which", return_value="/usr/bin/yt-dlp"), \
-         patch("allmanga_cli.media.local_proxy.start_local_proxy", return_value=("http://127.0.0.1:8080/stream.m3u8", mock_server)) as mock_start_proxy, \
-         patch("allmanga_cli.media.local_proxy.stop_local_proxy") as mock_stop_proxy, \
+         patch("media_cli.media.local_proxy.start_local_proxy", return_value=("http://127.0.0.1:8080/stream.m3u8", mock_server)) as mock_start_proxy, \
+         patch("media_cli.media.local_proxy.stop_local_proxy") as mock_stop_proxy, \
          patch("subprocess.Popen") as mock_popen:
 
         mock_proc = MagicMock()
@@ -537,8 +537,8 @@ def test_download_episode_uses_local_proxy_for_cloudflare_stream():
 def test_download_mode_restores_terminal_and_returns_to_details(monkeypatch):
     import argparse
     from unittest.mock import patch, MagicMock
-    from allmanga_cli.context import CliFlags, UiState, MachineState
-    from allmanga_cli.app.playback_player import handle_play_state
+    from media_cli.context import CliFlags, UiState, MachineState
+    from media_cli.app.playback_player import handle_play_state
 
     flags = CliFlags()
     ui = UiState()
@@ -562,13 +562,13 @@ def test_download_mode_restores_terminal_and_returns_to_details(monkeypatch):
         extra_args=[],
     )
 
-    with patch("allmanga_cli.app_core.restore_terminal") as mock_restore_term, \
-         patch("allmanga_cli.app_core.enter_alt_screen") as mock_enter_alt, \
-         patch("allmanga_cli.app_core.ensure_episode_ids", return_value=["1", "2", "3", "4"]), \
-         patch("allmanga_cli.app_core.get_episode_data", return_value={"episode": {"sourceUrls": []}}), \
-         patch("allmanga_cli.core.streams.start_bg_resolve"), \
-         patch("allmanga_cli.app_core._stream_snapshot", return_value=[{"source_name": "Test", "link": "http://test.m3u8"}]), \
-         patch("allmanga_cli.app_core.download_episode", return_value=True), \
+    with patch("media_cli.app_core.restore_terminal") as mock_restore_term, \
+         patch("media_cli.app_core.enter_alt_screen") as mock_enter_alt, \
+         patch("media_cli.app_core.ensure_episode_ids", return_value=["1", "2", "3", "4"]), \
+         patch("media_cli.app_core.get_episode_data", return_value={"episode": {"sourceUrls": []}}), \
+         patch("media_cli.core.streams.start_bg_resolve"), \
+         patch("media_cli.app_core._stream_snapshot", return_value=[{"source_name": "Test", "link": "http://test.m3u8"}]), \
+         patch("media_cli.app_core.download_episode", return_value=True), \
          patch("sys.stdin.isatty", return_value=True), \
          patch("time.sleep"):
 
@@ -588,7 +588,7 @@ def test_download_mode_restores_terminal_and_returns_to_details(monkeypatch):
 
 def test_is_online_detects_status_and_caches():
     from unittest.mock import patch
-    import allmanga_cli.core.network as net
+    import media_cli.core.network as net
 
     net._online_cache = None
     net._cache_time = 0.0
@@ -612,7 +612,7 @@ def test_is_online_detects_status_and_caches():
 def test_delete_offline_episode_disk_and_db():
     import json
     from pathlib import Path
-    from allmanga_cli.core.storage import delete_offline_episode, load_downloads_db
+    from media_cli.core.storage import delete_offline_episode, load_downloads_db
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_path = Path(tmpdir)
@@ -637,7 +637,7 @@ def test_delete_offline_episode_disk_and_db():
         }
         db_file.write_text(json.dumps(initial_db))
 
-        with patch("allmanga_cli.state.paths.DOWNLOADS_DB_PATH", str(db_file)):
+        with patch("media_cli.state.paths.DOWNLOADS_DB_PATH", str(db_file)):
             cfg = {"download_dir": str(shows_dir)}
             # Delete EP 1
             ok = delete_offline_episode("Test Show", "1", cfg=cfg)
@@ -655,8 +655,8 @@ def test_delete_offline_episode_disk_and_db():
 
 
 def test_downloads_mode_defaults_to_first_downloaded_episode():
-    from allmanga_cli.context import CliFlags, UiState, MachineState
-    from allmanga_cli.app.details import handle_details_state
+    from media_cli.context import CliFlags, UiState, MachineState
+    from media_cli.app.details import handle_details_state
 
     flags = CliFlags()
     ui = UiState()
@@ -681,8 +681,8 @@ def test_downloads_mode_defaults_to_first_downloaded_episode():
     ms._is_downloads = True
     ms._download_files = {"3": "/tmp/Slime S4/Slime S4 - Episode 3.mp4"}
 
-    with patch("allmanga_cli.app_core.build_info_panel"), \
-         patch("allmanga_cli.app.playback_menu.handle_action_menu_state", return_value="QUIT"):
+    with patch("media_cli.app_core.build_info_panel"), \
+         patch("media_cli.app.playback_menu.handle_action_menu_state", return_value="QUIT"):
         next_state = handle_details_state(
             flags, ui, ms, {}, MagicMock(), "sub", lambda *a: False
         )
@@ -693,8 +693,8 @@ def test_downloads_mode_defaults_to_first_downloaded_episode():
 
 
 def test_playback_menu_session_toggles():
-    from allmanga_cli.context import CliFlags, UiState, MachineState
-    from allmanga_cli.app.playback_menu import handle_action_menu_state
+    from media_cli.context import CliFlags, UiState, MachineState
+    from media_cli.app.playback_menu import handle_action_menu_state
 
     flags = CliFlags()
     ui = UiState()
@@ -726,8 +726,8 @@ def test_playback_menu_session_toggles():
                 return i
         return 0
 
-    with patch("allmanga_cli.app.playback_menu.tui_pick", side_effect=mock_pick), \
-         patch("allmanga_cli.app_core.build_info_panel"):
+    with patch("media_cli.app.playback_menu.tui_pick", side_effect=mock_pick), \
+         patch("media_cli.app_core.build_info_panel"):
         next_state = handle_action_menu_state(flags, ui, ms, {}, MagicMock(), "sub", lambda *a: False)
         assert next_state == "DETAILS"
         assert ms.auto_download_next is True
@@ -736,8 +736,8 @@ def test_playback_menu_session_toggles():
 
 
 def test_playback_episodes_downloads_mode_options_and_hints():
-    from allmanga_cli.context import CliFlags, UiState, MachineState
-    from allmanga_cli.app.playback_episodes import handle_episode_state
+    from media_cli.context import CliFlags, UiState, MachineState
+    from media_cli.app.playback_episodes import handle_episode_state
 
     flags = CliFlags()
     ui = UiState()
@@ -777,10 +777,10 @@ def test_playback_episodes_downloads_mode_options_and_hints():
         captured_delete_prompt = delete_prompt
         return -2  # Esc / back
 
-    with patch("allmanga_cli.app.playback_episodes.tui_pick", side_effect=mock_pick), \
-         patch("allmanga_cli.app_core.is_online", return_value=True), \
-         patch("allmanga_cli.app_core.get_local_progress", return_value=None), \
-         patch("allmanga_cli.app_core.build_info_panel"):
+    with patch("media_cli.app.playback_episodes.tui_pick", side_effect=mock_pick), \
+         patch("media_cli.app_core.is_online", return_value=True), \
+         patch("media_cli.app_core.get_local_progress", return_value=None), \
+         patch("media_cli.app_core.build_info_panel"):
         next_state = handle_episode_state(flags, ui, ms, {}, MagicMock(), "sub", lambda *a: False)
         assert next_state == "DETAILS"
 
@@ -813,8 +813,8 @@ def test_playback_episodes_downloads_mode_options_and_hints():
 
 
 def test_playback_player_rolling_deletion():
-    from allmanga_cli.context import CliFlags, UiState, MachineState
-    from allmanga_cli.app.playback_player import handle_play_state
+    from media_cli.context import CliFlags, UiState, MachineState
+    from media_cli.app.playback_player import handle_play_state
     import argparse
 
     flags = CliFlags()
@@ -863,12 +863,12 @@ def test_playback_player_rolling_deletion():
         deleted_eps.append(str(ep))
         return True
 
-    with patch("allmanga_cli.app_core.enter_alt_screen"), \
-         patch("allmanga_cli.app_core._exit_player_screen"), \
-         patch("allmanga_cli.app_core.play_desktop", return_value=("EOF", 100.0, 1400.0, 1400.0, 1400.0)), \
-         patch("allmanga_cli.app.playback_player.playback_updates_history", return_value=True), \
-         patch("allmanga_cli.app_core.delete_offline_episode", side_effect=mock_delete), \
-         patch("allmanga_cli.core.storage.update_offline_watch_status", return_value=True):
+    with patch("media_cli.app_core.enter_alt_screen"), \
+         patch("media_cli.app_core._exit_player_screen"), \
+         patch("media_cli.app_core.play_desktop", return_value=("EOF", 100.0, 1400.0, 1400.0, 1400.0)), \
+         patch("media_cli.app.playback_player.playback_updates_history", return_value=True), \
+         patch("media_cli.app_core.delete_offline_episode", side_effect=mock_delete), \
+         patch("media_cli.core.storage.update_offline_watch_status", return_value=True):
         next_state = handle_play_state(
             flags, ui, ms, {}, args, "sub", "best", lambda *a: False
         )
@@ -881,8 +881,8 @@ def test_playback_player_rolling_deletion():
 
 
 def test_handle_downloads_state_runs_without_error():
-    from allmanga_cli.context import CliFlags, UiState, MachineState
-    from allmanga_cli.app.downloads import handle_downloads_state
+    from media_cli.context import CliFlags, UiState, MachineState
+    from media_cli.app.downloads import handle_downloads_state
     from pathlib import Path
     import json
 
@@ -908,17 +908,17 @@ def test_handle_downloads_state_runs_without_error():
         }
         db_file.write_text(json.dumps(db_content))
 
-        with patch("allmanga_cli.state.paths.DOWNLOADS_DB_PATH", str(db_file)), \
-             patch("allmanga_cli.app_core.is_online", return_value=False), \
-             patch("allmanga_cli.app.downloads.tui_pick", return_value=-2):
+        with patch("media_cli.state.paths.DOWNLOADS_DB_PATH", str(db_file)), \
+             patch("media_cli.app_core.is_online", return_value=False), \
+             patch("media_cli.app.downloads.tui_pick", return_value=-2):
             cfg = {"download_dir": str(shows_dir)}
             state = handle_downloads_state(flags, ui, ms, cfg, MagicMock(), "sub", lambda *a: False)
             assert state == "QUIT"
 
 
 def test_plain_picker_delete_guard():
-    from allmanga_cli.ui.plain_picker import plain_pick
-    from allmanga_cli.context import CliFlags, UiState
+    from media_cli.ui.plain_picker import plain_pick
+    from media_cli.context import CliFlags, UiState
 
     flags = CliFlags(plain_mode=True)
     ui = UiState()

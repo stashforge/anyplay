@@ -1,5 +1,5 @@
-from allmanga_cli.core.terminal import strip_ansi
-from allmanga_cli.domain.metadata import format_available_episodes, format_progress
+from media_cli.core.terminal import strip_ansi
+from media_cli.domain.metadata import format_available_episodes, format_progress
 
 
 def _show(*, total=None, available=21):

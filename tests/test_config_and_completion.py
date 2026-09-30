@@ -3,8 +3,8 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
-from allmanga_cli.cli.args import parse_cli_args
-from allmanga_cli.cli.completion import (
+from media_cli.cli.args import parse_cli_args
+from media_cli.cli.completion import (
     COMMANDS,
     CONFIG_OPTIONS,
     DOWNLOAD_OPTIONS,
@@ -14,8 +14,8 @@ from allmanga_cli.cli.completion import (
     generate_completion,
     completion_install_path,
 )
-from allmanga_cli.state.config import resolve_editor, open_config_editor
-from allmanga_cli.app.orchestrator import handle_config_command
+from media_cli.state.config import resolve_editor, open_config_editor
+from media_cli.app.orchestrator import handle_config_command
 
 
 class TestConfigCommand(unittest.TestCase):
@@ -64,7 +64,7 @@ class TestConfigCommand(unittest.TestCase):
     @patch("subprocess.run")
     def test_open_config_editor_success(self, mock_run):
         mock_run.return_value = MagicMock(returncode=0)
-        with patch("allmanga_cli.state.config.resolve_editor", return_value="nano"):
+        with patch("media_cli.state.config.resolve_editor", return_value="nano"):
             code = open_config_editor()
             self.assertEqual(code, 0)
             mock_run.assert_called_once()
@@ -109,6 +109,7 @@ class TestShellCompletion(unittest.TestCase):
         self.assertIn("providers", script)
 
     def test_completion_install_path_termux(self):
+        from media_cli.constants import APP_NAME
         with tempfile.TemporaryDirectory() as tmp_prefix:
             bash_dir = os.path.join(tmp_prefix, "share/bash-completion/completions")
             zsh_dir = os.path.join(tmp_prefix, "share/zsh/site-functions")
@@ -116,6 +117,6 @@ class TestShellCompletion(unittest.TestCase):
             os.makedirs(zsh_dir)
             with patch.dict(os.environ, {"PREFIX": tmp_prefix}):
                 path_bash = completion_install_path("bash")
-                self.assertEqual(str(path_bash), os.path.join(bash_dir, "allmanga-cli"))
+                self.assertEqual(str(path_bash), os.path.join(bash_dir, APP_NAME))
                 path_zsh = completion_install_path("zsh")
-                self.assertEqual(str(path_zsh), os.path.join(zsh_dir, "_allmanga-cli"))
+                self.assertEqual(str(path_zsh), os.path.join(zsh_dir, f"_{APP_NAME}"))

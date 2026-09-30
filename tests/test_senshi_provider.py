@@ -1,7 +1,7 @@
 import json
 from unittest.mock import MagicMock, patch
-from allmanga_cli.providers.senshi import Senshi
-from allmanga_cli.media.decryption import decrypt_em3u8
+from media_cli.providers.senshi import Senshi
+from media_cli.media.decryption import decrypt_em3u8
 
 
 def test_decrypt_em3u8_invalid_inputs():

@@ -1,4 +1,4 @@
-from allmanga_cli.media.local_proxy import _ensure_vtt, _shift_vtt_timestamps
+from media_cli.media.local_proxy import _ensure_vtt, _shift_vtt_timestamps
 
 
 def test_ensure_vtt_injects_xtimestampmap_for_standard_players():

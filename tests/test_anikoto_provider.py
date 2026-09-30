@@ -1,6 +1,6 @@
 import json
 from unittest.mock import MagicMock, patch
-from allmanga_cli.providers.anikoto import AnikotoProvider, _vrf_encrypt
+from media_cli.providers.anikoto import AnikotoProvider, _vrf_encrypt
 
 
 def test_anikoto_vrf_encryption():
@@ -38,8 +38,8 @@ def test_anikoto_fetch_media_token_failure_fallback():
             raise urllib.error.HTTPError("https://graphql.anilist.co", 400, "Bad Request", {}, None)
         return fake_media
 
-    with patch("allmanga_cli.services.anilist.fetch_one", side_effect=mock_fetch_one):
-        with patch("allmanga_cli.services.anilist_auth.stored_anilist_token", return_value="stale_token"):
+    with patch("media_cli.services.anilist.fetch_one", side_effect=mock_fetch_one):
+        with patch("media_cli.services.anilist_auth.stored_anilist_token", return_value="stale_token"):
             media = p._fetch_media("182205")
             assert media is not None
             assert media["id"] == 182205

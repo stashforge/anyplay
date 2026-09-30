@@ -4,10 +4,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from allmanga_cli.context import FLAGS
-from allmanga_cli.core import storage
-from allmanga_cli.state import paths
-from allmanga_cli.domain.metadata import prepare_show_display_state
+from media_cli.context import FLAGS
+from media_cli.core import storage
+from media_cli.state import paths
+from media_cli.domain.metadata import prepare_show_display_state
 
 
 @pytest.fixture(autouse=True)
@@ -102,8 +102,8 @@ def test_incognito_resume_time_in_memory_only():
 
 def test_incognito_menu_advances_from_play_to_play_next():
     """In details/action menu, progress allows advancing to Play Next (EP 2)."""
-    from allmanga_cli.app import playback_menu
-    from allmanga_cli.context import UiState, MachineState, CliFlags
+    from media_cli.app import playback_menu
+    from media_cli.context import UiState, MachineState, CliFlags
 
     flags = CliFlags(incognito_mode=True)
     ui = UiState()

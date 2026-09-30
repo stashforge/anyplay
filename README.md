@@ -1,12 +1,12 @@
-# allmanga-cli
+# anyplay
 
-A modern, lightning-fast terminal anime browser, player, and downloader with AniList sync, multi-track subtitle HLS proxying, and Android/Termux support.
+A modern, lightning-fast terminal media browser, player, and downloader with AniList sync, multi-track subtitle HLS proxying, and Android/Termux support.
 
 ---
 
 ## Features
 
-- **Headless Stream Scraping**: Fetches video streams from multiple anime providers directly in the terminal without requiring a browser or webview.
+- **Headless Stream Scraping**: Fetches video streams from multiple anime and media providers directly in the terminal without requiring a browser or webview.
 - **Multi-Track HLS Subtitle Streaming**: Built-in RFC 8216 HLS Master Manifest generator and multi-threaded proxy. Seamlessly injects multi-language WebVTT subtitle tracks (`#EXT-X-MEDIA:TYPE=SUBTITLES`) across desktop `mpv` and mobile players (Next Player, MPV Android, VLC).
 - **Unified Show Dashboard**: Modern, interactive terminal dashboard displaying AniList metadata, cover art, scores, episode counts, watched indicators, and resume playback timestamps.
 - **Resume & Timestamp Playback**: Automatically saves exact watch progress per episode. Resume seamlessly from your last timestamp with a single keystroke.
@@ -14,7 +14,7 @@ A modern, lightning-fast terminal anime browser, player, and downloader with Ani
 - **Interactive Multi-Download System**:
   - Download single episodes, custom ranges (e.g. `1-12`), selected episodes, or entire seasons.
   - Supports `aria2c`, `yt-dlp`, `ffmpeg`, and native `hls-fetch`.
-- **Offline Library Management**: Browse and play downloaded episodes offline via `allmanga-cli downloads`, with progress tracking and AniList metadata matching.
+- **Offline Library Management**: Browse and play downloaded episodes offline via `anyplay downloads`, with progress tracking and AniList metadata matching.
 - **AniList Sync & AniSkip**:
   - Automatic watch history synchronization with AniList via OAuth (`--login`).
   - Automatic opening and ending skip markers generation for `mpv` (`--aniskip`).
@@ -26,15 +26,15 @@ A modern, lightning-fast terminal anime browser, player, and downloader with Ani
 
 | Provider Command | Description | Multi-Subtitles | Dub Support |
 | :--- | :--- | :---: | :---: |
-| `allmanga-cli anikoto` | Anikoto (MegaPlay / fast 1080p CDN) | Yes | Yes |
-| `allmanga-cli miruro` | Miruro (Multi-server anime scraper) | Yes | Yes |
-| `allmanga-cli allanime` | AllAnime (Extensive anime catalog) | Yes | Yes |
-| `allmanga-cli animexin` | AnimeXin (Asian anime & Donghua) | Yes | No |
-| `allmanga-cli animegg` | AnimeGG (Multiple streaming mirrors) | Yes | Yes |
-| `allmanga-cli anizone` | AniZone (Direct video streams) | Yes | Yes |
-| `allmanga-cli movies` | Movies & TV Series provider | Yes | Yes |
+| `anyplay anikoto` | Anikoto (MegaPlay / fast 1080p CDN) | Yes | Yes |
+| `anyplay miruro` | Miruro (Multi-server anime scraper) | Yes | Yes |
+| `anyplay allanime` | AllAnime (Extensive anime catalog) | Yes | Yes |
+| `anyplay animexin` | AnimeXin (Asian anime & Donghua) | Yes | No |
+| `anyplay animegg` | AnimeGG (Multiple streaming mirrors) | Yes | Yes |
+| `anyplay anizone` | AniZone (Direct video streams) | Yes | Yes |
+| `anyplay movies` | Movies & TV Series provider | Yes | Yes |
 
-*Run `allmanga-cli [query]` directly to search using your default provider.*
+*Run `anyplay [query]` directly to search using your default provider.*
 
 ---
 
@@ -42,7 +42,7 @@ A modern, lightning-fast terminal anime browser, player, and downloader with Ani
 
 ### Option 1: pipx (Recommended for Linux / macOS)
 
-`pipx` installs `allmanga-cli` in an isolated environment and exposes it globally:
+`pipx` installs `anyplay` in an isolated environment and exposes it globally:
 
 ```bash
 # Clone the repository
@@ -83,59 +83,75 @@ pip install .[allanime,miruro]
 
 ```bash
 # Search using default provider
-allmanga-cli "Frieren"
+anyplay "Frieren"
 
 # Search using a specific provider
-allmanga-cli anikoto "Jujutsu Kaisen"
-allmanga-cli miruro "Solo Leveling"
-allmanga-cli allanime "One Piece"
+anyplay anikoto "Jujutsu Kaisen"
+anyplay miruro "Solo Leveling"
+anyplay allanime "One Piece"
 ```
 
 ### Direct Episode & Quality Selection
 
 ```bash
 # Jump directly to Episode 5 in 1080p English Sub
-allmanga-cli anikoto "Bleach" -e 5 -q 1080p -t sub
+anyplay anikoto "Bleach" -e 5 -q 1080p -t sub
 
 # Binge watch continuously (auto-plays next episode)
-allmanga-cli anikoto "Chainsaw Man" -e 1 --binge
+anyplay anikoto "Chainsaw Man" -e 1 --binge
 
 # Choose stream quality and mirrors interactively
-allmanga-cli anikoto "Naruto" -e 1 --sources
+anyplay anikoto "Naruto" -e 1 --sources
 ```
 
 ### Downloading Episodes
 
 ```bash
 # Interactive download menu (Single, Range, Selection, All)
-allmanga-cli anikoto "DanDaDan" -e 1 --download
+anyplay anikoto "DanDaDan" -e 1 --download
 
 # Use a specific downloader (e.g. aria2c or yt-dlp)
-allmanga-cli anikoto "Attack on Titan" -e 1 --download --downloader aria2c
+anyplay anikoto "Attack on Titan" -e 1 --download --downloader aria2c
 ```
 
 ### Managing Offline Downloads
 
 ```bash
 # Open the interactive offline library
-allmanga-cli downloads
+anyplay downloads
 ```
 
 ### AniList Integration & Skipping
 
 ```bash
 # Authenticate your AniList account
-allmanga-cli --login
+anyplay --login
 
 # Enable AniSkip opening/ending markers
-allmanga-cli anikoto "Death Note" -e 1 --aniskip
+anyplay anikoto "Death Note" -e 1 --aniskip
 ```
 
 ### Extracting & Printing URLs
 
 ```bash
 # Print stream master M3U8, referer headers, and all subtitle tracks
-allmanga-cli anikoto search "Slime" -e 1 --print-url
+anyplay anikoto search "Slime" -e 1 --print-url
+```
+
+---
+
+## Shell Completions
+
+`anyplay` provides tab completion for Bash, Zsh, and Fish:
+
+```bash
+# Auto-detect shell and install completions
+anyplay completion --install
+
+# Or generate completions manually:
+anyplay completion bash
+anyplay completion zsh
+anyplay completion fish
 ```
 
 ---
@@ -143,7 +159,7 @@ allmanga-cli anikoto search "Slime" -e 1 --print-url
 ## CLI Options Reference
 
 ```text
-allmanga-cli [provider] [search_query] [options]
+anyplay [provider] [search_query] [options]
 
 Positional Arguments:
   provider              Optional provider: anikoto, miruro, allanime, animexin, animegg, anizone, movies
@@ -166,7 +182,8 @@ Download Options:
 Account & Library:
   --login               Log in with AniList OAuth
   downloads             Launch offline download library browser
-  config                Interactively inspect and modify configuration
+  config                Open config file in $EDITOR or manage key/values
+  completion            Generate or install shell completion scripts
 
 Diagnostics:
   -v, --version         Show program version
@@ -175,26 +192,35 @@ Diagnostics:
 
 ---
 
-## Configuration (`config.json`)
+## Configuration (`config.conf`)
 
-Configuration is stored at `~/.config/allmanga-cli/config.json`:
+Configuration is stored at `~/.config/anyplay/config.conf`:
 
-```json
-{
-    "provider": "anikoto",
-    "quality": "1080p",
-    "translation_type": "sub",
-    "binge": false,
-    "player": "mpv",
-    "download_dir": "~/Downloads/Anime",
-    "downloader": "auto",
-    "aniskip": true,
-    "auto_track": true,
-    "cover": true,
-    "anilist_token": "",
-    "anilist_sort": "recent",
-    "spinner": "braille"
-}
+```ini
+provider = anikoto
+quality = 1080p
+translation_type = sub
+binge = false
+player = mpv
+download_dir = ~/Downloads/anyplay
+downloader = auto
+aniskip = true
+auto_track = true
+cover = true
+anilist_token =
+anilist_sort = recent
+spinner = braille
+```
+
+Manage configuration directly from the CLI:
+```bash
+# Open configuration in your default editor ($EDITOR or nano/vim)
+anyplay config
+anyplay config -e micro
+
+# Get or set individual configuration values
+anyplay config get quality
+anyplay config set quality 1080p
 ```
 
 ---
