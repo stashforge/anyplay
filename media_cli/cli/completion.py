@@ -76,8 +76,8 @@ PROVIDERS_OPTIONS = ("--debug", "--plain", "--no-tui", "-h", "--help")
 
 COMPLETION_OPTIONS = ("install", "--debug", "--plain", "--no-tui", "-h", "--help")
 
-CONFIG_ACTIONS = ("set",)
-CONFIG_OPTIONS = ("set", "-e", "--editor", "--debug", "--plain", "--no-tui", "-h", "--help")
+CONFIG_ACTIONS = ("set", "get")
+CONFIG_OPTIONS = ("set", "get", "-e", "--editor", "--debug", "--plain", "--no-tui", "-h", "--help")
 CONFIG_KEYS = (
     "quality", "translation_type", "player", "provider", "title_language",
     "download_dir", "auto_download_next", "auto_delete_watched", "auto_delete_buffer",
@@ -149,7 +149,7 @@ def bash_completion():
                 return 0
             fi
             ;;
-        set)
+        set|get)
             if [[ "$cmd" == "config" ]]; then
                 COMPREPLY=( $(compgen -W "{_words(CONFIG_KEYS)}" -- "$cur") )
                 return 0

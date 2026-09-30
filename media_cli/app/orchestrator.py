@@ -247,6 +247,25 @@ def handle_config_command(args: Any) -> None:
             sys.exit(code)
         return
 
+    if action == "get":
+        key = getattr(args, "config_key", None)
+        if not key:
+            print(f"{APP_NAME} config: error: 'get' requires a key (e.g., {APP_NAME} config get quality)", file=sys.stderr)
+            sys.exit(2)
+        cfg = load_config()
+        if key in cfg:
+            val = cfg[key]
+            if isinstance(val, bool):
+                print(str(val).lower())
+            elif val is None:
+                print("")
+            else:
+                print(val)
+            return
+        else:
+            print(f"Key '{key}' not found in configuration.", file=sys.stderr)
+            sys.exit(1)
+
     if action == "set":
         key = getattr(args, "config_key", None)
         val = getattr(args, "config_value", None)

@@ -44,6 +44,34 @@ class TestConfigCommand(unittest.TestCase):
         self.assertEqual(args.config_key, "quality")
         self.assertEqual(args.config_value, "720p")
 
+    def test_parse_config_get(self):
+        args, _ = parse_cli_args(["config", "get", "quality"])
+        self.assertEqual(args.command, "config")
+        self.assertEqual(args.config_action, "get")
+        self.assertEqual(args.config_key, "quality")
+        self.assertIsNone(args.config_value)
+
+    def test_handle_config_get_success(self):
+        args, _ = parse_cli_args(["config", "get", "quality"])
+        with patch("media_cli.app.orchestrator.load_config", return_value={"quality": "1080p"}):
+            with patch("builtins.print") as mock_print:
+                handle_config_command(args)
+                mock_print.assert_called_once_with("1080p")
+
+    def test_handle_config_get_boolean(self):
+        args, _ = parse_cli_args(["config", "get", "binge"])
+        with patch("media_cli.app.orchestrator.load_config", return_value={"binge": False}):
+            with patch("builtins.print") as mock_print:
+                handle_config_command(args)
+                mock_print.assert_called_once_with("false")
+
+    def test_handle_config_get_not_found(self):
+        args, _ = parse_cli_args(["config", "get", "unknown_key"])
+        with patch("media_cli.app.orchestrator.load_config", return_value={"quality": "1080p"}):
+            with self.assertRaises(SystemExit) as cm:
+                handle_config_command(args)
+            self.assertEqual(cm.exception.code, 1)
+
     def test_resolve_editor_override(self):
         self.assertEqual(resolve_editor("micro"), "micro")
 

@@ -9,16 +9,17 @@ from __future__ import annotations
 
 import sys
 
+from ..constants import APP_NAME
 from ..domain.titles import extract_title_parts as _extract_title_parts
 
 
 def print_app_banner() -> None:
-    """Clear the screen and print the allmanga-cli startup banner."""
+    """Clear the screen and print the startup banner."""
     sys.stdout.write("\033[2J\033[H")
     sys.stdout.flush()
     C, B, R = "\033[36m", "\033[1m", "\033[0m"
     line = f"{C}{'─' * 48}{R}"
-    print(f"{line}\n{C}{B}▶ allmanga-cli — Anime Stream Player{R}\n{line}")
+    print(f"{line}\n{C}{B}▶ {APP_NAME} — Stream Player{R}\n{line}")
 
 
 def print_episode_header(title: str, ep: object, total: int) -> None:

@@ -347,6 +347,7 @@ def add_config_subcommand(commands):
         ),
         usage=(
             f"{APP_NAME} config [options]\n"
+            f"       {APP_NAME} config get <key>\n"
             f"       {APP_NAME} config set <key> <value>"
         ),
         epilog=(
@@ -354,6 +355,7 @@ def add_config_subcommand(commands):
             f"  {APP_NAME} config\n"
             f"  {APP_NAME} config -e nano\n"
             f"  {APP_NAME} config --editor micro\n"
+            f"  {APP_NAME} config get quality\n"
             f"  {APP_NAME} config set download_dir ~/Videos/{APP_NAME}\n"
             f"  {APP_NAME} config set quality 1080p\n"
             f"  {APP_NAME} config set player mpv"
@@ -366,9 +368,9 @@ def add_config_subcommand(commands):
     config.add_argument(
         "action",
         nargs="?",
-        choices=["set"],
+        choices=["set", "get"],
         metavar="<action>",
-        help="Action to perform: 'set'. Omit to open config file in editor.",
+        help="Action to perform: 'set', 'get'. Omit to open config file in editor.",
     )
     config.add_argument(
         "key",
