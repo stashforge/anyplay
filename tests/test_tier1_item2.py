@@ -779,6 +779,7 @@ def test_playback_episodes_downloads_mode_options_and_hints():
 
     with patch("allmanga_cli.app.playback_episodes.tui_pick", side_effect=mock_pick), \
          patch("allmanga_cli.app_core.is_online", return_value=True), \
+         patch("allmanga_cli.app_core.get_local_progress", return_value=None), \
          patch("allmanga_cli.app_core.build_info_panel"):
         next_state = handle_episode_state(flags, ui, ms, {}, MagicMock(), "sub", lambda *a: False)
         assert next_state == "DETAILS"

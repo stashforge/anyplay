@@ -599,7 +599,7 @@ class WordPressAnimeProvider:
     def episode_catalog(self, provider_id: str, ttype: str = "sub") -> dict:
         del ttype
         domains = getattr(self, 'domains', [])
-        entries = list(reversed(parse_series(self.base_url, self._fetch(provider_id), valid_domains=domains, fetch_fn=self._fetch)))
+        entries = parse_series(self.base_url, self._fetch(provider_id), valid_domains=domains, fetch_fn=self._fetch)
         episodes = []
         for index, entry in enumerate(entries):
             dual_num = episode_number(entry.title) if entry.title else ""
@@ -619,6 +619,7 @@ class WordPressAnimeProvider:
             provider_id=provider_id,
             episodes={"sub": episodes, "dub": [], "raw": []},
         )
+
 
     def episode_sources(self, provider_id: str, episode: str, ttype: str = "sub") -> dict | None:
         del provider_id, ttype

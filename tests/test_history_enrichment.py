@@ -165,7 +165,8 @@ def test_refresh_history_anilist_airing_batch_enriches_full_metadata(tmp_path):
         }
     ]
 
-    with patch("allmanga_cli.services.anilist.fetch", return_value=mock_raw_media):
+    with patch("allmanga_cli.services.anilist.fetch", return_value=mock_raw_media), \
+         patch("allmanga_cli.core.anilist._provider_catalog_refresh_fn", None):
         changed = refresh_history_anilist_airing_batch(history_entries)
         assert changed is True
 

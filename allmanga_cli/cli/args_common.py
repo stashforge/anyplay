@@ -188,6 +188,8 @@ def _set_cli_defaults(parser):
         auth_token=False,
         auth_token_raw=False,
         provider="allanime",
+        auto_download=None,
+        auto_delete=None,
     )
 
 
@@ -234,9 +236,9 @@ def _add_search_options(parser):
     playback.add_argument("-b", "--binge", action="store_true", help="Continue through episodes")
     playback.add_argument(
         "-p", "--player",
-        choices=["mpv", "mpvrex", "vlc", "next"],
+        choices=["mpv", "rex", "mpvrx", "mpvrex", "vlc", "next"],
         metavar="PLAYER",
-        help="Player: mpv, mpvrex, vlc, next",
+        help="Player: mpv, rex, mpvrx, vlc, next",
     )
     playback.add_argument(
         "-s", "--sources", action="store_true",
@@ -247,6 +249,10 @@ def _add_search_options(parser):
     playback.add_argument("--no-aniskip", dest="aniskip", action="store_false", help="Disable AniSkip")
     playback.add_argument("--auto-skip", dest="auto_skip", action="store_true", default=None, help="Auto-skip OP/ED")
     playback.add_argument("--no-auto-skip", dest="auto_skip", action="store_false", help="Prompt before skipping OP/ED")
+    playback.add_argument("--auto-download", dest="auto_download", action="store_true", default=None, help="Auto-download next episode")
+    playback.add_argument("--no-auto-download", dest="auto_download", action="store_false", help="Do not auto-download next episode")
+    playback.add_argument("--auto-delete", dest="auto_delete", action="store_true", default=None, help="Auto-delete watched downloaded episodes")
+    playback.add_argument("--no-auto-delete", dest="auto_delete", action="store_false", help="Do not auto-delete watched downloaded episodes")
 
     tracking = parser.add_argument_group("Tracking options")
     tracking.add_argument(
@@ -301,6 +307,12 @@ def _add_download_options(parser):
         default=argparse.SUPPRESS,
         help="Downloader to use: auto (default), yt-dlp, ffmpeg",
     )
+    download.add_argument(
+        "-d", "--download-dir", "--dir",
+        dest="download_dir",
+        type=str,
+        help="Custom download directory for this session",
+    )
     output = parser.add_argument_group("Output options")
     output.add_argument("--cover", dest="cover", action="store_true", default=None, help="Show cover images")
     output.add_argument("--no-cover", dest="cover", action="store_false", help="Do not show cover images")
@@ -352,9 +364,9 @@ def _add_resume_options(parser):
     playback.add_argument("-b", "--binge", action="store_true", help="Continue through episodes")
     playback.add_argument(
         "-p", "--player",
-        choices=["mpv", "mpvrex", "vlc", "next"],
+        choices=["mpv", "rex", "mpvrx", "mpvrex", "vlc", "next"],
         metavar="PLAYER",
-        help="Player: mpv, mpvrex, vlc, next",
+        help="Player: mpv, rex, mpvrx, vlc, next",
     )
     playback.add_argument(
         "-s", "--sources", action="store_true",

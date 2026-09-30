@@ -154,7 +154,7 @@ Playback & Episode Options:
   -q, --quality QUALITY Video quality: best, 1080p, 720p, 480p, worst
   -t, --translation TYPE Audio language type: sub, dub
   -b, --binge           Enable continuous binge watching
-  -p, --player PLAYER   Video player: mpv, mpvrex, next, vlc
+  -p, --player PLAYER   Video player: mpv, rex, mpvrx, next, vlc
   --sources             Prompt interactively to choose stream mirror
   --aniskip             Enable AniSkip opening & ending chapter markers
   --print-url           Print stream links, subtitle tracks, and referer headers

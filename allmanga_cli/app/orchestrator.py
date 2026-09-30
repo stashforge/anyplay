@@ -94,12 +94,167 @@ def trigger_migration(old_dir_full: str, new_dir: str) -> None:
                 print(f"Failed to migrate files: {e}", file=sys.stderr)
 
 
-def handle_config_command(args: Any) -> None:
-    cfg = load_config()
-    if args.config_action == "set":
-        key = args.config_key
-        val = args.config_value
+def setup_download_directory(cfg: dict, db: dict, runtime_dir: str | None = None) -> str:
+    """Resolve effective download directory, safely handling runtime overrides,
+    missing/inaccessible paths, and interactive recovery prompts."""
+    # 1. Custom directory for running instance (--download-dir / -d)
+    if isinstance(runtime_dir, str) and runtime_dir.strip():
+        custom_dir = os.path.abspath(os.path.expanduser(runtime_dir.strip()))
+        try:
+            os.makedirs(custom_dir, exist_ok=True)
+        except Exception:
+            pass
+        return custom_dir
 
+    raw_cfg_dir = str(cfg.get("download_dir", "") or "").strip()
+    db_dir = str(db.get("current_download_dir", "") or "").strip()
+    if db_dir:
+        db_dir = os.path.abspath(os.path.expanduser(db_dir))
+
+    # 2. If download_dir is non-empty in config
+    if raw_cfg_dir:
+        cfg_dir = os.path.abspath(os.path.expanduser(raw_cfg_dir))
+        accessible = False
+        try:
+            os.makedirs(cfg_dir, exist_ok=True)
+            test_file = os.path.join(cfg_dir, ".write_test")
+            with open(test_file, "w") as f:
+                f.write("")
+            os.remove(test_file)
+            accessible = True
+        except Exception:
+            accessible = False
+
+        if accessible:
+            if db_dir and os.path.abspath(db_dir) != os.path.abspath(cfg_dir):
+                if os.path.isdir(db_dir) and db.get("shows"):
+                    trigger_migration(db_dir, cfg_dir)
+                db["current_download_dir"] = cfg_dir
+                save_downloads_db(db)
+            return cfg_dir
+
+        # Configured path is not accessible
+        print(f"\n\033[91m[!] Configured download_dir '{raw_cfg_dir}' is inaccessible (permission denied or invalid path).\033[0m")
+        if not sys.stdin.isatty():
+            return get_default_download_dir()
+
+    # 3. If download_dir is empty or inaccessible (in interactive mode)
+    if not sys.stdin.isatty():
+        if db_dir and os.path.isdir(db_dir) and db.get("shows"):
+            return db_dir
+        return get_default_download_dir()
+
+    prev_library_valid = False
+    summary = ""
+    if db_dir and os.path.isdir(db_dir):
+        shows = db.get("shows", {})
+        show_count = len(shows)
+        total_eps = sum(len(s.get("episodes", [])) for s in shows.values())
+        if show_count > 0:
+            summary = f"{show_count} show{'' if show_count == 1 else 's'}, {total_eps} episode{'' if total_eps == 1 else 's'}"
+            prev_library_valid = True
+
+    os_default = get_default_download_dir(require_existing=True)
+
+    print("\n\033[1;34m[?] 'download_dir' is not set in your config.\033[0m")
+
+    options = []
+    # Build options list: (label, action_type, path_value)
+    if prev_library_valid:
+        options.append((f"Restore previous directory: {db_dir} ({summary}) (Recommended)", "prev", db_dir))
+        if os_default and os.path.abspath(os_default) != os.path.abspath(db_dir):
+            options.append((f"Set OS default directory: {os_default}", "default", os_default))
+        elif not os_default:
+            print("\033[38;5;244m(Note: Standard OS Downloads directory could not be detected)\033[0m")
+        options.append(("Enter custom path", "custom", None))
+    elif os_default:
+        options.append((f"Use OS default directory: {os_default} (Recommended)", "default", os_default))
+        options.append(("Enter custom path", "custom", None))
+    else:
+        print("\033[93mCould not detect a standard OS Downloads folder.\033[0m")
+        options.append(("Enter custom path", "custom", None))
+
+    selected_path = None
+    if len(options) == 1 and options[0][1] == "custom":
+        pass  # Jump directly to custom path input below
+    else:
+        for idx, (label, _, _) in enumerate(options, start=1):
+            print(f"  {idx}) {label}")
+        print()
+
+        choice_idx = 1
+        while True:
+            try:
+                ans = input("Select [1]: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                sys.exit(130)
+            if not ans:
+                choice_idx = 1
+                break
+            if ans.isdigit() and 1 <= int(ans) <= len(options):
+                choice_idx = int(ans)
+                break
+            print(f"\033[91mPlease enter a number between 1 and {len(options)}.\033[0m")
+
+        selected_opt = options[choice_idx - 1]
+        if selected_opt[1] in ("prev", "default"):
+            selected_path = selected_opt[2]
+
+    # Custom path input loop
+    if not selected_path:
+        while True:
+            try:
+                raw_input_path = input("Enter download directory path: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                sys.exit(130)
+            if not raw_input_path:
+                print("\033[91m[!] Path cannot be empty.\033[0m")
+                continue
+            cand = os.path.abspath(os.path.expanduser(raw_input_path))
+            try:
+                os.makedirs(cand, exist_ok=True)
+                test_file = os.path.join(cand, ".write_test")
+                with open(test_file, "w") as f:
+                    f.write("")
+                os.remove(test_file)
+                selected_path = cand
+                break
+            except Exception as exc:
+                print(f"\033[91m[!] Inaccessible path '{raw_input_path}': {exc}. Please try again.\033[0m")
+
+    # Save to config.conf and update database
+    cfg["download_dir"] = selected_path
+    save_config(cfg)
+    print(f"\033[32m✓ Saved download_dir = {selected_path} to config\033[0m\n")
+
+    if prev_library_valid and db_dir and os.path.abspath(db_dir) != os.path.abspath(selected_path):
+        trigger_migration(db_dir, selected_path)
+
+    db["current_download_dir"] = selected_path
+    save_downloads_db(db)
+    return selected_path
+
+
+def handle_config_command(args: Any) -> None:
+    action = getattr(args, "config_action", None)
+    if action is None:
+        editor_override = getattr(args, "config_editor", None)
+        from ..state.config import open_config_editor
+        code = open_config_editor(editor_override)
+        if code != 0:
+            sys.exit(code)
+        return
+
+    if action == "set":
+        key = getattr(args, "config_key", None)
+        val = getattr(args, "config_value", None)
+        if not key or val is None:
+            print("allmanga-cli config: error: 'set' requires both a key and a value (e.g., allmanga-cli config set download_dir ~/Downloads/allmanga-cli)", file=sys.stderr)
+            sys.exit(2)
+
+        cfg = load_config()
         if key == "download_dir":
             old_dir = cfg.get("download_dir", "")
             new_dir = os.path.expanduser(str(val or "").strip())
@@ -151,25 +306,13 @@ def main() -> None:
 
     args, pa = parse_cli_args()
 
-    if not getattr(args, "config_action", None):
+    if getattr(args, "command", None) != "config" and not getattr(args, "completion_shell", None) and not getattr(args, "show_search_history", False) and not getattr(args, "clear_search_history", False) and not getattr(args, "list_providers", False):
         cfg = load_config()
         db = load_downloads_db()
-        current_cfg_dir = cfg.get("download_dir", "")
-        if current_cfg_dir:
-            current_cfg_dir_full = os.path.expanduser(current_cfg_dir)
-            db_dir_full = db.get("current_download_dir", "")
-            if db_dir_full and os.path.abspath(db_dir_full) != os.path.abspath(
-                current_cfg_dir_full
-            ):
-                print(
-                    f"\n\033[93m[!] Detected download directory change in config from {db_dir_full} to {current_cfg_dir_full}\033[0m"
-                )
-                globals()["SUPPRESS_FINAL_CURSOR_RESTORE"] = True
-                trigger_migration(db_dir_full, current_cfg_dir_full)
-
-            if db.get("current_download_dir") != current_cfg_dir_full:
-                db["current_download_dir"] = current_cfg_dir_full
-                save_downloads_db(db)
+        runtime_dl_dir = getattr(args, "download_dir", None)
+        active_dl_dir = setup_download_directory(cfg, db, runtime_dl_dir)
+        args.download_dir = active_dl_dir
+        cfg["download_dir"] = active_dl_dir
 
     if getattr(args, "completion_shell", None):
         globals()["SUPPRESS_FINAL_CURSOR_RESTORE"] = True
@@ -178,7 +321,7 @@ def main() -> None:
             print(f"Installed {args.completion_shell} completion:")
             print(path)
             if args.completion_shell == "bash":
-                print("Restart your shell, or run: exec bash")
+                print(f"Restart your shell, or run: source {path}")
             elif args.completion_shell == "zsh":
                 print("Ensure ~/.zfunc is in fpath, then run: compinit")
             elif args.completion_shell == "fish":
@@ -199,7 +342,7 @@ def main() -> None:
         print("Search history cleared.")
         return
 
-    if getattr(args, "config_action", None):
+    if getattr(args, "command", None) == "config":
         globals()["SUPPRESS_FINAL_CURSOR_RESTORE"] = True
         handle_config_command(args)
         return
@@ -508,11 +651,22 @@ def main() -> None:
             fatal_terminal_exit(str(exc))
     quality = args.quality or cfg.get("quality", "1080p")
 
+    auto_download_val = getattr(args, "auto_download", None)
+    if auto_download_val is None:
+        auto_download_val = cfg.get("auto_download_next", False)
+
+    auto_delete_val = getattr(args, "auto_delete", None)
+    if auto_delete_val is None:
+        auto_delete_val = cfg.get("auto_delete_watched", False)
+
     ms = MachineState(
         query_str=" ".join(args.query) if args.query else "",
         just_searched=bool(args.query),
         anilist_search_parent="QUIT",
         download_batch_end=globals().get("_download_batch_end"),
+        auto_download_next=bool(auto_download_val),
+        auto_delete_watched=bool(auto_delete_val),
+        auto_delete_buffer=int(cfg.get("auto_delete_buffer", 1)),
     )
 
     state = "SEARCH"

@@ -297,6 +297,8 @@ def tui_pick(
     last_poster_tick = 0
     last_poster_key = None
     last_clock_minute = int(time.time() // 60)
+    last_hint_poll_time = 0.0
+    last_rendered_hint_val = None
     pending_delete_index = None
     boundary_hint = ""
     boundary_hint_time = 0.0
@@ -366,7 +368,7 @@ def tui_pick(
 
     def render(filt):
         global _persistent_rendered_lines
-        nonlocal scroll, last_poster_key, sel
+        nonlocal scroll, last_poster_key, sel, last_rendered_hint_val
 
         if filt and any(oi >= len(options) or oi < 0 for oi in filt):
             filt = filt_list()
@@ -539,6 +541,7 @@ def tui_pick(
                 hint_text = ""
                 if callable(hints):
                     hint_text = str(hints(oi) or "")
+                    last_rendered_hint_val = hint_text
                 elif isinstance(hints, dict):
                     for k, v in hints.items():
                         if _strip_ansi(k) == kp:
@@ -794,6 +797,14 @@ def tui_pick(
                     fb_time = float(show_ctx.get("_action_feedback_time") or 0)
                     if fb_time > 0 and (now - fb_time) <= 3.0:
                         last_poster_tick = now
+                        _needs_redraw = True
+
+            if callable(hints) and filt and (now - last_hint_poll_time) >= 0.5:
+                last_hint_poll_time = now
+                sel_oi = filt[sel] if 0 <= sel < len(filt) else -1
+                if 0 <= sel_oi < len(options):
+                    cur_h = str(hints(sel_oi) or "")
+                    if last_rendered_hint_val is not None and cur_h != last_rendered_hint_val:
                         _needs_redraw = True
 
             if key_queue:

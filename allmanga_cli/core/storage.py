@@ -429,19 +429,18 @@ def load_history():
 
 def get_history_entry(show, ttype="sub"):
     show_id = str((show or {}).get("_id") or (show or {}).get("id") or "")
-    if not show_id:
-        return None
     from allmanga_cli.domain.matching import is_same_show
     for entry in load_history():
         if entry.get("translation_type", "sub") != ttype:
             continue
         entry_show = entry.get("show", {})
         e_id = str(entry_show.get("_id") or entry_show.get("id") or "")
-        if e_id and e_id == show_id:
+        if show_id and e_id and e_id == show_id:
             return entry
         if is_same_show(entry_show, show):
             return entry
     return None
+
 
 
 def get_local_progress(show, ttype="sub"):
@@ -833,23 +832,26 @@ def sanitize_token(token):
     return value
 
 
-def get_default_download_dir():
+def get_default_download_dir(require_existing=False):
     import platform
     # Termux Android storage
     termux_storage = os.path.expanduser("~/storage/downloads")
-    if os.path.isdir(termux_storage):
+    if os.path.isdir(termux_storage) and os.access(termux_storage, os.W_OK):
         return os.path.join(termux_storage, "allmanga-cli")
 
     # Windows native
     if platform.system() == "Windows":
         win_path = os.path.join(os.environ.get("USERPROFILE", os.path.expanduser("~")), "Downloads")
-        if os.path.isdir(win_path):
+        if os.path.isdir(win_path) and os.access(win_path, os.W_OK):
             return os.path.join(win_path, "allmanga-cli")
 
     # Standard macOS/Linux
     unix_path = os.path.expanduser("~/Downloads")
-    if os.path.isdir(unix_path):
+    if os.path.isdir(unix_path) and os.access(unix_path, os.W_OK):
         return os.path.join(unix_path, "allmanga-cli")
+
+    if require_existing:
+        return None
 
     # Absolute fallback
     return os.path.join(os.getcwd(), "allmanga-cli")
@@ -920,7 +922,13 @@ def save_downloads_db(db):
         return
     import copy
     import os
+    import shutil
     os.makedirs(paths.STATE_DIR, exist_ok=True)
+    if os.path.isfile(paths.DOWNLOADS_DB_PATH) and os.path.getsize(paths.DOWNLOADS_DB_PATH) > 10:
+        try:
+            shutil.copy2(paths.DOWNLOADS_DB_PATH, paths.DOWNLOADS_DB_PATH + ".bak")
+        except Exception:
+            pass
     # Strip session-only poster fields so stale/protocol-specific ANSI blobs
     # don't persist across sessions (they'd bypass fresh chafa rendering).
     clean_db = copy.deepcopy(db)

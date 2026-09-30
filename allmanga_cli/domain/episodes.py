@@ -2,6 +2,7 @@
 
 import decimal
 import re
+from typing import Any
 
 
 def normalize_episode_ids(values):
@@ -395,3 +396,179 @@ def resolve_dual_episode_label(anime, ep_val) -> str:
                 pass
 
     return prim or clean_episode_identifier(s_val) or s_val
+
+
+def extract_episode_tags(raw: str) -> tuple[str, list[str]]:
+    """Extract quality/audio tags like [4K], [1080p], [Dub] and return (cleaned_text, tags)."""
+    s = str(raw or "").strip()
+    if not s:
+        return "", []
+    tags = []
+    tag_pattern = re.compile(
+        r"\[\s*([0-9]{3,4}p|[248]k|sub|dub|raw|multi(?:-sub)?|softsub|hardsub|end)\s*\]|"
+        r"\(\s*([0-9]{3,4}p|[248]k|sub|dub|raw|multi(?:-sub)?|softsub|hardsub|end)\s*\)",
+        re.I
+    )
+    def _collect(m):
+        val = m.group(1) or m.group(2)
+        if val:
+            tags.append(val.strip().upper())
+        return ""
+    clean = tag_pattern.sub(_collect, s)
+    clean = re.sub(r"\s+", " ", clean).strip()
+    return clean, tags
+
+
+def create_episode_entry(
+    item: Any,
+    *,
+    episode_id: str | None = None,
+    label: str | None = None,
+    url: str | None = None,
+    title: str | None = None,
+    translation_type: str = "sub",
+    season: int = 1,
+    index: int | None = None,
+) -> dict[str, Any]:
+    """Create a unified, rich episode dictionary from raw provider data."""
+    if isinstance(item, dict):
+        raw_id = str(episode_id or item.get("id") or item.get("episode") or item.get("url") or "").strip()
+        raw_label = str(label or item.get("label") or item.get("title") or raw_id).strip()
+        raw_url = str(url or item.get("url") or ("" if not raw_id.startswith(("http://", "https://")) else raw_id)).strip() or None
+        raw_title = str(title or item.get("title") or "").strip()
+        ttype = str(translation_type or item.get("translationType") or "sub").strip().lower()
+        season_val = int(item.get("season") or season or 1)
+    else:
+        raw_id = str(episode_id or item or "").strip()
+        raw_label = str(label or raw_id).strip()
+        raw_url = str(url or ("" if not raw_id.startswith(("http://", "https://")) else raw_id)).strip() or None
+        raw_title = str(title or "").strip()
+        ttype = str(translation_type or "sub").strip().lower()
+        season_val = int(season or 1)
+
+    # 1. Extract quality/audio tags from label and title
+    clean_label, label_tags = extract_episode_tags(raw_label)
+    clean_title, title_tags = extract_episode_tags(raw_title)
+    all_tags = []
+    for t in label_tags + title_tags:
+        if t not in all_tags:
+            all_tags.append(t)
+
+    # 2. Parse dual/bracket numbers (e.g. "92 [156]")
+    prim, sec = parse_episode_dual_numbers(clean_label)
+    if not prim and clean_title:
+        prim, t_sec = parse_episode_dual_numbers(clean_title)
+        if not sec:
+            sec = t_sec
+
+    # 3. Fallback to clean_episode_identifier on ID/URL if no number in label
+    if not prim and raw_id:
+        prim = clean_episode_identifier(raw_id)
+        if not prim and clean_label:
+            prim = clean_episode_identifier(clean_label)
+
+    # 4. Canonical numeric values
+    num_val = 0.0
+    disp_num = ""
+    if prim:
+        try:
+            val = decimal.Decimal(prim)
+            num_val = float(val)
+            disp_num = str(int(val)) if (val % 1 == 0) else str(val)
+        except (decimal.InvalidOperation, ValueError):
+            disp_num = prim
+            if index is not None:
+                num_val = float(index + 1)
+    elif index is not None:
+        num_val = float(index + 1)
+        disp_num = str(index + 1)
+
+    # 5. Format display label
+    if clean_label and (clean_label.lower().startswith(("episode ", "ep ", "part ", "ova", "movie", "special")) or re.search(r"[a-zA-Z]", clean_label)):
+        final_label = clean_label
+    elif disp_num and disp_num.isdigit():
+        final_label = f"Episode {disp_num}"
+    elif disp_num:
+        final_label = f"Episode {disp_num}" if not disp_num.lower().startswith(("ova", "movie", "special")) else disp_num
+    else:
+        final_label = clean_label or raw_id
+
+    # Append franchise number if present
+    if sec and f"[{sec}]" not in final_label:
+        final_label = f"{final_label} [{sec}]"
+
+    # Append tags if not already present in final_label
+    for tag in all_tags:
+        if f"[{tag}]" not in final_label:
+            final_label = f"{final_label} [{tag}]"
+
+    return {
+        "id": raw_id,
+        "url": raw_url,
+        "number": num_val,
+        "display_number": disp_num or "0",
+        "franchise_number": sec,
+        "season": season_val,
+        "label": final_label.strip(),
+        "title": clean_title,
+        "tags": all_tags,
+        "translation_type": ttype,
+    }
+
+
+def build_episode_map(
+    raw_episodes: list[Any] | None,
+    translation_type: str = "sub",
+    season: int = 1,
+) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
+    """Deduplicate, numerically sort, and build an ordered Episode Map and secondary by_number index."""
+    if not raw_episodes:
+        return {}, {}
+
+    entries: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    seen_numbers: set[tuple[int, float]] = set()
+
+    for idx, item in enumerate(raw_episodes):
+        entry = create_episode_entry(
+            item,
+            translation_type=translation_type,
+            season=season,
+            index=idx,
+        )
+        eid = entry["id"]
+        if not eid or eid in seen_ids:
+            continue
+
+        num_tuple = (entry["season"], entry["number"])
+        # If a valid nonzero episode number was already seen for this season, it is a duplicate
+        if entry["number"] > 0 and num_tuple in seen_numbers:
+            continue
+
+        seen_ids.add(eid)
+        if entry["number"] > 0:
+            seen_numbers.add(num_tuple)
+        entries.append(entry)
+
+    # Sort strictly by (season, number, display_number) ascending
+    def _sort_key(ep):
+        return (ep.get("season", 1), ep.get("number", 0.0), ep.get("display_number", ""))
+
+    entries.sort(key=_sort_key)
+
+    episodes_map: dict[str, dict[str, Any]] = {}
+    by_number: dict[str, str] = {}
+
+    for ep in entries:
+        eid = ep["id"]
+        episodes_map[eid] = ep
+
+        disp = ep.get("display_number")
+        if disp and disp not in by_number:
+            by_number[disp] = eid
+
+        f_num = ep.get("franchise_number")
+        if f_num and f_num not in by_number:
+            by_number[f_num] = eid
+
+    return episodes_map, by_number

@@ -3,6 +3,7 @@
 import http.server
 import re
 import threading
+import time
 import urllib.parse
 import urllib.request
 import uuid
@@ -216,7 +217,7 @@ def _ensure_vtt(
     clean_text = text.lstrip("\ufeff")
     ua = (client_ua or "").lower()
     t_player = (target_player or "").lower()
-    is_mpv = t_player in ("mpv", "mpvrex") or "mpv" in ua or "lavf" in ua
+    is_mpv = t_player in ("mpv", "rex", "mpvrx", "mpvrex") or "mpv" in ua or "lavf" in ua
     is_vlc = t_player == "vlc" or "vlc" in ua
 
     if "[Events]" in clean_text or "[Script Info]" in clean_text:
@@ -332,7 +333,7 @@ def _guess_ext(url):
     return "m3u8" if (".m3u8" in url.lower() or "master.txt" in url.lower() or "playlist.txt" in url.lower()) else "vtt" if ".vtt" in url.lower() else "ts"
 
 
-def _build_proxy_server(initial_entries, timeout):
+def _build_proxy_server(initial_entries, timeout, show_id=None, episode=None, duration=0.0, on_progress=None):
     """Spin up one local proxy server backing an arbitrary set of routes.
 
     initial_entries: {path: entry_dict}, where entry_dict is either
@@ -346,8 +347,13 @@ def _build_proxy_server(initial_entries, timeout):
     registry = dict(initial_entries)
     registry_lock = threading.Lock()
     port_holder = {}
+    progress_state = {
+        "last_saved_pos": -1,
+        "last_save_time": 0.0,
+        "duration": float(duration or 0.0),
+    }
 
-    def register(url, ref, hdrs, content_type=None):
+    def register(url, ref, hdrs, content_type=None, time_offset=None):
         ext = _guess_ext(url)
         path = new_proxy_secret_path(ext)
         entry_content_type = content_type
@@ -370,6 +376,8 @@ def _build_proxy_server(initial_entries, timeout):
                 "hdrs": dict(hdrs),
                 "content_type": entry_content_type,
             }
+            if time_offset is not None:
+                registry[path]["time_offset"] = float(time_offset)
         return path
 
     def local_url_for(path):
@@ -383,17 +391,29 @@ def _build_proxy_server(initial_entries, timeout):
                 text = dec
         base = base_url.rsplit("/", 1)[0] + "/"
         out = []
+        running_time = 0.0
+        pending_duration = None
         for line in text.splitlines():
-            line = line.strip()
+            stripped = line.strip()
 
-            if line.startswith("#EXT-X-STREAM-INF:"):
+            if stripped.startswith("#EXTINF:"):
+                try:
+                    m = re.match(r"#EXTINF:\s*([0-9.]+)", stripped)
+                    if m:
+                        pending_duration = float(m.group(1))
+                except Exception:
+                    pending_duration = None
+                out.append(line)
+                continue
+
+            if stripped.startswith("#EXT-X-STREAM-INF:"):
                 # Clean deprecated tags like PROGRAM-ID
                 line = re.sub(r"PROGRAM-ID=\d+,?", "", line)
                 line = re.sub(r",+", ",", line).replace(":,", ":").rstrip(",")
                 out.append(line)
                 continue
 
-            if line.startswith("#") and 'URI="' in line:
+            if stripped.startswith("#") and 'URI="' in stripped:
                 start = line.index('URI="') + 5
                 end = line.index('"', start)
                 target = line[start:end]
@@ -403,13 +423,21 @@ def _build_proxy_server(initial_entries, timeout):
                 out.append(line)
                 continue
 
-            if line.startswith("#") or not line:
+            if stripped.startswith("#") or not stripped:
                 out.append(line)
                 continue
 
-            real = urllib.parse.urljoin(base, line)
-            path = register(real, ref, hdrs)
+            real = urllib.parse.urljoin(base, stripped)
+            if pending_duration is not None:
+                path = register(real, ref, hdrs, time_offset=running_time)
+                running_time += pending_duration
+                pending_duration = None
+            else:
+                path = register(real, ref, hdrs)
             out.append(local_url_for(path))
+
+        if running_time > 0:
+            progress_state["duration"] = max(progress_state.get("duration", 0.0), running_time)
 
         return "\n".join(out)
 
@@ -438,6 +466,37 @@ def _build_proxy_server(initial_entries, timeout):
                 except Exception:
                     pass
                 return
+
+            if method == "GET" and show_id is not None and episode is not None and entry.get("time_offset") is not None:
+                t_pos = max(0, int(entry["time_offset"]) - 20)
+                if t_pos >= 10:
+                    now = time.time()
+                    if abs(t_pos - progress_state["last_saved_pos"]) >= 5 or (now - progress_state["last_save_time"]) >= 5.0:
+                        progress_state["last_saved_pos"] = t_pos
+                        progress_state["last_save_time"] = now
+                        total_dur = progress_state.get("duration", 0.0)
+                        is_complete = False
+                        if total_dur > 300:
+                            if t_pos >= (0.80 * total_dur) or (total_dur - t_pos) <= 150:
+                                is_complete = True
+                        elif total_dur > 60:
+                            if t_pos >= (0.85 * total_dur):
+                                is_complete = True
+
+                        if on_progress:
+                            try:
+                                on_progress(show_id, episode, t_pos, total_dur, is_complete)
+                            except Exception as err:
+                                _debug_warn("on_progress callback failed", err)
+                        else:
+                            try:
+                                from ..core.storage import save_resume_time
+                                if is_complete:
+                                    save_resume_time(show_id, episode, 0)
+                                else:
+                                    save_resume_time(show_id, episode, t_pos)
+                            except Exception as err:
+                                _debug_warn("Failed to save resume progress in local proxy", err)
 
             if entry["kind"] == "synthetic":
                 data = entry["text"].encode("utf-8")
@@ -788,7 +847,8 @@ def _build_proxy_server(initial_entries, timeout):
 def start_local_proxy(
         target_url, referer, headers=None, timeout=15,
         stream_type="mp4", title="stream", subtitles=None,
-        target_player=None):
+        target_player=None, show_id=None, episode=None,
+        duration=0.0, on_progress=None):
     validate_http_url(target_url)
     is_hls = str(stream_type).lower() == "hls"
     extension = "m3u8" if is_hls else "mp4"
@@ -857,7 +917,10 @@ def start_local_proxy(
                     "vtt_secret": vtt_secret,
                 })
 
-        port, registry, _register, server = _build_proxy_server(initial, timeout)
+        port, registry, _register, server = _build_proxy_server(
+            initial, timeout, show_id=show_id, episode=episode,
+            duration=duration, on_progress=on_progress
+        )
 
         # Build Master M3U8 content
         master_lines = ["#EXTM3U", "#EXT-X-VERSION:3", ""]
@@ -975,7 +1038,10 @@ def start_local_proxy(
             "hdrs": dict(forwarded_headers),
         }
     }
-    port, _registry, _register, server = _build_proxy_server(initial, timeout)
+    port, _registry, _register, server = _build_proxy_server(
+        initial, timeout, show_id=show_id, episode=episode,
+        duration=duration, on_progress=on_progress
+    )
     return f"http://127.0.0.1:{port}{base_secret}", server
 
 
@@ -983,7 +1049,8 @@ def start_local_proxy(
 def start_local_dual_proxy(
         video_url, audio_url, referer, headers=None, timeout=15,
         width=1280, height=720, bandwidth=2_400_000, title="stream",
-        subtitles=None, audio_tracks=None, target_player=None):
+        subtitles=None, audio_tracks=None, target_player=None,
+        show_id=None, episode=None, duration=0.0, on_progress=None):
     """Like start_local_proxy, but for sources that split video and audio
     into two separate HLS manifests (Dailymotion does this) with no
     combined master. Builds the master ourselves; both sub-manifests go
@@ -1077,7 +1144,10 @@ def start_local_dual_proxy(
                 "vtt_secret": vtt_secret,
             })
 
-    port, registry, _register, server = _build_proxy_server(initial, timeout)
+    port, registry, _register, server = _build_proxy_server(
+        initial, timeout, show_id=show_id, episode=episode,
+        duration=duration, on_progress=on_progress
+    )
 
     master_lines = [
         "#EXTM3U",

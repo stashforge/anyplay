@@ -85,7 +85,15 @@ def fetch_episode_ids(show_id: str, ttype: str = "sub") -> list[str]:
     return fetch_episode_catalog(show_id, ttype)["ids"]
 
 
-def update_available_count_from_episode_ids(show: dict, ttype: str, episode_ids: list, detail: dict | None = None, labels: dict | None = None) -> bool:
+def update_available_count_from_episode_ids(
+    show: dict,
+    ttype: str,
+    episode_ids: list,
+    detail: dict | None = None,
+    labels: dict | None = None,
+    episodes_map: dict | None = None,
+    by_number: dict | None = None,
+) -> bool:
     from allmanga_cli.domain.episodes import highest_episode_number
     if not show or not ttype or episode_ids is None:
         return False
@@ -124,6 +132,16 @@ def update_available_count_from_episode_ids(show: dict, ttype: str, episode_ids:
             for key, value in dict(labels or {}).items()
             if str(key) and str(value)
         }
+    if episodes_map is not None:
+        show["_episodes_map"] = episodes_map
+        if "_episodes_map_by_ttype" not in show or not isinstance(show["_episodes_map_by_ttype"], dict):
+            show["_episodes_map_by_ttype"] = {}
+        show["_episodes_map_by_ttype"][ttype] = episodes_map
+    if by_number is not None:
+        show["_episodes_by_number"] = by_number
+        if "_episodes_by_number_by_ttype" not in show or not isinstance(show["_episodes_by_number_by_ttype"], dict):
+            show["_episodes_by_number_by_ttype"] = {}
+        show["_episodes_by_number_by_ttype"][ttype] = by_number
     return changed
 
 
@@ -158,14 +176,23 @@ def _perform_catalog_fetch(show: dict, ttype: str, status_cb: Callable[[str], No
         if catalog.get("state") == "loaded":
             show["_episode_catalog_state"] = "loaded"
             show.pop("_episode_catalog_error", None)
+            ep_map = catalog.get("episodes_map")
+            if not ep_map and catalog.get("episodes_map_by_ttype"):
+                ep_map = catalog["episodes_map_by_ttype"].get(ttype)
+            num_map = catalog.get("by_number")
+            if not num_map and catalog.get("by_number_by_ttype"):
+                num_map = catalog["by_number_by_ttype"].get(ttype)
             update_available_count_from_episode_ids(
                 show,
                 ttype,
                 catalog["ids"],
                 catalog.get("detail"),
                 catalog.get("labels"),
+                episodes_map=ep_map,
+                by_number=num_map,
             )
             return catalog["ids"]
+
 
         show["_episode_ids_ttype"] = ttype
         show["_episode_catalog_error"] = catalog.get("error", "No episodes available.")

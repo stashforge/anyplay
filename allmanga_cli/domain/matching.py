@@ -32,6 +32,7 @@ def _positive_int(value):
 
 def normalized_match_title(value):
     text = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    text = re.sub(r"[\x27\u2019\u2018\u0060\u00b4]", "", text)
     text = re.sub(r"\b(\d+)(?:st|nd|rd|th)\b", r"\1", text)
     text = text.replace("&", " and ")
     tokens = re.findall(r"[\w]+", text, re.UNICODE)
@@ -42,7 +43,12 @@ def match_titles(item):
     values = [
         item.get("name"),
         item.get("englishName"),
+        item.get("romajiName"),
         item.get("nativeName"),
+        item.get("_display_name"),
+        item.get("_display_english_name"),
+        item.get("_allanime_name"),
+        item.get("_folder_name"),
         *(item.get("altNames") or []),
     ]
     titles = []
@@ -52,9 +58,10 @@ def match_titles(item):
         if title and title not in seen:
             titles.append(title)
             seen.add(title)
-        if len(titles) >= 12:
+        if len(titles) >= 16:
             break
     return titles
+
 
 
 def explicit_season_number(titles):
@@ -343,12 +350,16 @@ def is_same_show(show1, show2, strict=False):
     if strict:
         return False
 
-    # Multi-signal scoring with contradiction verification (score >= 60)
+    # Multi-signal scoring with contradiction verification (score >= 60, or exact title match)
     details = match_score_details(show1, show2)
-    if not details.get("contradiction") and details.get("score", 0) >= 60:
-        return True
+    if not details.get("contradiction"):
+        if details.get("score", 0) >= 60:
+            return True
+        if details.get("exact_title"):
+            return True
 
     return False
+
 
 
 def extract_franchise_query(title: str) -> str:

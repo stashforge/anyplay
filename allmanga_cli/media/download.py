@@ -22,17 +22,18 @@ def sanitize_filename(title: str) -> str:
     ).strip()
 
 
-def download_episode(title, episode, stream, download_dir="", downloader="auto", extra_args=None):
+def download_episode(title, episode, stream, download_dir="", downloader="auto", extra_args=None, quiet=False):
     extra_args = extra_args or []
     audio_url = stream.get("audio_url", "")
     if downloader == "auto":
         downloader = "ffmpeg" if audio_url else "yt-dlp"
 
     if not shutil.which(downloader):
-        if downloader == "ffmpeg":
-            _error("ffmpeg is not installed or not in PATH.")
-        else:
-            _error("yt-dlp is not installed or not in PATH.")
+        if not quiet:
+            if downloader == "ffmpeg":
+                _error("ffmpeg is not installed or not in PATH.")
+            else:
+                _error("yt-dlp is not installed or not in PATH.")
         return False
 
     raw_url = stream.get("link") or stream.get("streamUrl") or stream.get("sourceUrl") or ""
@@ -55,11 +56,8 @@ def download_episode(title, episode, stream, download_dir="", downloader="auto",
 
     # Always create an anime-specific folder, even if download_dir is empty
     if not download_dir:
-        from allmanga_cli.core.storage import get_default_download_dir, load_config, save_config
+        from allmanga_cli.core.storage import get_default_download_dir
         download_dir = get_default_download_dir()
-        live_cfg = load_config()
-        live_cfg["download_dir"] = download_dir
-        save_config(live_cfg)
     else:
         download_dir = os.path.expanduser(str(download_dir).strip())
 
@@ -71,7 +69,8 @@ def download_episode(title, episode, stream, download_dir="", downloader="auto",
         return False
     filename = os.path.join(target_dir, filename)
 
-    print(f"\n{CYAN}[Download]{RESET} {filename}")
+    if not quiet:
+        print(f"\n{CYAN}[Download]{RESET} {filename}")
 
     # Extract all headers
     headers = stream.get("headers", {})
@@ -141,11 +140,20 @@ def download_episode(title, episode, stream, download_dir="", downloader="auto",
     try:
         from allmanga_cli.core.processes import register_subprocess, unregister_subprocess
 
+        popen_kwargs = {}
+        if quiet:
+            popen_kwargs["stdout"] = subprocess.DEVNULL
+            popen_kwargs["stderr"] = subprocess.DEVNULL
+
         if os.name == 'posix':
-            proc = subprocess.Popen(command, preexec_fn=os.setsid)
+            proc = subprocess.Popen(command, preexec_fn=os.setsid, **popen_kwargs)
         else:
             # CREATE_NEW_PROCESS_GROUP is 0x00000200
-            proc = subprocess.Popen(command, creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200))
+            proc = subprocess.Popen(
+                command,
+                creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200),
+                **popen_kwargs,
+            )
 
         register_subprocess(proc)
         try:
@@ -154,10 +162,12 @@ def download_episode(title, episode, stream, download_dir="", downloader="auto",
                 raise subprocess.CalledProcessError(proc.returncode, command)
         finally:
             unregister_subprocess(proc)
-        print(f"\n{GREEN}[Success]{RESET} Download complete.")
+        if not quiet:
+            print(f"\n{GREEN}[Success]{RESET} Download complete.")
         return True
     except Exception as exc:
-        print(f"\n{RED}[Error]{RESET} Download failed: {exc}")
+        if not quiet:
+            print(f"\n{RED}[Error]{RESET} Download failed: {exc}")
         return False
     finally:
         if proxy_server is not None:

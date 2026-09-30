@@ -37,6 +37,120 @@ RESET = "\033[0m"
 
 
 
+
+def trigger_background_auto_download(show_ctx, current_ep_index, episode_ids, ttype, cfg, ms):
+    if not (cfg.get("auto_download_next", False) or getattr(ms, "auto_download_next", False)):
+        return
+    if not app_core.is_online():
+        return
+    if current_ep_index is None or not episode_ids:
+        return
+    next_idx = current_ep_index + 1
+    if next_idx >= len(episode_ids):
+        return
+    next_ep = episode_id_at(episode_ids, next_idx)
+    if not next_ep:
+        return
+
+    from . import playback_episodes as playback_mod
+    lbl_next = playback_mod._display_episode_label(show_ctx, next_ep, ttype)
+    show_title = getattr(ms, "show_title", "") or (show_ctx.get("name") if show_ctx else "")
+    if not show_title:
+        return
+
+    dl_files = getattr(ms, "_download_files", {})
+    if str(next_ep) in dl_files or str(lbl_next) in dl_files:
+        return
+    if app_core.find_offline_file_for_episode(show_title, lbl_next, cfg) or app_core.find_offline_file_for_episode(show_title, str(next_ep), cfg):
+        return
+
+    bg_tasks = getattr(ms, "_bg_download_tasks", None)
+    if bg_tasks is None:
+        ms._bg_download_tasks = set()
+        bg_tasks = ms._bg_download_tasks
+    task_key = (show_title, str(next_ep))
+    if task_key in bg_tasks:
+        return
+    bg_tasks.add(task_key)
+
+    import threading
+    def _bg_worker():
+        try:
+            p_id = app_core.title_provider_id(show_ctx)
+            ep_d = (show_ctx.get("_provider_data") or {}).get(str(next_ep))
+            res = app_core.fetch_episode_stream(
+                show_ctx.get("_id") or p_id,
+                next_ep,
+                ttype,
+                cfg.get("quality", "best"),
+                provider_id=p_id,
+                ep_data=ep_d,
+            )
+            if not res:
+                return
+            selected_stream, first_source_name, _, streams = res
+            if not selected_stream:
+                return
+
+            downloader_choice = cfg.get("downloader", "auto")
+            download_dir = cfg.get("download_dir", "")
+            download_ok = app_core.download_episode(
+                show_title,
+                lbl_next,
+                selected_stream,
+                download_dir=download_dir,
+                downloader=downloader_choice,
+                quiet=True,
+            )
+            if download_ok:
+                try:
+                    from allmanga_cli.core.storage import load_downloads_db, save_downloads_db
+                    db = load_downloads_db()
+                    if show_title not in db["shows"]:
+                        db["shows"][show_title] = {"episodes": []}
+                    def build_offline_metadata(s):
+                        meta = {}
+                        keys_to_keep = [
+                            "id", "_id", "provider_id", "name", "englishName", "nativeName", "altNames",
+                            "thumbnail", "description", "type", "format",
+                            "status", "season", "airedStart", "airedEnd", "startDate",
+                            "endDate", "score", "genres", "tags", "aniListId", "malId",
+                            "_display_name", "_display_english_name", "_anilist_list",
+                            "_anilist_progress", "_anilist_score", "anilistMatch",
+                            "originalEpisodeCount", "episodeCount", "_provider", "provider",
+                            "_provider_name", "_provider_data", "_episode_ids", "_episode_labels",
+                            "_episode_ids_by_ttype", "availableEpisodes", "availableEpisodesDetail",
+                            "_local_progress", "_local_episode_label", "watched_episodes"
+                        ]
+                        for k in keys_to_keep:
+                            if k in s:
+                                meta[k] = s[k]
+                        if "originalEpisodeCount" not in meta and "episodeCount" in s:
+                            meta["originalEpisodeCount"] = s["episodeCount"]
+                        return meta
+                    db["shows"][show_title]["metadata"] = build_offline_metadata(show_ctx)
+                    ep_str = str(next_ep)
+                    if ep_str not in db["shows"][show_title]["episodes"]:
+                        db["shows"][show_title]["episodes"].append(ep_str)
+                    save_downloads_db(db)
+
+                    new_f = app_core.find_offline_file_for_episode(show_title, lbl_next, cfg)
+                    if new_f:
+                        if hasattr(ms, "_download_files") and isinstance(ms._download_files, dict):
+                            ms._download_files[str(next_ep)] = new_f
+                            ms._download_files[str(lbl_next)] = new_f
+                    app_core.set_action_feedback(show_ctx, f"✔ Auto-downloaded EP {lbl_next}")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        finally:
+            bg_tasks.discard(task_key)
+
+    th = threading.Thread(target=_bg_worker, daemon=True)
+    th.start()
+
+
 def handle_play_state(
     flags: CliFlags,
     ui: UiState,
@@ -549,13 +663,16 @@ def handle_play_state(
                     def build_offline_metadata(s):
                         meta = {}
                         keys_to_keep = [
-                            "id", "name", "englishName", "nativeName", "altNames",
+                            "id", "_id", "provider_id", "name", "englishName", "nativeName", "altNames",
                             "thumbnail", "description", "type", "format",
                             "status", "season", "airedStart", "airedEnd", "startDate",
                             "endDate", "score", "genres", "tags", "aniListId", "malId",
                             "_display_name", "_display_english_name", "_anilist_list",
                             "_anilist_progress", "_anilist_score", "anilistMatch",
-                            "originalEpisodeCount", "_provider", "provider", "_provider_name", "_provider_data"
+                            "originalEpisodeCount", "episodeCount", "_provider", "provider",
+                            "_provider_name", "_provider_data", "_episode_ids", "_episode_labels",
+                            "_episode_ids_by_ttype", "availableEpisodes", "availableEpisodesDetail",
+                            "_local_progress", "_local_episode_label", "watched_episodes"
                         ]
                         for k in keys_to_keep:
                             if k in s:
@@ -681,10 +798,22 @@ def handle_play_state(
     is_binge = args.binge or cfg.get("binge", False)
 
     if app_core.is_termux():
-        player = args.player or cfg.get("player", "mpvrex" if app_core.pkg_installed("xyz.mpv.rex") and not app_core.pkg_installed("is.xyz.mpv") else "mpv")
-        if player == "mpv" and not args.player:
-            if not app_core.pkg_installed("is.xyz.mpv") and app_core.pkg_installed("xyz.mpv.rex"):
-                player = "mpvrex"
+        player = args.player or cfg.get("player")
+        if player == "mpvrex":
+            player = "rex"
+        if not player:
+            if app_core.pkg_installed("app.gyrolet.mpvrx") and not app_core.pkg_installed("is.xyz.mpv"):
+                player = "mpvrx"
+            elif app_core.pkg_installed("xyz.mpv.rex") and not app_core.pkg_installed("is.xyz.mpv"):
+                player = "rex"
+            else:
+                player = "mpv"
+        elif player == "mpv" and not args.player and not cfg.get("player"):
+            if not app_core.pkg_installed("is.xyz.mpv"):
+                if app_core.pkg_installed("app.gyrolet.mpvrx"):
+                    player = "mpvrx"
+                elif app_core.pkg_installed("xyz.mpv.rex"):
+                    player = "rex"
 
         aniskip_enabled = getattr(args, "aniskip", None)
         if aniskip_enabled is None:
@@ -692,6 +821,8 @@ def handle_play_state(
 
         action_show = ui.ui_show_ctx or {}
         mal_id = app_core.get_show_mal_id(action_show)
+
+        trigger_background_auto_download(action_show, ms.current_ep_index, episode_ids, ttype, cfg, ms)
 
         result = app_core.play_android(
             ms.show_title,
@@ -704,6 +835,10 @@ def handle_play_state(
             is_binge,
             mal_id=mal_id,
             aniskip_enabled=aniskip_enabled,
+            action_show=action_show,
+            ttype=ttype,
+            cfg=cfg,
+            ep_index=ms.current_ep_index,
         )
 
         if first_source_name is not None and first_source_name != "Local File" and not getattr(ms, "_is_downloads", False):
@@ -726,14 +861,9 @@ def handle_play_state(
 
         if result:
             app_core.touch_history(action_show, ttype)
-            ms._android_pending_show_id = ms.show_id
-            ms._android_pending_watched_ep = ms.current_ep
-            ms._android_pending_watched_idx = ms.current_ep_index
-            if ms.current_ep_index is not None and ms.current_ep_index + 1 < ms.total_eps:
-                ms.current_ep_index += 1
-                ms.current_ep = episode_id_at(episode_ids, ms.current_ep_index)
-                ms.selected_stream = None
-                app_core._clear_streams()
+            cur_resume = app_core.get_resume_time(ms.show_id, ms.current_ep) or 0
+            if cur_resume <= 0:
+                app_core.save_resume_time(ms.show_id, ms.current_ep, 1)
 
         app_core._exit_player_screen()
         return "DETAILS"
@@ -756,6 +886,8 @@ def handle_play_state(
 
         action_show = ui.ui_show_ctx or {}
         mal_id = app_core.get_show_mal_id(action_show)
+
+        trigger_background_auto_download(action_show, ms.current_ep_index, episode_ids, ttype, cfg, ms)
 
         start_time_override = getattr(ms, "pending_resume_time", None)
         ms.pending_resume_time = None

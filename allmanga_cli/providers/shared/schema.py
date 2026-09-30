@@ -174,27 +174,44 @@ def build_catalog(
     error: str = "",
     provider: str = "",
     provider_id: Any = "",
+    translation_type: str = "sub",
 ) -> dict[str, Any]:
-    normalized_episodes = {"sub": [], "dub": [], "raw": []}
+    from ...domain.episodes import build_episode_map
+
+    episodes_map_by_type = {}
+    by_number_by_type = {}
+    detail = {}
+
     for key in ("sub", "dub", "raw"):
-        normalized_episodes[key] = [
+        raw_items = [
             _normalize_episode_item(item, key)
             for item in (episodes or {}).get(key, [])
         ]
+        ep_map, num_map = build_episode_map(raw_items, translation_type=key)
+        episodes_map_by_type[key] = ep_map
+        by_number_by_type[key] = num_map
+        detail[key] = list(ep_map.keys())
 
-    ids = [episode["id"] for episode in normalized_episodes["sub"]]
+    tt_norm = str(translation_type or "sub").strip().lower()
+    primary_key = (tt_norm if episodes_map_by_type.get(tt_norm) else None) or ("sub" if episodes_map_by_type.get("sub") else ("dub" if episodes_map_by_type.get("dub") else "sub"))
+    primary_map = episodes_map_by_type.get(primary_key, {})
+    primary_by_number = by_number_by_type.get(primary_key, {})
+
+    ids = list(primary_map.keys())
     labels = {
-        episode["id"]: episode["label"]
-        for episode in normalized_episodes["sub"]
-        if episode.get("id")
+        eid: ep.get("label", eid)
+        for eid, ep in primary_map.items()
     }
-    detail = {
-        key: [episode["id"] for episode in values]
-        for key, values in normalized_episodes.items()
-    }
+
     return {
         "state": state,
-        "episodes": normalized_episodes,
+        "episodes": {
+            k: list(m.values()) for k, m in episodes_map_by_type.items()
+        },
+        "episodes_map": primary_map,
+        "episodes_map_by_ttype": episodes_map_by_type,
+        "by_number": primary_by_number,
+        "by_number_by_ttype": by_number_by_type,
         "ids": ids,
         "labels": labels,
         "detail": detail,
@@ -203,4 +220,5 @@ def build_catalog(
         "_provider_id": _clean_text(provider_id),
         "_provider_episode_ids": ids,
     }
+
 

@@ -13,7 +13,9 @@ from ..media.urls import validate_optional_referer, validate_stream_url
 
 PLAYERS = {
     "mpv": ("is.xyz.mpv", "is.xyz.mpv.MPVActivity"),
+    "rex": ("xyz.mpv.rex", None),
     "mpvrex": ("xyz.mpv.rex", None),
+    "mpvrx": ("app.gyrolet.mpvrx", ".ui.player.PlayerActivity"),
     "vlc": ("org.videolan.vlc", None),
     "next": (
         "dev.anilbeesetti.nextplayer",
@@ -65,14 +67,123 @@ def play_android(
         show_id=None,
         is_binge=False,
         mal_id=None,
-        aniskip_enabled=True):
-    del fetch_callback, total_eps, show_id, is_binge
+        aniskip_enabled=True,
+        action_show=None,
+        ttype="sub",
+        cfg=None,
+        ep_index=None):
+    del fetch_callback, total_eps, is_binge
     try:
         url = validate_stream_url(stream["link"])
         referer = validate_optional_referer(stream.get("referer", ""))
     except ValueError:
         _error("Player rejected an unsafe stream URL.")
         return False
+
+    start_time = 0
+    if show_id and player != "vlc":
+        try:
+            from ..core.storage import get_resume_time
+            from ..domain.episodes import clean_episode_identifier
+            cleaned_ep = clean_episode_identifier(str(episode))
+            start_time = (
+                get_resume_time(show_id, episode)
+                or (get_resume_time(show_id, cleaned_ep) if cleaned_ep else 0)
+            ) or 0
+            if start_time > 35:
+                start_time = max(0, start_time - 30)
+            elif start_time > 10:
+                start_time = max(0, start_time - 10)
+            else:
+                start_time = 0
+        except Exception:
+            start_time = 0
+
+    duration_val = float(stream.get("duration") or stream.get("dash_duration") or 0.0)
+
+    def handle_progress(sid, ep, t_pos, total_dur, is_complete):
+        try:
+            from ..core.storage import save_resume_time
+            if is_complete:
+                save_resume_time(sid, ep, 0)
+                if action_show:
+                    from ..domain.episodes import episode_progress_number
+                    try:
+                        prog_num = int(float(episode_progress_number(ep, (ep_index or 0) + 1)))
+                    except Exception:
+                        prog_num = None
+                    try:
+                        from ..core.storage import save_history
+                        save_history(action_show, ep, ttype)
+                    except Exception:
+                        pass
+                    if prog_num is not None:
+                        try:
+                            from ..domain.metadata import prepare_show_display_state
+                            prepare_show_display_state(action_show, ttype)
+                        except Exception:
+                            pass
+                        action_show["_local_progress"] = prog_num
+                        action_show["_local_episode_label"] = str(ep)
+                        if action_show.get("_anilist_progress") is not None:
+                            action_show["_anilist_progress"] = max(
+                                int(action_show.get("_anilist_progress") or 0), prog_num
+                            )
+                        action_show["_progress_authority"] = "LOCAL"
+                    tkn = (cfg or {}).get("anilist_token")
+                    if tkn:
+                        try:
+                            from ..app_core import get_show_anilist_id, queue_anilist_progress
+                            al_id = get_show_anilist_id(action_show)
+                            if al_id and prog_num is not None:
+                                queue_anilist_progress(
+                                    tkn, title, prog_num, al_id,
+                                    action_show, ttype, "CURRENT",
+                                )
+                        except Exception:
+                            pass
+
+                    # Update offline watch status and handle auto-delete / auto-download
+                    try:
+                        from ..core.storage import update_offline_watch_status
+                        from ..app_core import delete_offline_episode
+                        folder_name = action_show.get("_folder_name", title)
+                        if update_offline_watch_status(folder_name, ep):
+                            watched = action_show.get("watched_episodes", [])
+                            if str(ep) not in watched:
+                                watched.append(str(ep))
+                            action_show["watched_episodes"] = watched
+                        if (cfg or {}).get("auto_delete_watched", False):
+                            buf = int((cfg or {}).get("auto_delete_buffer", 1))
+                            watched_list = action_show.get("watched_episodes", [])
+                            eids = action_show.get("_episode_ids") or []
+                            from ..app import playback_episodes as pmod
+                            watched_dl = []
+                            for eid in eids:
+                                elbl = pmod._display_episode_label(action_show, eid, ttype)
+                                if (str(eid) in watched_list or str(elbl) in watched_list):
+                                    watched_dl.append((eid, elbl))
+                            if buf >= 0 and len(watched_dl) > buf:
+                                to_del = watched_dl[:-buf] if buf > 0 else watched_dl
+                                for deid, dlbl in to_del:
+                                    delete_offline_episode(folder_name, dlbl, cfg)
+                                    delete_offline_episode(folder_name, str(deid), cfg)
+                    except Exception:
+                        pass
+
+                    if (cfg or {}).get("auto_download_next", False) and action_show and ep_index is not None:
+                        try:
+                            from ..app.playback_player import trigger_background_auto_download
+                            eids = action_show.get("_episode_ids") or []
+                            from ..context import MachineState
+                            dummy_ms = MachineState(show_title=title, auto_download_next=True)
+                            trigger_background_auto_download(action_show, ep_index, eids, ttype, cfg, dummy_ms)
+                        except Exception:
+                            pass
+            else:
+                save_resume_time(sid, ep, t_pos)
+        except Exception:
+            pass
 
     # Write AniSkip chapters for MPV on Android (always overwrites / clears if no skips)
     chapters_path = "/storage/emulated/0/Mpv/chapters.txt"
@@ -163,6 +274,10 @@ def play_android(
                 subtitles=subtitles,
                 audio_tracks=stream.get("audio_tracks"),
                 target_player=player,
+                show_id=show_id,
+                episode=episode,
+                duration=duration_val,
+                on_progress=handle_progress,
             )
             replace_active_local_proxy(proxy_server)
             intent_type = "video/*"
@@ -187,6 +302,10 @@ def play_android(
                 subtitles=subtitles,
                 audio_tracks=stream.get("audio_tracks"),
                 target_player=player,
+                show_id=show_id,
+                episode=episode,
+                duration=duration_val,
+                on_progress=handle_progress,
             )
             replace_active_local_proxy(proxy_server)
             intent_type = "video/*"
@@ -207,6 +326,10 @@ def play_android(
                 title=media_title,
                 subtitles=subtitles,
                 target_player=player,
+                show_id=show_id,
+                episode=episode,
+                duration=duration_val,
+                on_progress=handle_progress,
             )
             replace_active_local_proxy(proxy_server)
             intent_type = "video/*"
@@ -234,6 +357,13 @@ def play_android(
         "title",
         media_title,
     ])
+    if start_time > 0 and player in ("next", "mpv", "rex", "mpvrx", "mpvrex"):
+        _info(f"Resuming {player} at {int(start_time // 60):02d}:{int(start_time % 60):02d}...")
+        target_ms = int(start_time * 1000)
+        command.extend([
+            "--el", "position", str(target_ms),
+            "--ei", "position", str(target_ms),
+        ])
     hdr_list = []
     if referer:
         hdr_list.extend(["Referer", referer])
@@ -273,6 +403,12 @@ def play_android(
                 "title",
                 media_title,
             ]
+            if start_time > 0 and player in ("next", "mpv", "rex", "mpvrx", "mpvrex"):
+                target_ms = int(start_time * 1000)
+                fallback_cmd.extend([
+                    "--el", "position", str(target_ms),
+                    "--ei", "position", str(target_ms),
+                ])
             if hdr_list:
                 fallback_cmd.extend(["--esa", "headers", ",".join(hdr_list)])
             r2 = subprocess.run(

@@ -150,17 +150,26 @@ def handle_episode_state(
         return ui.ep_prev_state
 
     ms.total_eps = len(episode_ids) or ms.total_eps
+    episodes_map = show.get("_episodes_map") or {}
+    if not episodes_map and show.get("_episodes_map_by_ttype"):
+        episodes_map = show["_episodes_map_by_ttype"].get(ttype) or {}
     episode_labels = _episode_labels_for(show, ttype)
     display_order = list(range(len(episode_ids)))
     if app_core.get_episode_order(ms.show_id, cfg.get("episode_order", "asc")) == "desc":
         display_order.reverse()
 
     def _is_ep_downloaded(eid, lbl):
-        if not getattr(ms, "_is_downloads", False):
-            return True
         dl_files = getattr(ms, "_download_files", {}) or {}
         if str(eid) in dl_files or str(lbl) in dl_files:
             return True
+        ep_entry = episodes_map.get(str(eid))
+        if ep_entry:
+            disp = ep_entry.get("display_number")
+            f_num = ep_entry.get("franchise_number")
+            if disp and (disp in dl_files or f"Episode {disp}" in dl_files):
+                return True
+            if f_num and f_num in dl_files:
+                return True
         from ..domain.episodes import clean_episode_identifier, parse_episode_dual_numbers
         prim, sec = parse_episode_dual_numbers(str(lbl))
         clean = (prim or clean_episode_identifier(str(lbl)) or str(lbl)).lstrip("0") or "0"
@@ -182,30 +191,126 @@ def handle_episode_state(
                 return True
         return False
 
-    def _build_ep_option(eid):
+    def _is_ep_watched(eid, lbl, orig_idx=None):
+        if not show:
+            return False
+        ep_entry = episodes_map.get(str(eid))
+        watched_eps = show.get("watched_episodes", [])
+        if not watched_eps:
+            try:
+                from ..core.storage import load_downloads_db
+                db = load_downloads_db()
+                folder_name = show.get("_folder_name") or getattr(ms, "show_title", "") or show.get("name")
+                if folder_name and folder_name in db.get("shows", {}):
+                    watched_eps = db["shows"][folder_name].get("watched_episodes", [])
+            except Exception:
+                pass
+
+        if watched_eps:
+            if str(eid) in watched_eps or str(lbl) in watched_eps:
+                return True
+            if ep_entry:
+                disp = ep_entry.get("display_number")
+                f_num = ep_entry.get("franchise_number")
+                if disp and (disp in watched_eps or f"Episode {disp}" in watched_eps):
+                    return True
+                if f_num and f_num in watched_eps:
+                    return True
+            else:
+                from ..domain.episodes import clean_episode_identifier, parse_episode_dual_numbers
+                prim, sec = parse_episode_dual_numbers(str(lbl))
+                clean = (prim or clean_episode_identifier(str(lbl)) or str(lbl)).lstrip("0") or "0"
+                clean_eid = clean_episode_identifier(str(eid))
+                clean_eid_num = (clean_eid.lstrip("0") or "0") if clean_eid else None
+                for w in watched_eps:
+                    wp, ws = parse_episode_dual_numbers(str(w))
+                    wc = (wp or clean_episode_identifier(str(w)) or str(w)).lstrip("0") or "0"
+                    if wc == clean or (clean_eid_num and wc == clean_eid_num) or (sec and sec == ws):
+                        return True
+
+        local_p = show.get("_local_progress")
+        if local_p is None:
+            local_p = app_core.get_local_progress(show, ttype)
+        al_p = show.get("_anilist_progress")
+        eff_p = None
+        if local_p is not None:
+            try:
+                eff_p = float(str(local_p))
+            except (ValueError, TypeError):
+                pass
+        if al_p is not None:
+            try:
+                al_val = float(str(al_p))
+                if eff_p is None or al_val > eff_p:
+                    eff_p = al_val
+            except (ValueError, TypeError):
+                pass
+
+        if eff_p is not None and eff_p > 0:
+            if ep_entry and ep_entry.get("number", 0.0) > 0:
+                if ep_entry["number"] <= eff_p:
+                    return True
+            else:
+                from ..domain.episodes import clean_episode_identifier, parse_episode_dual_numbers
+                prim, sec = parse_episode_dual_numbers(str(lbl))
+                clean = (prim or clean_episode_identifier(str(lbl)) or clean_episode_identifier(str(eid)) or str(lbl)).lstrip("0") or "0"
+                try:
+                    ep_val = float(clean)
+                    if ep_val <= eff_p:
+                        return True
+                except (ValueError, TypeError):
+                    pass
+            if orig_idx is not None and orig_idx < eff_p:
+                return True
+
+        return False
+
+    def _build_ep_option(orig_i):
+
+        eid = episode_ids[orig_i]
         lbl = episode_label(eid, episode_labels)
-        if getattr(ms, "_is_downloads", False):
-            if _is_ep_downloaded(eid, lbl):
-                return f"{lbl}  \033[38;2;166;227;161m✔\033[0m"
+        is_dl = _is_ep_downloaded(eid, lbl)
+        is_w = _is_ep_watched(eid, lbl, orig_i)
+        if is_w:
+            if is_dl:
+                return f"\033[38;5;244m{lbl}  \033[38;2;166;227;161m✔\033[0m"
             return f"\033[38;5;244m{lbl}\033[0m"
-        return lbl
+        else:
+            if is_dl:
+                return f"{lbl}  \033[38;2;166;227;161m✔\033[0m"
+            return f"{lbl}"
 
     def _compute_disabled_indices():
         return set()
 
     def _ep_hint_fn(oi):
-        if not getattr(ms, "_is_downloads", False):
-            return ""
         if not (0 <= oi < len(display_order)):
             return ""
         orig_i = display_order[oi]
         eid = episode_ids[orig_i]
         lbl = episode_label(eid, episode_labels)
-        if _is_ep_downloaded(eid, lbl):
-            return "ready to watch"
-        return f"\033[38;5;167m✘\033[38;5;244m not downloaded\033[0m"
+        is_dl = _is_ep_downloaded(eid, lbl)
+        is_w = _is_ep_watched(eid, lbl, orig_i)
+        if getattr(ms, "_is_downloads", False):
+            if is_w:
+                if is_dl:
+                    return "watched • ready to watch"
+                return "\033[38;5;244mwatched • not downloaded\033[0m"
+            else:
+                if is_dl:
+                    return "ready to watch"
+                return "\033[38;5;167m✘\033[38;5;244m not downloaded\033[0m"
+        else:
+            if is_w:
+                if is_dl:
+                    return "watched • ready to watch"
+                return "\033[38;5;244mwatched\033[0m"
+            else:
+                if is_dl:
+                    return "ready to watch"
+                return ""
 
-    ep_opts = [_build_ep_option(episode_ids[i]) for i in display_order]
+    ep_opts = [_build_ep_option(i) for i in display_order]
     disabled_indices = _compute_disabled_indices()
 
     _hdr_cache: dict[tuple, str] = {}
@@ -272,7 +377,7 @@ def handle_episode_state(
             display_order = list(range(len(episode_ids)))
             if app_core.get_episode_order(ms.show_id, cfg.get("episode_order", "asc")) == "desc":
                 display_order.reverse()
-            ep_opts = [_build_ep_option(episode_ids[i]) for i in display_order]
+            ep_opts = [_build_ep_option(i) for i in display_order]
             disabled_indices = _compute_disabled_indices()
         else:
             p_name = (show.get("_provider_name") or (show.get("_provider") or "").title() or "this provider") if show else "this provider"
@@ -284,7 +389,7 @@ def handle_episode_state(
         _hdr_cache.clear()
         app_core.toggle_episode_order(ms.show_id, cfg.get("episode_order", "asc"))
         display_order.reverse()
-        ep_opts = [_build_ep_option(episode_ids[i]) for i in display_order]
+        ep_opts = [_build_ep_option(i) for i in display_order]
         disabled_indices = _compute_disabled_indices()
         new_order = app_core.get_episode_order(ms.show_id, cfg.get("episode_order", "asc"))
         app_core.set_action_feedback(show, f"Order: {'Newest first (N → 1)' if new_order == 'desc' else 'Oldest first (1 → N)'}")
@@ -325,7 +430,7 @@ def handle_episode_state(
             app_core.set_action_feedback(show, f"✘ Could not delete EP {lbl}")
 
         _hdr_cache.clear()
-        ep_opts = [_build_ep_option(episode_ids[i]) for i in display_order]
+        ep_opts = [_build_ep_option(i) for i in display_order]
         disabled_indices = _compute_disabled_indices()
         return ep_opts, _ep_hdr(sel_idx)
 
@@ -371,7 +476,7 @@ def handle_episode_state(
                 delete_fn=_delete_ep_file if getattr(ms, "_is_downloads", False) else None,
                 delete_prompt=_ep_delete_prompt if getattr(ms, "_is_downloads", False) else None,
                 can_delete_fn=_can_delete_ep if getattr(ms, "_is_downloads", False) else None,
-                hints=_ep_hint_fn if getattr(ms, "_is_downloads", False) else None,
+                hints=_ep_hint_fn,
                 info_fn=app_core.make_single_show_info_fn(ui.ui_show_ctx, ui),
                 help_dict=hd6,
                 disabled_indices=disabled_indices,

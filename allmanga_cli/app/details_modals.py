@@ -73,9 +73,23 @@ def handle_update_progress_state(
     except (ValueError, TypeError):
         cur_abs = 0
 
+    watched_list = s.get("watched_episodes", [])
+    if not watched_list:
+        try:
+            from ..core.storage import load_downloads_db
+            db = load_downloads_db()
+            folder_name = s.get("_folder_name") or getattr(ms, "show_title", "") or s.get("name")
+            if folder_name and folder_name in db.get("shows", {}):
+                watched_list = db["shows"][folder_name].get("watched_episodes", [])
+        except Exception:
+            pass
+
     def _is_entry_watched(entry):
         if entry.get("id") == "0":
             return False
+        if watched_list:
+            if str(entry.get("id")) in watched_list or str(entry.get("ep_number")) in watched_list:
+                return True
         ep_rel = entry.get("anilist_progress", 0)
         try:
             ep_abs = int(entry.get("ep_number", 0))

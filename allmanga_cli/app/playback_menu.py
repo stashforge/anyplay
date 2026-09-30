@@ -107,6 +107,8 @@ def handle_action_menu_state(
 
     al_prog = int(action_show.get("_anilist_progress") or 0)
     local_p = app_core.get_local_progress(action_show, ttype)
+    if local_p is None:
+        local_p = action_show.get("_local_progress")
     local_lbl = action_show.get("_local_episode_label") or local_p
     resolved_lbl = resolve_dual_episode_label(action_show, local_lbl or local_p)
     l_prim, l_sec = parse_episode_dual_numbers(resolved_lbl)
@@ -155,7 +157,46 @@ def handle_action_menu_state(
         )
     )
 
+    def _refresh_progress_state():
+        nonlocal al_prog, local_p, local_lbl, resolved_lbl, l_prim, l_sec, local_prog_val, eff_prog, all_available_watched, is_completed
+        al_prog = int(action_show.get("_anilist_progress") or 0)
+        local_p = app_core.get_local_progress(action_show, ttype)
+        if local_p is None:
+            local_p = action_show.get("_local_progress")
+        local_lbl = action_show.get("_local_episode_label") or local_p
+        resolved_lbl = resolve_dual_episode_label(action_show, local_lbl or local_p)
+        l_prim, l_sec = parse_episode_dual_numbers(resolved_lbl)
+
+        try:
+            local_prog_val = int(l_prim or clean_episode_identifier(str(local_p or 0)))
+        except (ValueError, TypeError):
+            local_prog_val = 0
+
+        eff_prog = (
+            al_prog
+            if (from_anilist_context or use_anilist) and al_prog > 0
+            else local_prog_val
+        )
+
+        all_available_watched = bool(
+            (ms.total_eps > 0 and eff_prog >= ms.total_eps)
+            or (highest_ep_num > 0 and eff_prog >= highest_ep_num)
+        )
+
+        pb_status = (
+            str(action_show.get("_anilist_list", "")).upper() if use_anilist else ""
+        )
+        is_completed = bool(
+            all_available_watched
+            and (
+                pb_status == "COMPLETED"
+                or is_finished
+                or (total_count > 0 and eff_prog >= total_count and is_finished)
+            )
+        )
+
     def _check_watched():
+        _refresh_progress_state()
         if getattr(ms, "_is_downloads", False):
             watched_eps = action_show.get("watched_episodes", [])
             if str(ms.current_ep) in watched_eps:
@@ -214,6 +255,8 @@ def handle_action_menu_state(
         opts = []
         acts = []
         action_hints = {}
+        _refresh_progress_state()
+        is_watched = _check_watched()
 
         if (
             getattr(ms, "_android_pending_show_id", None)
@@ -239,7 +282,12 @@ def handle_action_menu_state(
             acts.append("REWATCH")
             action_hints["Start Rewatch"] = "play EP 1 from start"
         elif resume_time > 0 and not is_watched:
-            effective_resume = max(0, resume_time - 30)
+            if resume_time > 35:
+                effective_resume = max(0, resume_time - 30)
+            elif resume_time > 10:
+                effective_resume = max(0, resume_time - 10)
+            else:
+                effective_resume = 0
             opts.append("Continue")
             acts.append("CONTINUE")
             action_hints["Continue"] = (
@@ -254,11 +302,16 @@ def handle_action_menu_state(
                 f"play {playback_mod._fmt_ep(current_ep_label)} from start"
             )
         elif is_watched:
-            opts.append("Replay")
-            acts.append("REPLAY")
-            action_hints["Replay"] = (
-                f"play {playback_mod._fmt_ep(current_ep_label)} from start"
-            )
+            if next_ep is not None and not is_completed:
+                opts.append("Play Next")
+                acts.append("NEXT")
+                action_hints["Play Next"] = f"play {playback_mod._fmt_ep(next_ep_label)}"
+            else:
+                opts.append("Replay")
+                acts.append("REPLAY")
+                action_hints["Replay"] = (
+                    f"play {playback_mod._fmt_ep(current_ep_label)} from start"
+                )
         elif eff_prog > 0 or pending_watched_ep is not None:
             opts.append("Play Next")
             acts.append("PLAY_CURRENT")
@@ -284,7 +337,11 @@ def handle_action_menu_state(
             elif resume_time > 0 or is_watched:
                 opts.append("Replay")
                 acts.append("REPLAY")
-                action_hints["Replay"] = "from start"
+                action_hints["Replay"] = (
+                    f"play {playback_mod._fmt_ep(current_ep_label)} from start"
+                    if is_watched
+                    else "from start"
+                )
 
         # Previous (if prev_ep exists)
         if (
@@ -295,6 +352,17 @@ def handle_action_menu_state(
             opts.append("Previous")
             acts.append("PREV")
             action_hints["Previous"] = f"play {playback_mod._fmt_ep(prev_ep_label)}"
+
+        # Next (if next_ep exists and Play Next not already in opts)
+        if (
+            next_ep is not None
+            and not is_completed
+            and "Play Next" not in opts
+            and "Next" not in opts
+        ):
+            opts.append("Next")
+            acts.append("NEXT")
+            action_hints["Next"] = f"play {playback_mod._fmt_ep(next_ep_label)}"
 
         # Binge
         if ms.total_eps > 1:
@@ -414,6 +482,15 @@ def handle_action_menu_state(
 
     action_hints = {}
     _build_menu()
+
+    _last_menu_resume = (
+        app_core.get_resume_time(ms.show_id, ms.current_ep)
+        or app_core.get_resume_time(ms.show_id, current_ep_label)
+        or 0
+    )
+    _last_menu_watched = is_watched
+    _last_menu_al_prog = action_show.get("_anilist_progress")
+    _last_menu_local_prog = action_show.get("_local_progress")
 
     _hdr_cache = {}
 
@@ -535,6 +612,57 @@ def handle_action_menu_state(
             )
         return (opts, _action_hdr(0))
 
+    def _action_hints_fn(opt_idx):
+        if opt_idx < 0 or opt_idx >= len(opts):
+            return ""
+        opt_name = opts[opt_idx]
+        if opt_name == "Continue":
+            cur_rt = (
+                app_core.get_resume_time(ms.show_id, ms.current_ep)
+                or app_core.get_resume_time(ms.show_id, current_ep_label)
+                or 0
+            )
+            if cur_rt > 35:
+                eff_r = max(0, cur_rt - 30)
+            elif cur_rt > 10:
+                eff_r = max(0, cur_rt - 10)
+            else:
+                eff_r = 0
+            return f"resume {playback_mod._fmt_ep(current_ep_label)} from {app_core.format_video_time(eff_r)}"
+        return action_hints.get(opt_name, "")
+
+    def _action_live_fn(q):
+        nonlocal _last_menu_resume, _last_menu_watched, _last_menu_al_prog, _last_menu_local_prog
+        cur_rt = (
+            app_core.get_resume_time(ms.show_id, ms.current_ep)
+            or app_core.get_resume_time(ms.show_id, current_ep_label)
+            or 0
+        )
+        cur_al_p = action_show.get("_anilist_progress")
+        cur_loc_p = action_show.get("_local_progress")
+        _refresh_progress_state()
+        cur_watched = _check_watched()
+
+        resume_bucket_changed = (
+            (_last_menu_resume is not None)
+            and ((_last_menu_resume > 0 and cur_rt == 0) or (_last_menu_resume == 0 and cur_rt > 0))
+        )
+        state_changed = (
+            resume_bucket_changed
+            or (_last_menu_watched is not None and cur_watched != _last_menu_watched)
+            or (_last_menu_al_prog is not None and cur_al_p != _last_menu_al_prog)
+            or (_last_menu_local_prog is not None and cur_loc_p != _last_menu_local_prog)
+        )
+        if state_changed:
+            _last_menu_resume = cur_rt
+            _last_menu_watched = cur_watched
+            _last_menu_al_prog = cur_al_p
+            _last_menu_local_prog = cur_loc_p
+            _hdr_cache.clear()
+            _build_menu()
+
+        return (opts, _action_hdr(0), True)
+
     hd7 = picker_help("Select action", "Go back", "Go back", tab_label="Toggle Sub/Dub")
     idx = tui_pick(
         flags,
@@ -542,9 +670,10 @@ def handle_action_menu_state(
         "Select action",
         opts,
         header_fn=_action_hdr,
+        live_fn=_action_live_fn,
         tab_fn=_action_tab_fn,
         info_fn=app_core.make_single_show_info_fn(action_show, ui),
-        hints=action_hints,
+        hints=_action_hints_fn,
         help_dict=hd7,
     )
 
@@ -754,6 +883,8 @@ def handle_action_menu_state(
     elif a == "NEXT":
         ms.current_ep_index += 1
         ms.current_ep = episode_id_at(episode_ids, ms.current_ep_index)
+        ms.selected_stream = None
+        app_core._clear_streams()
         playback_mod._clear_episode_source_state(ms)
         return "PLAY"
 
@@ -762,6 +893,8 @@ def handle_action_menu_state(
         ms._android_pending_watched_idx = None
         ms.current_ep_index -= 1
         ms.current_ep = episode_id_at(episode_ids, ms.current_ep_index)
+        ms.selected_stream = None
+        app_core._clear_streams()
         playback_mod._clear_episode_source_state(ms)
         return "PLAY"
 
@@ -795,12 +928,16 @@ def handle_action_menu_state(
 
     elif a == "TOGGLE_AUTO_DOWNLOAD":
         ms.auto_download_next = not getattr(ms, "auto_download_next", False)
+        cfg["auto_download_next"] = ms.auto_download_next
+        app_core.save_config(cfg)
         status = "ON" if ms.auto_download_next else "OFF"
         app_core.set_action_feedback(action_show, f"Auto-Download: {status}")
         return "DETAILS"
 
     elif a == "TOGGLE_AUTO_DELETE":
         ms.auto_delete_watched = not getattr(ms, "auto_delete_watched", False)
+        cfg["auto_delete_watched"] = ms.auto_delete_watched
+        app_core.save_config(cfg)
         status = "ON" if ms.auto_delete_watched else "OFF"
         app_core.set_action_feedback(action_show, f"Auto-Delete: {status}")
         return "DETAILS"
@@ -1085,9 +1222,26 @@ def handle_download_menu_state(
     elif action == "ALL":
         queued_eps = episode_ids[:]
     elif action == "PICK":
+        def _build_batch_dl_label(ep_id, idx):
+            raw_lbl = playback_mod._display_episode_label(action_show, ep_id, ttype)
+            lbl = f"Episode {raw_lbl}"
+            w_list = action_show.get("watched_episodes", [])
+            is_w = str(ep_id) in w_list or str(raw_lbl) in w_list
+            if not is_w:
+                eff = action_show.get("_local_progress") or action_show.get("_anilist_progress")
+                try:
+                    if eff and float(raw_lbl) <= float(eff):
+                        is_w = True
+                except (ValueError, TypeError):
+                    if eff and idx < float(eff):
+                        is_w = True
+            if is_w:
+                return f"\033[38;5;244m{lbl}\033[0m"
+            return lbl
+
         ep_options = [
-            f"Episode {playback_mod._display_episode_label(action_show, ep_id, ttype)}"
-            for ep_id in episode_ids
+            _build_batch_dl_label(ep_id, i)
+            for i, ep_id in enumerate(episode_ids)
         ]
         _pick_hdr_cache: dict[tuple, str] = {}
 

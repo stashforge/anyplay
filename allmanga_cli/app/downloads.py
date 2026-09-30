@@ -49,15 +49,31 @@ def offline_file_sort_key(filepath: str) -> tuple[float, float, str]:
 def handle_downloads_state(flags, ui, ms, cfg, args, ttype, resolveTracking):
     db = load_downloads_db()
 
-    download_dir = cfg.get("download_dir", "")
+    raw_arg_dir = getattr(args, "download_dir", None)
+    if isinstance(raw_arg_dir, str) and raw_arg_dir.strip():
+        download_dir = raw_arg_dir.strip()
+    else:
+        download_dir = str(cfg.get("download_dir", "") or "").strip()
+
     if not download_dir:
         download_dir = get_default_download_dir()
-        live_cfg = load_config()
-        live_cfg["download_dir"] = download_dir
-        save_config(live_cfg)
 
-    download_dir = os.path.expanduser(download_dir)
+    download_dir = os.path.abspath(os.path.expanduser(download_dir))
     shows = db.get("shows", {})
+
+    dir_exists = os.path.isdir(download_dir)
+    db_dir = db.get("current_download_dir", "")
+    dir_matches_db = bool(db_dir and os.path.abspath(os.path.expanduser(db_dir)) == os.path.abspath(download_dir))
+    found_any_known_show = False
+    if dir_exists and shows:
+        for t in shows.keys():
+            if os.path.isdir(os.path.join(download_dir, t)):
+                found_any_known_show = True
+                break
+
+    # Safe to prune only if download_dir is the established downloads folder or contains known shows.
+    # Prevents wiping the database when download_dir temporarily points to an empty or invalid directory.
+    safe_to_prune = dir_exists and (dir_matches_db or found_any_known_show or not shows)
 
     dirty = False
     valid_titles = []
@@ -65,13 +81,40 @@ def handle_downloads_state(flags, ui, ms, cfg, args, ttype, resolveTracking):
     for title, data in list(shows.items()):
         folder_path = os.path.join(download_dir, title)
         if not os.path.isdir(folder_path):
-            del shows[title]
-            dirty = True
+            if safe_to_prune:
+                del shows[title]
+                dirty = True
             continue
 
         meta = data.get("metadata", {})
-        if "_id" not in meta and "availableEpisodes" not in meta:
-            # User requested not to auto-fetch metadata because title match is hard and causes delays
+        temp_show = {"name": title, "_folder_name": title, **meta}
+        h_entry = app_core.get_history_entry(temp_show, ttype)
+        if h_entry and isinstance(h_entry.get("show"), dict):
+            h_show = h_entry["show"]
+            for k in (
+                "_id", "id", "thumbnail", "banner", "description",
+                "type", "format", "status", "season", "airedStart", "airedEnd",
+                "episodeCount", "availableEpisodes", "score", "genres", "tags",
+                "aniListId", "malId", "_provider", "_provider_id", "_provider_name",
+                "_display_name", "_allanime_name", "englishName", "romajiName",
+                "anilistMatch", "_episodes_map", "_episodes_map_by_ttype",
+                "_episodes_by_number", "_episodes_by_number_by_ttype",
+                "_episode_ids", "_episode_labels", "_episode_ids_by_ttype",
+            ):
+                if h_show.get(k) and (k not in meta or not meta.get(k)):
+                    meta[k] = h_show[k]
+                    dirty = True
+            if h_show.get("episodeCount") and meta.get("episodeCount") != h_show["episodeCount"]:
+                meta["episodeCount"] = h_show["episodeCount"]
+                meta["originalEpisodeCount"] = h_show["episodeCount"]
+                dirty = True
+            if h_entry.get("episode") and not meta.get("_local_progress"):
+                from allmanga_cli.domain.episodes import clean_episode_identifier
+                ep_clean = clean_episode_identifier(str(h_entry.get("episode")))
+                if ep_clean:
+                    meta["_local_progress"] = ep_clean
+            data["metadata"] = meta
+        elif "_id" not in meta and "availableEpisodes" not in meta:
             meta["name"] = title
             data["metadata"] = meta
             dirty = True
@@ -107,15 +150,11 @@ def handle_downloads_state(flags, ui, ms, cfg, args, ttype, resolveTracking):
             dirty = True
         meta["downloadedCount"] = len(valid_eps)
 
-        if not valid_eps:
+        if valid_eps:
+            valid_titles.append((title, data))
+        elif safe_to_prune:
             del shows[title]
             dirty = True
-            try:
-                os.rmdir(folder_path)
-            except OSError:
-                pass
-        else:
-            valid_titles.append((title, data))
 
     if dirty:
         save_downloads_db(db)
@@ -173,7 +212,12 @@ def handle_downloads_state(flags, ui, ms, cfg, args, ttype, resolveTracking):
             show = data.get("metadata", {})
             show["watched_episodes"] = data.get("watched_episodes", [])
             show["_folder_name"] = title
+            if show.get("_local_progress") is None:
+                show["_local_progress"] = app_core.get_local_progress(show, "sub")
+            if show.get("_local_episode_label") is None:
+                show["_local_episode_label"] = app_core.get_local_episode_label(show, "sub")
             build_info_panel(show, "sub", w, parts, local_only=True)
+
 
         online_badge = "" if app_core.is_online() else "\033[38;2;225;85;85m[Offline]\033[0m │ "
         line = f"{online_badge}Downloaded anime  │  {download_dir}  │  Enter=episodes  Del=delete title  Esc=quit"
@@ -239,6 +283,7 @@ def handle_downloads_state(flags, ui, ms, cfg, args, ttype, resolveTracking):
 
     # Inject episodes into show metadata so the streaming UI can read them
     show = data.get("metadata", {})
+    show["watched_episodes"] = data.get("watched_episodes", [])
     episodes_list = []
     if "_episode_labels" not in show or not isinstance(show.get("_episode_labels"), dict):
         show["_episode_labels"] = {}
@@ -266,57 +311,148 @@ def handle_downloads_state(flags, ui, ms, cfg, args, ttype, resolveTracking):
         for h in load_history():
             h_show = h.get("show") or {}
             if is_same_show(h_show, show):
-                if h_show.get("_episode_ids"):
-                    catalog_eids = list(h_show.get("_episode_ids"))
-                    show["_episode_ids"] = catalog_eids
-                    if h_show.get("_episode_labels"):
-                        for k, v in h_show["_episode_labels"].items():
-                            if k not in show["_episode_labels"]:
-                                show["_episode_labels"][k] = v
-                    if h_show.get("availableEpisodes"):
-                        show["availableEpisodes"] = h_show["availableEpisodes"]
-                    if h_show.get("episodeCount"):
-                        show["episodeCount"] = h_show["episodeCount"]
-                    if h_show.get("_id") and not show.get("_id"):
-                        show["_id"] = h_show["_id"]
-                    if h_show.get("_provider") and not show.get("_provider"):
-                        show["_provider"] = h_show["_provider"]
-                    if h_show.get("provider") and not show.get("provider"):
-                        show["provider"] = h_show["provider"]
-                    if h_show.get("_provider_name") and not show.get("_provider_name"):
-                        show["_provider_name"] = h_show["_provider_name"]
-                    if h_show.get("_provider_data") and not show.get("_provider_data"):
-                        show["_provider_data"] = h_show["_provider_data"]
+                for k in (
+                    "_id", "id", "thumbnail", "banner", "description",
+                    "type", "format", "status", "season", "airedStart", "airedEnd",
+                    "episodeCount", "availableEpisodes", "score", "genres", "tags",
+                    "aniListId", "malId", "_provider", "_provider_id", "_provider_name",
+                    "_display_name", "_allanime_name", "englishName", "romajiName",
+                    "anilistMatch", "_episodes_map", "_episodes_map_by_ttype",
+                    "_episodes_by_number", "_episodes_by_number_by_ttype",
+                    "_episode_ids", "_episode_labels", "_episode_ids_by_ttype",
+                ):
+                    if h_show.get(k) and (k not in show or not show.get(k)):
+                        show[k] = h_show[k]
+                if h_show.get("episodeCount"):
+                    show["originalEpisodeCount"] = h_show["episodeCount"]
+                catalog_eids = list(show.get("_episode_ids") or [])
                 break
 
+
+    if (not catalog_eids or len(catalog_eids) <= len(episodes_list)) and app_core.is_online():
+        try:
+            saved_eids = show.pop("_episode_ids", None)
+            saved_state = show.pop("_episode_catalog_state", None)
+            online_eids = app_core.ensure_episode_ids(show, ttype)
+            if online_eids and len(online_eids) > len(episodes_list):
+                catalog_eids = list(online_eids)
+                data["metadata"] = show
+                save_downloads_db(db)
+            else:
+                if saved_eids:
+                    show["_episode_ids"] = saved_eids
+                if saved_state:
+                    show["_episode_catalog_state"] = saved_state
+        except Exception:
+            pass
+
+    from allmanga_cli.domain.episodes import clean_episode_identifier, parse_episode_dual_numbers
+
+    def _safe_ep_num(val):
+        if val is None:
+            return None
+        s = str(val).strip()
+        prim, _ = parse_episode_dual_numbers(s)
+        clean = (prim or clean_episode_identifier(s) or s).lstrip("0") or "0"
+        try:
+            return int(float(clean))
+        except (ValueError, TypeError):
+            return None
+
+    known_nums = set()
+    for ep in episodes_list:
+        n = _safe_ep_num(ep)
+        if n is not None:
+            known_nums.add(n)
+    for w in show.get("watched_episodes", []):
+        n = _safe_ep_num(w)
+        if n is not None:
+            known_nums.add(n)
+    lp = _safe_ep_num(show.get("_local_progress"))
+    if lp is not None and lp > 0:
+        known_nums.add(lp)
+    ap = _safe_ep_num(show.get("_anilist_progress"))
+    if ap is not None and ap > 0:
+        known_nums.add(ap)
+    ec = _safe_ep_num(show.get("episodeCount") or show.get("originalEpisodeCount"))
+    if ec is not None and ec > 0:
+        known_nums.add(ec)
     if catalog_eids:
-        show["_episode_ids"] = catalog_eids
-        show["_episode_ids_ttype"] = ttype
-        show["_episode_catalog_state"] = "loaded"
-        from allmanga_cli.domain.episodes import clean_episode_identifier, parse_episode_dual_numbers
+        for eid in catalog_eids:
+            lbl = (show.get("_episode_labels") or {}).get(eid, show.get("_episode_labels", {}).get(str(eid)))
+            n = _safe_ep_num(lbl or eid)
+            if n is not None:
+                known_nums.add(n)
+
+    max_num = max(known_nums) if known_nums else len(episodes_list)
+
+    if not catalog_eids:
+        ep_map = {}
+        for ep in episodes_list:
+            n = _safe_ep_num(ep)
+            if n is not None:
+                ep_map[n] = ep
+        catalog_eids = []
+        for n in range(1, max_num + 1):
+            eid = ep_map.get(n, str(n))
+            catalog_eids.append(eid)
+            if eid not in show["_episode_labels"] and str(eid) not in show["_episode_labels"]:
+                show["_episode_labels"][str(eid)] = f"Episode {n}"
+    else:
+        cat_nums = set()
         for eid in catalog_eids:
             lbl = show["_episode_labels"].get(eid, show["_episode_labels"].get(str(eid)))
-            if lbl:
-                prim, sec = parse_episode_dual_numbers(str(lbl))
-                clean = (prim or clean_episode_identifier(str(lbl)) or str(lbl)).lstrip("0") or "0"
-                for ep_key, fp in list(ms._download_files.items()):
-                    f_prim, f_sec = parse_episode_dual_numbers(str(ep_key))
-                    f_clean = (f_prim or clean_episode_identifier(str(ep_key)) or str(ep_key)).lstrip("0") or "0"
-                    if f_clean == clean or (sec and sec == f_sec) or ep_key == lbl:
-                        ms._download_files[eid] = fp
-                        ms._download_files[str(eid)] = fp
-                        break
-    else:
-        if "availableEpisodesDetail" not in show:
-            show["availableEpisodesDetail"] = {}
-        show["availableEpisodesDetail"][ttype] = episodes_list
-        show["availableEpisodes"] = {ttype: len(episodes_list)}
-        if "originalEpisodeCount" not in show and "episodeCount" in show:
-            show["originalEpisodeCount"] = show["episodeCount"]
-        show["episodeCount"] = len(episodes_list)
-        show["_episode_ids"] = episodes_list
-        show["_episode_ids_ttype"] = ttype
-        show["_episode_catalog_state"] = "loaded"
+            n = _safe_ep_num(lbl or eid)
+            if n is not None:
+                cat_nums.add(n)
+        min_cat = min(cat_nums) if cat_nums else 1
+        if min_cat > 1:
+            backfill = []
+            for n in range(1, min_cat):
+                eid = str(n)
+                backfill.append(eid)
+                if eid not in show["_episode_labels"]:
+                    show["_episode_labels"][eid] = f"Episode {n}"
+            catalog_eids = backfill + catalog_eids
+
+    from allmanga_cli.domain.episodes import build_episode_map
+    raw_eps = [
+        {"id": eid, "label": show["_episode_labels"].get(eid) or show["_episode_labels"].get(str(eid)) or eid}
+        for eid in catalog_eids
+    ]
+    ep_map, by_num = build_episode_map(raw_eps, translation_type=ttype)
+    show["_episodes_map"] = ep_map
+    show["_episodes_by_number"] = by_num
+    show["_episode_ids"] = list(ep_map.keys())
+    show["_episode_labels"] = {eid: ep["label"] for eid, ep in ep_map.items()}
+    show["_episode_ids_ttype"] = ttype
+    show["_episode_catalog_state"] = "loaded"
+    if "availableEpisodesDetail" not in show:
+        show["availableEpisodesDetail"] = {}
+    show["availableEpisodesDetail"][ttype] = show["_episode_ids"]
+    show["availableEpisodes"] = {ttype: len(show["_episode_ids"])}
+    if "originalEpisodeCount" not in show and "episodeCount" in show:
+        show["originalEpisodeCount"] = show["episodeCount"]
+    show["episodeCount"] = max(show.get("episodeCount") or 0, len(show["_episode_ids"]))
+
+    if show.get("_local_progress") is None:
+        show["_local_progress"] = app_core.get_local_progress(show, ttype)
+    if show.get("_local_episode_label") is None:
+        show["_local_episode_label"] = app_core.get_local_episode_label(show, ttype)
+
+    for eid in show["_episode_ids"]:
+
+        lbl = show["_episode_labels"].get(eid, show["_episode_labels"].get(str(eid)))
+        if lbl:
+            prim, sec = parse_episode_dual_numbers(str(lbl))
+            clean = (prim or clean_episode_identifier(str(lbl)) or str(lbl)).lstrip("0") or "0"
+            for ep_key, fp in list(ms._download_files.items()):
+                f_prim, f_sec = parse_episode_dual_numbers(str(ep_key))
+                f_clean = (f_prim or clean_episode_identifier(str(ep_key)) or str(ep_key)).lstrip("0") or "0"
+                if f_clean == clean or (sec and sec == f_sec) or ep_key == lbl:
+                    ms._download_files[eid] = fp
+                    ms._download_files[str(eid)] = fp
+                    break
 
     # Setup state machine variables for the selected offline anime
     ms._is_downloads = True

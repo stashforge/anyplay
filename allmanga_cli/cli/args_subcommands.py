@@ -112,12 +112,18 @@ def add_downloads_subcommand(commands):
     )
     _configure_help_parser(downloads)
     downloads.set_defaults(downloads=True)
+    downloads.add_argument(
+        "-d", "--download-dir", "--dir",
+        dest="download_dir",
+        type=str,
+        help="Custom download directory to browse",
+    )
     playback = downloads.add_argument_group("Playback options")
     playback.add_argument(
         "-p", "--player",
-        choices=["mpv", "mpvrex", "vlc", "next"],
+        choices=["mpv", "rex", "mpvrx", "mpvrex", "vlc", "next"],
         metavar="PLAYER",
-        help="Player: mpv, mpvrex, vlc, next",
+        help="Player: mpv, rex, mpvrx, vlc, next",
     )
     output = downloads.add_argument_group("Output options")
     output.add_argument("--cover", dest="cover", action="store_true", default=None, help="Show cover images")
@@ -333,32 +339,61 @@ def add_config_subcommand(commands):
     config = commands.add_parser(
         "config",
         help="Manage CLI configuration",
-        description="Manage configuration settings (e.g., set default download directory).",
-        usage="allmanga-cli config <action> [key] [value]",
+        description=(
+            "View, edit, or update configuration settings.\n\n"
+            "Running 'allmanga-cli config' without arguments opens config.conf in your editor.\n"
+            "Use 'set' to update individual keys directly from the command line."
+        ),
+        usage=(
+            "allmanga-cli config [options]\n"
+            "       allmanga-cli config set <key> <value>"
+        ),
+        epilog=(
+            "Examples:\n"
+            "  allmanga-cli config\n"
+            "  allmanga-cli config -e nano\n"
+            "  allmanga-cli config --editor micro\n"
+            "  allmanga-cli config set download_dir ~/Videos/allmanga-cli\n"
+            "  allmanga-cli config set quality 1080p\n"
+            "  allmanga-cli config set player mpv"
+        ),
         add_help=False,
         formatter_class=MinimalHelpFormatter,
     )
+    _configure_help_parser(config)
+    config._positionals.title = "Arguments"
     config.add_argument(
         "action",
+        nargs="?",
         choices=["set"],
         metavar="<action>",
-        help="Action to perform (e.g., set)",
+        help="Action to perform: 'set'. Omit to open config file in editor.",
     )
     config.add_argument(
         "key",
+        nargs="?",
         metavar="<key>",
-        help="Configuration key (e.g., download_dir)",
+        help="Configuration key to set (e.g. download_dir, quality, player)",
     )
     config.add_argument(
         "value",
-        metavar="<value>",
         nargs="?",
-        help="Configuration value",
+        metavar="<value>",
+        help="Value to assign to the key",
     )
-    config.add_argument(
+    config_opts = config.add_argument_group("Config options")
+    config_opts.add_argument(
+        "-e", "--editor",
+        dest="editor",
+        metavar="EDITOR",
+        help="Editor to open configuration file with (e.g., nano, micro, vim, code)",
+    )
+    global_options = config.add_argument_group("Global options")
+    _add_debug_option(global_options, suppress_default=True)
+    _add_plain_option(global_options, suppress_default=True)
+    global_options.add_argument(
         "-h", "--help", action="help", help="Show this help message and exit"
     )
-    _configure_help_parser(config)
     return config
 
 

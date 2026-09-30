@@ -198,43 +198,54 @@ def normalize_episode_catalog(
     provider_title_id: str,
 ) -> dict[str, Any]:
     normalized = dict(catalog or {})
-    ids = [str(episode) for episode in normalized.get("ids") or []]
+    raw_episodes = normalized.get("episodes") or normalized.get("detail")
+    labels = normalized.get("labels") or {}
+
+    if "episodes_map" in normalized and normalized.get("ids"):
+        normalized["_provider"] = provider_id
+        normalized["_provider_id"] = str(provider_title_id or "")
+        normalized["_provider_episode_ids"] = normalized["ids"]
+        return normalized
+
+    episodes_input = {}
+    if isinstance(raw_episodes, dict):
+        for k in ("sub", "dub", "raw"):
+            items = raw_episodes.get(k) or []
+            episodes_input[k] = [
+                dict(it, label=it.get("label") or labels.get(it.get("id")) or it.get("id"))
+                if isinstance(it, dict)
+                else {"id": it, "label": labels.get(str(it)) or str(it)}
+                for it in items
+            ]
+    else:
+        ids = [str(episode) for episode in normalized.get("ids") or []]
+        episodes_input["sub"] = [
+            {"id": eid, "label": labels.get(eid) or eid}
+            for eid in ids
+        ]
+        episodes_input["dub"] = []
+        episodes_input["raw"] = []
+
+    req_ttype = normalized.get("translation_type") or normalized.get("translationType") or "sub"
     built = build_catalog(
         provider=provider_id,
         provider_id=provider_title_id,
         state=normalized.get("state") or "loaded",
         error=normalized.get("error") or "",
-        episodes={
-            "sub": [
-                {
-                    "id": episode_id,
-                    "label": (AnimeBrain.process(episode_id, EpisodeToken) or type("Mock", (), {"raw_label": episode_id})()).raw_label or episode_id,
-                    "number": getattr(AnimeBrain.process(episode_id, EpisodeToken), "absolute_number", 0.0) if AnimeBrain.process(episode_id, EpisodeToken) else 0.0
-                }
-                for episode_id in ids
-            ],
-            "dub": [],
-            "raw": [],
-        },
+        episodes=episodes_input,
+        translation_type=req_ttype,
     )
-    built.update(normalized)
-    built["ids"] = ids
-    if "labels" not in built:
-        built["labels"] = {
-            episode_id: AnimeBrain.process(episode_id, EpisodeToken).get('raw_label') or episode_id
-            for episode_id in ids
-        }
-    if "episodes" not in normalized:
-        built["episodes"] = built.get("episodes") or {
-            "sub": [],
-            "dub": [],
-            "raw": [],
-        }
-    normalized = built
-    normalized["_provider"] = provider_id
-    normalized["_provider_id"] = str(provider_title_id or "")
-    normalized["_provider_episode_ids"] = ids
-    return normalized
+    for k, v in normalized.items():
+        if k not in built:
+            built[k] = v
+
+    if normalized.get("ids"):
+        built["ids"] = [str(x) for x in normalized["ids"]]
+    built["_provider"] = provider_id
+    built["_provider_id"] = str(provider_title_id or "")
+    built["_provider_episode_ids"] = built["ids"]
+    return built
+
 
 
 def normalize_episode_sources(

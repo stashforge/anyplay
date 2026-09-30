@@ -132,10 +132,12 @@ def parse_cli_args(argv=None):
             parser.error("auth --raw is only valid with auth token")
         del args.action
     elif args.command == "config":
-        args.config_action = args.action
-        args.config_key = args.key
+        args.config_action = getattr(args, "action", None)
+        args.config_key = getattr(args, "key", None)
         args.config_value = getattr(args, "value", None)
-        del args.action
+        args.config_editor = getattr(args, "editor", None)
+        if hasattr(args, "action"):
+            del args.action
     elif args.command == "completion":
         values = list(args.completion_args)
         if values[0] == "install":

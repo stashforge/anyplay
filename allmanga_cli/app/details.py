@@ -290,7 +290,7 @@ def handle_details_state(
     user_status = str(s.get("_anilist_list", "")).upper()
     playback_status = user_status if use_anilist else ""
     player = args.player or cfg.get("player", "mpv")
-    isDesktop = player in ["mpv", "mpvrex"] and not app_core.is_termux()
+    isDesktop = player in ["mpv", "rex", "mpvrx", "mpvrex"] and not app_core.is_termux()
 
     opts = []
     detail_play_ep = episode_id_at(episode_ids, 0) if episode_ids else None
