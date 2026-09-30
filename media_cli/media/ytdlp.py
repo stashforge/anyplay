@@ -21,7 +21,7 @@ def resolve_ytdlp_embed(url: str, *, name: str, priority: int, ok, warn, subtitl
         warn(f"[{name}] yt-dlp not found, skipping embed")
         return []
 
-    attempts = 5
+    attempts = 1
     command = ["yt-dlp", "-j", "--no-warnings"]
     if "ok.ru" not in url and "odnoklassniki.ru" not in url:
         command.extend(["--impersonate", "chrome"])
@@ -43,11 +43,18 @@ def resolve_ytdlp_embed(url: str, *, name: str, priority: int, ok, warn, subtitl
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
             )
-            output = read_bounded_process_stdout(process, timeout=20)
+            output = read_bounded_process_stdout(process, timeout=6)
             if process.returncode != 0:
                 if b"Impersonate target" in output and b"not available" in output:
-                    command = ["yt-dlp", "-j", "--no-warnings", url]
-                    continue
+                    process = subprocess.Popen(
+                        ["yt-dlp", "-j", "--no-warnings", url],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                    )
+                    output = read_bounded_process_stdout(process, timeout=6)
+                    if process.returncode == 0:
+                        data = json.loads(output)
+                        break
 
                 if any(err in output for err in PERMANENT_ERRORS):
                     is_unsupported = True

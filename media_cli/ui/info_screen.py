@@ -132,7 +132,9 @@ def _build_content(show: dict, w: int) -> list[str]:
     fmt   = show.get("type") or show.get("format") or ""
     if fmt:
         stats.append(fmt.replace("_", " "))
-    status = show.get("status") or ""
+    status = show.get("_anilist_status") or show.get("status") or ""
+    if any(term in str(show.get("status") or "").upper() for term in ("FINISHED", "COMPLETED", "ENDED")) or any(term in str(show.get("_anilist_status") or "").upper() for term in ("FINISHED", "COMPLETED", "ENDED")):
+        status = "Finished"
     if status:
         stats.append(status.replace("_", " ").title())
     season_info = show.get("season") or {}

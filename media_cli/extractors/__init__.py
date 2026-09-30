@@ -13,10 +13,14 @@ from .mp4upload import Mp4UploadExtractor
 from .okru import OkruExtractor
 from .streamtape import StreamTapeExtractor
 from .streamwish import StreamWishExtractor
+from .uni import UniExtractor
 from .unpack import JsUnpacker
+from .vidnest import VidnestExtractor
 from .voe import VoeExtractor
 
 EXTRACTORS: list[BaseExtractor] = [
+    UniExtractor(),
+    VidnestExtractor(),
     StreamWishExtractor(),
     FilemoonExtractor(),
     StreamTapeExtractor(),
@@ -55,6 +59,8 @@ __all__ = [
     "OkruExtractor",
     "StreamTapeExtractor",
     "StreamWishExtractor",
+    "UniExtractor",
+    "VidnestExtractor",
     "VoeExtractor",
     "find_extractor",
 ]

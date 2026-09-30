@@ -420,17 +420,51 @@ def test_write_history_progress_url_episode_clears_has_new_release(monkeypatch):
 
 
 def test_history_provider_is_completed_checks_anilist_status():
-    from media_cli.domain.history import history_provider_is_completed, history_full_episode_count
+    from media_cli.domain.history import (
+        history_provider_is_completed,
+        history_full_episode_count,
+        history_entry_category,
+    )
+    from media_cli.domain.metadata import anime_status_label, format_years
 
+    # 1. Show has status RELEASING but _anilist_status FINISHED
     show_al_finished = {
         "_id": "test-show",
         "name": "Finished Anime",
+        "status": "RELEASING",
         "_anilist_status": "FINISHED",
         "_anilist_episode_count": 24,
+        "availableEpisodes": {"sub": 24},
     }
     assert history_provider_is_completed(show_al_finished) is True
-    entry = {"show": show_al_finished, "translation_type": "sub"}
+    entry = {"show": show_al_finished, "translation_type": "sub", "episode": "24"}
     assert history_full_episode_count(entry) == 24
+    assert history_entry_category(entry) == "Completed"
+    assert "FINISHED" in anime_status_label(show_al_finished)
+    assert format_years(2026, None, show_al_finished.get("_anilist_status")) == "2026"
+
+    # Check info screen _build_content
+    from media_cli.ui.info_screen import _build_content
+    content_lines = "\n".join(_build_content(show_al_finished, 80))
+    assert "Finished" in content_lines
+    assert "Releasing" not in content_lines
+
+    # 2. Show has status 'Finished Airing'
+    show_finished_airing = {
+        "_id": "test-show-2",
+        "name": "Completed Anime",
+        "status": "Finished Airing",
+        "availableEpisodes": {"sub": 12},
+    }
+    assert history_provider_is_completed(show_finished_airing) is True
+    entry2 = {"show": show_finished_airing, "translation_type": "sub", "episode": "12"}
+    assert history_entry_category(entry2) == "Completed"
+    assert "FINISHED" in anime_status_label(show_finished_airing)
+    assert format_years(2024, None, show_finished_airing.get("status")) == "2024"
+
+    content_lines_2 = "\n".join(_build_content(show_finished_airing, 80))
+    assert "Finished" in content_lines_2
+    assert "Finished Airing" not in content_lines_2
 
 def test_app_core_download_episode_and_process_exports():
     import media_cli.app_core as app_core
@@ -727,6 +761,7 @@ def test_playback_menu_session_toggles():
         return 0
 
     with patch("media_cli.app.playback_menu.tui_pick", side_effect=mock_pick), \
+         patch("media_cli.app_core.save_config"), \
          patch("media_cli.app_core.build_info_panel"):
         next_state = handle_action_menu_state(flags, ui, ms, {}, MagicMock(), "sub", lambda *a: False)
         assert next_state == "DETAILS"

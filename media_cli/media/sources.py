@@ -151,11 +151,17 @@ def quality_preference_key(res: str, target: str = "best") -> tuple:
 
 
 def decrypt_url(hex_string):
+    if not isinstance(hex_string, str):
+        return ""
+    from .decryption import decrypt_source_url
+    dec = decrypt_source_url(hex_string)
+    if dec != hex_string:
+        return dec.replace("/clock?", "/clock.json?").replace("/clock", "/clock.json")
     decoded = []
     for index in range(0, len(hex_string), 2):
         pair = hex_string[index:index + 2]
         decoded.append(CIPHER.get(pair, pair))
-    return "".join(decoded).replace("/clock", "/clock.json")
+    return "".join(decoded).replace("/clock?", "/clock.json?").replace("/clock", "/clock.json")
 
 
 def expand_wixmp(url):

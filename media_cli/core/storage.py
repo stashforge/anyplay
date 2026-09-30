@@ -84,14 +84,27 @@ _prefs_cache = None  # playback prefs
 _history_cache = None  # watch history
 _search_history_cache = None  # search history
 _incognito_cache_dir = None
+_incognito_history_allowed = False
+
+
+def set_incognito_history_allowed(allowed: bool) -> None:
+    """Set whether incognito mode is permitted to read an existing history snapshot (e.g. anyplay history --incognito)."""
+    global _incognito_history_allowed
+    _incognito_history_allowed = bool(allowed)
+
+
+def is_incognito_history_allowed() -> bool:
+    """Check whether incognito mode is allowed to read an existing history snapshot."""
+    return _incognito_history_allowed
 
 
 def reset_caches():
     """Drop every in-memory cache (tests; also safe after path changes)."""
-    global _prefs_cache, _history_cache, _search_history_cache
+    global _prefs_cache, _history_cache, _search_history_cache, _incognito_history_allowed
     _prefs_cache = None
     _history_cache = None
     _search_history_cache = None
+    _incognito_history_allowed = False
 
 
 # ---------------------------------------------------------------------------
@@ -189,6 +202,9 @@ def _preserve_invalid_state_file(path, label):
 def load_prefs() -> dict:
     global _prefs_cache
     if _prefs_cache is not None:
+        return _prefs_cache
+    if is_incognito() and not is_incognito_history_allowed():
+        _prefs_cache = {}
         return _prefs_cache
     if not os.path.exists(paths.PLAYBACK_PATH):
         _prefs_cache = {}
@@ -390,6 +406,10 @@ def sanitize_show_for_history(show):
     if prov:
         stored["_provider"] = str(prov)
     stored.pop("provider", None)
+    if stored.get("_anilist_status") == "FINISHED":
+        stored["status"] = "FINISHED"
+    elif any(term in str(stored.get("status") or "").upper() for term in ("FINISHED", "COMPLETED", "ENDED")):
+        stored["status"] = "FINISHED"
     return stored
 
 
@@ -412,6 +432,9 @@ def sanitize_history_list(history):
 def load_history():
     global _history_cache
     if _history_cache is not None:
+        return _history_cache
+    if is_incognito() and not is_incognito_history_allowed():
+        _history_cache = []
         return _history_cache
     try:
         raw = list_state.load_json_list(
@@ -700,7 +723,7 @@ def patch_history_entry_show(show_id, ttype, updated_show):
         "aniListId", "malId", "_provider", "_provider_id", "_provider_name",
         "description", "genres", "banner", "format",
         "_next_airing_ep", "_next_airing_time", "_next_airing_at",
-        "_anilist_score", "anilistMatch", "_title_enriched",
+        "_anilist_score", "_anilist_status", "anilistMatch", "_title_enriched",
     }
     for entry in history:
         if ttype is None or entry.get("translation_type", "sub") == ttype:

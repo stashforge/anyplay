@@ -667,11 +667,19 @@ def refresh_history_anilist_airing_batch(history_entries):
                     show["_anilist_episode_count"] = new_count
 
                 new_status = media.get("status")
-                if new_status and show.get("_anilist_status") != new_status:
+                old_al_status = show.get("_anilist_status")
+                if new_status and old_al_status != new_status:
                     show["_anilist_status"] = new_status
                     changed = True
+                if new_status and show.get("status") != new_status:
+                    show["status"] = new_status
+                    changed = True
 
-                if new_status in ("RELEASING", "NOT_YET_RELEASED") or (old_next_airing_at and old_next_airing_at <= now):
+                if (
+                    new_status in ("RELEASING", "NOT_YET_RELEASED")
+                    or (old_next_airing_at and old_next_airing_at <= now)
+                    or (old_al_status != new_status and new_status == "FINISHED")
+                ):
                     if _provider_catalog_refresh_fn and _provider_catalog_refresh_fn(entry):
                         changed = True
 

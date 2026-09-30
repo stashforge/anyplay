@@ -131,8 +131,8 @@ def test_incognito_menu_advances_from_play_to_play_next():
     assert storage.get_local_progress(action_show, "sub") == "1"
 
 
-def test_incognito_reads_existing_history_read_only(monkeypatch):
-    """Existing history on disk is readable in incognito, but modifications never write to disk."""
+def test_incognito_ignores_existing_history_by_default():
+    """Default incognito mode starts fresh and ignores existing history on disk."""
     import json
 
     storage.reset_caches()
@@ -147,7 +147,47 @@ def test_incognito_reads_existing_history_read_only(monkeypatch):
     with open(paths.HISTORY_PATH, "w") as f:
         json.dump(original_disk_data, f)
 
-    # 1. Incognito can read existing history from disk
+    # 1. By default, incognito starts with empty history despite disk contents
+    hist = storage.load_history()
+    assert hist == []
+    show = dict(original_disk_data[0]["show"])
+    assert storage.get_local_progress(show, "sub") is None
+
+    # 2. Watch episode 1 in this session
+    storage.save_history(show, "1", "sub")
+    assert str(storage.get_local_progress(show, "sub")) == "1"
+
+    # 3. Disk file remains completely untouched!
+    with open(paths.HISTORY_PATH) as f:
+        disk_content = json.load(f)
+    assert disk_content == [
+        {
+            "show": {"_id": "disk-show-1", "name": "Existing Show"},
+            "episode": "5",
+            "translation_type": "sub",
+            "timestamp": 123456789,
+        }
+    ]
+
+
+def test_incognito_with_history_allowed_loads_snapshot_read_only():
+    """When opened with history allowed (e.g. anyplay history --incognito), incognito reads snapshot from disk."""
+    import json
+
+    storage.reset_caches()
+    storage.set_incognito_history_allowed(True)
+    original_disk_data = [
+        {
+            "show": {"_id": "disk-show-1", "name": "Existing Show"},
+            "episode": "5",
+            "translation_type": "sub",
+            "timestamp": 123456789,
+        }
+    ]
+    with open(paths.HISTORY_PATH, "w") as f:
+        json.dump(original_disk_data, f)
+
+    # 1. Reads existing history snapshot from disk
     hist = storage.load_history()
     assert len(hist) == 1
     assert hist[0]["show"]["name"] == "Existing Show"

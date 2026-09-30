@@ -88,10 +88,18 @@ def parse_conf_text(text: str) -> dict:
     return config
 
 
+def _is_truthy(val, default=False) -> bool:
+    if val is None:
+        return default
+    if isinstance(val, bool):
+        return val
+    return str(val).strip().lower() in ("true", "1", "yes", "on")
+
+
 def serialize_conf(config: dict) -> str:
     """Serialize configuration dict into clean .conf INI-style text with comments."""
     lines = [
-        "# AllManga-CLI Configuration",
+        "# Anyplay Configuration",
         "# Options can be edited manually. Lines starting with '#' are comments.",
         "",
         "# Playback & Video Quality",
@@ -105,22 +113,22 @@ def serialize_conf(config: dict) -> str:
         f"download_dir = {config.get('download_dir', '')}",
         "",
         "# Automation & Binge",
-        f"auto_download_next = {'true' if config.get('auto_download_next') else 'false'}",
-        f"auto_delete_watched = {'true' if config.get('auto_delete_watched') else 'false'}",
+        f"auto_download_next = {'true' if _is_truthy(config.get('auto_download_next'), False) else 'false'}",
+        f"auto_delete_watched = {'true' if _is_truthy(config.get('auto_delete_watched'), False) else 'false'}",
         f"auto_delete_buffer = {config.get('auto_delete_buffer', 1)}",
-        f"binge = {'true' if config.get('binge') else 'false'}",
+        f"binge = {'true' if _is_truthy(config.get('binge'), False) else 'false'}",
         "",
         "# AniList & Scrobbling",
-        f"sync = {'true' if config.get('sync') else 'false'}",
+        f"sync = {'true' if _is_truthy(config.get('sync'), False) else 'false'}",
         f"anilist_token = {config.get('anilist_token', '')}",
         f"anilist_sort = {config.get('anilist_sort', 'recent')}",
-        f"anilist_sort_reverse = {'true' if config.get('anilist_sort_reverse') else 'false'}",
+        f"anilist_sort_reverse = {'true' if _is_truthy(config.get('anilist_sort_reverse'), False) else 'false'}",
         "",
         "# UI & Player Enhancements",
-        f"cover = {'true' if str(config.get('cover', '')).lower() in ('true', '1') else 'false'}",
+        f"cover = {'true' if _is_truthy(config.get('cover'), False) else 'false'}",
         f"spinner = {config.get('spinner', 'braille')}",
-        f"aniskip = {'true' if config.get('aniskip', True) else 'false'}",
-        f"auto_skip = {'true' if config.get('auto_skip', True) else 'false'}",
+        f"aniskip = {'true' if _is_truthy(config.get('aniskip'), True) else 'false'}",
+        f"auto_skip = {'true' if _is_truthy(config.get('auto_skip'), True) else 'false'}",
     ]
     known = {
         "quality", "translation_type", "player", "provider", "title_language",

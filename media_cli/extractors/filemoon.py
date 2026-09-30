@@ -23,8 +23,14 @@ class FilemoonExtractor(BaseExtractor):
         "filemoon.top",
         "filemoon.lat",
         "filemoon.art",
+        "bysekoze.com",
+        "fastmoon",
+        "moonplayer",
         "moonplayer.xyz",
         "mooncloud.top",
+    ]
+    patterns = [
+        re.compile(r"(?:filemoon|bysekoze|fastmoon|moonplayer)", re.IGNORECASE),
     ]
 
     def extract(

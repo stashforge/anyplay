@@ -21,7 +21,10 @@ def buildEpStr(show: dict, ttype: str) -> str:
 def buildYearStr(show: dict) -> str:
     start_y = show.get("airedStart", {}).get("year") if show.get("airedStart") else None
     end_y = show.get("airedEnd", {}).get("year") if show.get("airedEnd") else None
-    return format_years(start_y, end_y, show.get("status"))
+    status = show.get("_anilist_status") or show.get("status")
+    if any(term in str(show.get("status") or "").upper() for term in ("FINISHED", "COMPLETED", "ENDED")):
+        status = "FINISHED"
+    return format_years(start_y, end_y, status)
 
 
 def buildInfoMetadataLine(

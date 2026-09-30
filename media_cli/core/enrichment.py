@@ -43,6 +43,13 @@ def _merge_anilist_into_provider(provider_show, anilist_show):
         if (not provider_val or provider_val == "Unknown" or provider_val == []) and al_val:
             provider_show[field] = al_val
 
+    if anilist_show.get("status"):
+        provider_show["_anilist_status"] = anilist_show["status"]
+        if anilist_show["status"] == "FINISHED":
+            provider_show["status"] = "FINISHED"
+    if any(term in str(provider_show.get("status") or "").upper() for term in ("FINISHED", "COMPLETED", "ENDED")):
+        provider_show["status"] = "FINISHED"
+
     # Advanced Alt-Title logic (swapping english/romaji based on provider's primary name)
     main_name = provider_show.get("_display_name")
 

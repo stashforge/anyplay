@@ -277,12 +277,12 @@ def format_years(start_year, end_year, status=None):
     if start_year and end_year and start_year != end_year:
         return f"{start_year} - {end_year}"
     if start_year:
-        if status == "RELEASING":
+        if ("RELEASING" in status or status == "AIRING") and not any(term in status for term in ("FINISHED", "COMPLETED", "ENDED")):
             return f"{start_year} -"
         return str(start_year)
     if end_year:
         return str(end_year)
-    if status == "NOT_YET_RELEASED":
+    if any(term in status for term in ("NOT_YET_RELEASED", "NOT YET RELEASED", "UPCOMING")):
         return "TBA"
     return ""
 
@@ -325,17 +325,18 @@ def anilist_list_status_label(anime, local_only=False, hide_status=None):
 
 
 def anime_status_label(anime):
-    status = str(anime.get("status") or "").upper()
+    status = str(anime.get("_anilist_status") or anime.get("status") or "").upper()
+    raw_status = str(anime.get("status") or "").upper()
     color = "\033[38;5;250m"
-    if status == "RELEASING":
-        return f"{color}AIRING{DIM}"
-    if status == "FINISHED":
+    if any(term in status for term in ("FINISHED", "COMPLETED", "ENDED")) or any(term in raw_status for term in ("FINISHED", "COMPLETED", "ENDED")):
         return f"{color}FINISHED{DIM}"
-    if status in ("NOT_YET_RELEASED", "NOT YET RELEASED"):
+    if "RELEASING" in status or status == "AIRING":
+        return f"{color}AIRING{DIM}"
+    if any(term in status for term in ("NOT_YET_RELEASED", "NOT YET RELEASED", "UPCOMING")):
         return f"{color}UPCOMING{DIM}"
-    if status == "CANCELLED":
+    if "CANCELLED" in status:
         return f"{color}CANCELLED{DIM}"
-    if status == "HIATUS":
+    if "HIATUS" in status:
         return f"{color}HIATUS{DIM}"
     return ""
 
@@ -397,10 +398,13 @@ def format_info_metadata_line(
 
     aired_start = anime.get("airedStart")
     aired_end = anime.get("airedEnd")
+    years_status = anime.get("_anilist_status") or anime.get("status")
+    if any(term in str(anime.get("status") or "").upper() for term in ("FINISHED", "COMPLETED", "ENDED")):
+        years_status = "FINISHED"
     years = format_years(
         _ext_year(aired_start),
         _ext_year(aired_end),
-        anime.get("status"),
+        years_status,
     )
     score = anime.get("score")
     score_text = f"★ {score}" if score else "★ -"
@@ -635,6 +639,8 @@ def apply_provider_metadata_to_history_show(show, provider_show):
 
     for key in ("status", "episodeCount", "airedStart", "score", "type", "season"):
         val = provider_show.get(key)
+        if key == "status" and val and any(term in str(val).upper() for term in ("FINISHED", "COMPLETED", "ENDED")):
+            val = "FINISHED"
         if val is not None and str(show.get(key)) != str(val):
             show[key] = val
             changed = True

@@ -37,7 +37,7 @@ except Exception:
 
 
 _SKIPPED_MODULES = {"shared"}
-_DISABLED_PROVIDERS = {"mkissa"}
+_DISABLED_PROVIDERS = set()
 _DEFAULT_PROVIDER_ID = "miruro"
 
 from .shared.models import (

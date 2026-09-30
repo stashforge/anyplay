@@ -10,7 +10,12 @@ from typing import Any
 
 from ..core.api import SearchFailure
 from ..domain.episodes import normalize_episode_ids
-from ..media.decryption import decrypt_tobeparsed, encrypt_aa_req
+from ..media.decryption import (
+    build_aa_req,
+    decrypt_source_url,
+    decrypt_tobeparsed,
+    get_mkissa_material,
+)
 from ..media.urls import validate_http_url
 from ..services.http import API_BASE, CLOCK_BASE, request_json
 from .shared.models import (
@@ -22,9 +27,7 @@ from .shared.models import (
 
 _logger = logging.getLogger(__name__)
 
-ALLANIME_QUERY_HASH = "1c836a5028e04275c6bc618aa4d1f0ea2290a73bc056ba6a8b93fe72ef42fd04"
-ALLANIME_EPOCH = 2958
-ALLANIME_BUILD_ID = "168"
+ALLANIME_QUERY_HASH = "670bbf38d0868f446e2346c1e956ca2c40c416e733ca248fd54e04f1c8b99145"
 ALLANIME_LANE = "k7"
 
 SEARCH_QUERY = (
@@ -137,26 +140,18 @@ def get_episode_data(request_json, show_id, episode, ttype="sub"):
         "translationType": ttype,
         "episodeString": str(episode),
     }
-    ts = int(time.time() // 300 * 300 * 1000)
-    aa_req_payload = json.dumps(
-        {
-            "v": 1,
-            "ts": ts,
-            "epoch": ALLANIME_EPOCH,
-            "buildId": ALLANIME_BUILD_ID,
-            "qh": ALLANIME_QUERY_HASH,
-            "k": ALLANIME_LANE,
-        },
-        separators=(",", ":"),
-    )
-    aa_req_iv_seed = (
-        f"{ALLANIME_EPOCH}:{ALLANIME_BUILD_ID}:"
-        f"{ALLANIME_QUERY_HASH}:{ts}:{ALLANIME_LANE}"
+    material = get_mkissa_material()
+    aa_req = build_aa_req(
+        material.key,
+        material.epoch,
+        material.build_id,
+        ALLANIME_QUERY_HASH,
+        ALLANIME_LANE,
     )
     extensions = {
         "persistedQuery": {"version": 1, "sha256Hash": ALLANIME_QUERY_HASH},
         "k": ALLANIME_LANE,
-        "aaReq": encrypt_aa_req(aa_req_payload, aa_req_iv_seed),
+        "aaReq": aa_req,
     }
     variables_json = json.dumps(variables, separators=(",", ":"))
     extensions_json = json.dumps(extensions, separators=(",", ":"))
@@ -169,7 +164,12 @@ def get_episode_data(request_json, show_id, episode, ttype="sub"):
         extra_hdrs={
             "Origin": "https://mkissa.to",
             "Referer": "https://mkissa.to/",
-            "x-build-id": ALLANIME_BUILD_ID,
+            "x-build-id": material.build_id,
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/126.0.0.0 Safari/537.36"
+            ),
         },
     )
     if not response or response.get("errors"):
@@ -180,8 +180,16 @@ def get_episode_data(request_json, show_id, episode, ttype="sub"):
         raw = episode_data.get("sourceUrls")
     if not raw:
         return get_episode_cdn_data(request_json, show_id, episode, ttype)
-    decoded = decrypt_tobeparsed(raw)
-    return json.loads(decoded) if decoded else get_episode_cdn_data(request_json, show_id, episode, ttype)
+
+    if isinstance(raw, str):
+        decoded = decrypt_tobeparsed(raw, key=material.key)
+        parsed = json.loads(decoded) if decoded else None
+    elif isinstance(raw, list):
+        parsed = {"episode": {"sourceUrls": raw}}
+    else:
+        parsed = None
+
+    return parsed if parsed else get_episode_cdn_data(request_json, show_id, episode, ttype)
 
 
 def get_episode_cdn_data(request_json, show_id, episode, ttype="sub"):
@@ -315,27 +323,51 @@ class AllAnimeProvider:
             episode,
             ttype,
         )
-        if data and isinstance(data.get("sourceUrls"), list):
-            for src in data["sourceUrls"]:
-                name = src.get("sourceName", "").strip().casefold()
-                url = src.get("sourceUrl", "")
+        sources = None
+        if data:
+            if isinstance(data.get("sourceUrls"), list):
+                sources = data["sourceUrls"]
+            elif isinstance(data.get("episode"), dict) and isinstance(data["episode"].get("sourceUrls"), list):
+                sources = data["episode"]["sourceUrls"]
 
-                if "yt-mp4" in name or "fast4speed" in url or "wixstatic" in url:
+        if sources:
+            for src in sources:
+                raw_url = src.get("sourceUrl", "")
+                if raw_url:
+                    dec_url = decrypt_source_url(raw_url)
+                    src["sourceUrl"] = dec_url
+                    url = dec_url
+                else:
+                    url = ""
+                name = src.get("sourceName", "").strip().casefold()
+
+                if "uni" in name or "uns.bio" in url:
+                    src["priority"] = 2
+                elif "yt-mp4" in name or "fast4speed" in url or "wixstatic" in url:
                     src["priority"] = 2
                 elif name == "default":
                     src["priority"] = 3
                 elif name == "ak":
                     src["priority"] = 4
-                elif name in {"mp4", "mp4upload"}:
+                elif name == "ok" or "ok.ru" in name or "ok.ru" in url:
                     src["priority"] = 5
-                elif name == "ok" or "ok.ru" in name:
+                elif "sw" in name or "wish" in url or "streamwish" in name:
                     src["priority"] = 6
-                elif url.startswith("--"):
-                    src["priority"] = 6
-                elif any(val in name for val in ("fm-hls", "filemoon")):
+                elif any(val in name for val in ("fm-hls", "filemoon")) or "bysekoze" in url:
                     src["priority"] = 7
+                elif any(val in name for val in ("vn-hls", "vidnest")) or "vidnest" in url:
+                    src["priority"] = 7
+                elif url.startswith("--"):
+                    src["priority"] = 8
+                elif name in {"mp4", "mp4upload"} or "mp4upload" in url:
+                    src["priority"] = 9
                 else:
                     src["priority"] = 8
+
+            if "episode" not in data or not isinstance(data["episode"], dict):
+                data["episode"] = {"episodeString": str(episode), "sourceUrls": sources}
+            else:
+                data["episode"]["sourceUrls"] = sources
 
         return normalize_episode_sources(
             data,

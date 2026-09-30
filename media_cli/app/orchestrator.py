@@ -42,6 +42,7 @@ from ..core.storage import (
     load_search_history,
     save_config,
     save_downloads_db,
+    set_incognito_history_allowed,
 )
 from ..domain.episodes import episode_id_at, episode_index_for_id
 from ..domain.metadata import prepare_show_display_state
@@ -305,7 +306,22 @@ def handle_config_command(args: Any) -> None:
             save_downloads_db(db)
             print(f"Config updated: {key} = {val}")
         else:
-            cfg[key] = val
+            val_to_save = val
+            if isinstance(val, str):
+                v_lower = val.strip().lower()
+                if v_lower in ("true", "yes", "on"):
+                    val_to_save = True
+                elif v_lower in ("false", "no", "off"):
+                    val_to_save = False
+                else:
+                    try:
+                        val_to_save = int(val)
+                    except ValueError:
+                        try:
+                            val_to_save = float(val)
+                        except ValueError:
+                            val_to_save = val
+            cfg[key] = val_to_save
             save_config(cfg)
             print(f"Config updated: {key} = {val}")
 
@@ -515,6 +531,15 @@ def main() -> None:
 
     runtime_flags.debug_mode = args.debug
     runtime_flags.incognito_mode = bool(args.incognito)
+    if args.incognito:
+        allow_history = bool(
+            getattr(args, "history", False)
+            or getattr(args, "cont", False)
+            or getattr(args, "command", None) in ("history", "continue")
+        )
+        set_incognito_history_allowed(allow_history)
+    else:
+        set_incognito_history_allowed(False)
     if args.incognito and (
         args.download or args.downloads or args.login or args.logout
     ):
@@ -587,8 +612,8 @@ def main() -> None:
         )
         tkn = prompt_anilist_token()
         if tkn:
-            storage = save_anilist_token(cfg, tkn)
-            print(f"\033[32mAniList token saved to {storage}.\033[0m")
+            storage_loc = save_anilist_token(cfg, tkn)
+            print(f"\033[32mAniList token saved to {storage_loc}.\033[0m")
         else:
             print("\033[31mNo token provided.\033[0m")
         sys.exit(0)
@@ -647,8 +672,8 @@ def main() -> None:
         )
         tkn = prompt_anilist_token()
         if tkn:
-            storage = save_anilist_token(cfg, tkn)
-            print(f"\033[32mAniList token saved to {storage}.\033[0m")
+            storage_loc = save_anilist_token(cfg, tkn)
+            print(f"\033[32mAniList token saved to {storage_loc}.\033[0m")
         else:
             print(
                 "\033[31mNo token provided. Tracking is disabled for this session.\033[0m"

@@ -210,8 +210,13 @@ def format_history_entry(
 
 
 def history_provider_is_completed(show):
-    status = str(show.get("status") or show.get("_anilist_status") or "").upper()
-    return status in ("COMPLETED", "FINISHED", "ENDED")
+    al_status = str(show.get("_anilist_status") or "").upper()
+    if any(term in al_status for term in ("COMPLETED", "FINISHED", "ENDED")):
+        return True
+    status = str(show.get("status") or "").upper()
+    if any(term in status for term in ("COMPLETED", "FINISHED", "ENDED")):
+        return True
+    return False
 
 def history_available_episode_count(entry):
     from media_cli.domain.episodes import highest_episode_number

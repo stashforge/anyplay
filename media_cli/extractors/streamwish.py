@@ -47,6 +47,9 @@ class StreamWishExtractor(BaseExtractor):
         "playwish.com",
         "dwish.net",
     ]
+    patterns = [
+        re.compile(r"(?:wish|vidhide|filelions)", re.IGNORECASE),
+    ]
 
     def extract(
         self,

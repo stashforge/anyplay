@@ -406,7 +406,10 @@ def render(
         return None
 
     if isinstance(show, dict):
-        years = format_years(_ext_year(show.get("airedStart")), _ext_year(show.get("airedEnd")), show.get("status"))
+        status = show.get("_anilist_status") or show.get("status")
+        if any(term in str(show.get("status") or "").upper() for term in ("FINISHED", "COMPLETED", "ENDED")):
+            status = "FINISHED"
+        years = format_years(_ext_year(show.get("airedStart")), _ext_year(show.get("airedEnd")), status)
         if years:
             meta_parts.append(years)
         score = show.get("score")

@@ -168,7 +168,7 @@ def resolve_source(source, silent=False):
         if isinstance(s, dict):
             s.setdefault("source_parent_name", clean_name)
             s.setdefault("raw_source_name", raw_name)
-    return streams
+    return streams or []
 
 
 def _resolve_source_impl(source, silent=False):

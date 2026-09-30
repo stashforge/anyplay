@@ -289,6 +289,8 @@ filter_history_entries = storage.filter_history_entries
 
 load_config = storage.load_config
 save_config = storage.save_config
+set_incognito_history_allowed = storage.set_incognito_history_allowed
+is_incognito_history_allowed = storage.is_incognito_history_allowed
 
 from media_cli.media.urls import (
     redact_sensitive_text,
