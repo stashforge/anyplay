@@ -12,7 +12,6 @@ dependencies = [
 
 [project.scripts]
 anyplay = "media_cli.cli.main:run"
-allmanga-cli = "media_cli.cli.main:run"
 
 [project.optional-dependencies]
 allanime = [
