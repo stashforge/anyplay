@@ -148,3 +148,45 @@ class TestShellCompletion(unittest.TestCase):
                 self.assertEqual(str(path_bash), os.path.join(bash_dir, APP_NAME))
                 path_zsh = completion_install_path("zsh")
                 self.assertEqual(str(path_zsh), os.path.join(zsh_dir, f"_{APP_NAME}"))
+
+
+class TestProvidersDisplay(unittest.TestCase):
+    def test_providers_display_wide(self):
+        from io import StringIO
+        from media_cli.app import orchestrator
+        from media_cli.cli.args import parse_cli_args
+
+        mock_args, mock_pa = parse_cli_args(["providers"])
+        out = StringIO()
+        with patch("sys.stdout", out), \
+             patch("shutil.get_terminal_size", return_value=os.terminal_size((100, 24))), \
+             patch("media_cli.app.orchestrator.parse_cli_args", return_value=(mock_args, mock_pa)):
+            orchestrator.main()
+
+        output = out.getvalue()
+        self.assertIn("Available Streaming Providers:", output)
+        self.assertIn("Name", output)
+        self.assertIn("Engine", output)
+        self.assertIn("Type", output)
+        self.assertIn("Languages", output)
+
+    def test_providers_display_narrow(self):
+        from io import StringIO
+        from media_cli.app import orchestrator
+        from media_cli.cli.args import parse_cli_args
+
+        mock_args, mock_pa = parse_cli_args(["providers"])
+        out = StringIO()
+        with patch("sys.stdout", out), \
+             patch("shutil.get_terminal_size", return_value=os.terminal_size((55, 24))), \
+             patch("media_cli.app.orchestrator.parse_cli_args", return_value=(mock_args, mock_pa)):
+            orchestrator.main()
+
+        output = out.getvalue()
+        self.assertIn("Available Streaming Providers:", output)
+        # Narrow layout has dots and bracketed types
+        self.assertIn("● active", output)
+        self.assertIn("[anime]", output)
+        self.assertIn("•", output)
+        self.assertIn("▸ = default provider", output)
+

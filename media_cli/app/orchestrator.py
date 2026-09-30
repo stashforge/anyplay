@@ -410,39 +410,62 @@ def main() -> None:
         w_lang = max(max((len(r["langs"]) for r in rows), default=0), len("Languages"))
 
         spacing = 4
-        show_type = True
-        show_name = True
-        show_engine = True
+        full_table_len = 2 + w_id + spacing + w_name + spacing + w_eng + spacing + w_stat + spacing + w_type + spacing + w_lang
 
-        def calc_total_len():
-            line_len = 2 + w_id + spacing + w_stat + spacing + w_lang
-            if show_name:
-                line_len += w_name + spacing
-            if show_engine:
-                line_len += w_eng + spacing
-            if show_type:
-                line_len += w_type + spacing
-            return line_len
+        if term_width < full_table_len:
+            for idx, r in enumerate(rows):
+                pid = r["pid"]
+                engine = r["engine"]
+                status = r["status"]
+                ptype = r["type"]
+                langs = r["langs"]
 
-        if calc_total_len() > term_width:
-            show_type = False
-        if calc_total_len() > term_width:
-            show_name = False
-        if calc_total_len() > term_width:
-            show_engine = False
+                status_color = GREEN if status == "active" else RED
+                dot = "●" if status == "active" else "○"
+                status_str = f"{status_color}{dot} {status:<8}{RESET}"
 
-        header = f"    {BOLD}{'ID'.ljust(w_id - 2 + spacing)}"
-        if show_name:
-            header += f"{'Name'.ljust(w_name + spacing)}"
-        if show_engine:
-            header += f"{'Engine'.ljust(w_eng + spacing)}"
-        header += f"{'Status'.ljust(w_stat + spacing)}"
-        if show_type:
-            header += f"{'Type'.ljust(w_type + spacing)}"
-        header += f"{'Languages'}{RESET}"
+                if pid == default_pid:
+                    prefix = f"{GREEN}▸{RESET}"
+                    pid_styled = f"{BOLD}{pid.ljust(w_id - 2)}{RESET}"
+                else:
+                    prefix = " "
+                    pid_styled = f"{CYAN}{pid.ljust(w_id - 2)}{RESET}"
+
+                type_badge = f"{DIM}[{ptype}]{RESET}"
+
+                if engine == "hybrid":
+                    eng_str = f"{YELLOW}{engine}{RESET}"
+                elif engine == "scraper":
+                    eng_str = f"{DIM}{engine}{RESET}"
+                else:
+                    eng_str = f"{engine}"
+
+                line1 = f"{prefix} {pid_styled}  {status_str}  {type_badge}"
+                line2 = f"  {eng_str} {DIM}•{RESET} {langs}"
+
+                if idx > 0:
+                    print()
+                print(line1)
+                print(line2)
+
+            print()
+            print(f"  {DIM}▸ = default provider{RESET}")
+            print(
+                f"  {DIM}Note: Scrapers are brittle and may break often. APIs and Hybrids are recommended.{RESET}\n"
+            )
+            return
+
+        header = (
+            f"    {BOLD}{'ID'.ljust(w_id - 2 + spacing)}"
+            f"{'Name'.ljust(w_name + spacing)}"
+            f"{'Engine'.ljust(w_eng + spacing)}"
+            f"{'Status'.ljust(w_stat + spacing)}"
+            f"{'Type'.ljust(w_type + spacing)}"
+            f"{'Languages'}{RESET}"
+        )
 
         print(header)
-        print(f"  {DIM}{'-'*calc_total_len()}{RESET}")
+        print(f"  {DIM}{'-'*full_table_len}{RESET}")
 
         for r in rows:
             pid, name, engine, status, ptype, langs = (
@@ -460,25 +483,22 @@ def main() -> None:
             else:
                 id_str = f"  {CYAN}{pid.ljust(w_id - 2)}{RESET}"
 
-            row_str = f"  {id_str}{' '*spacing}"
-            if show_name:
-                row_str += f"{name.ljust(w_name)}{' '*spacing}"
+            engine_str = (
+                f"{YELLOW}{engine.ljust(w_eng)}{RESET}"
+                if engine == "hybrid"
+                else f"{engine.ljust(w_eng)}"
+            )
+            if engine == "scraper":
+                engine_str = f"{DIM}{engine.ljust(w_eng)}{RESET}"
 
-            if show_engine:
-                engine_str = (
-                    f"{YELLOW}{engine.ljust(w_eng)}{RESET}"
-                    if engine == "hybrid"
-                    else f"{engine.ljust(w_eng)}"
-                )
-                if engine == "scraper":
-                    engine_str = f"{DIM}{engine.ljust(w_eng)}{RESET}"
-                row_str += f"{engine_str}{' '*spacing}"
-
-            row_str += f"{status_color}{status.ljust(w_stat)}{RESET}{' '*spacing}"
-            if show_type:
-                row_str += f"{ptype.ljust(w_type)}{' '*spacing}"
-            row_str += f"{langs}"
-
+            row_str = (
+                f"  {id_str}{' '*spacing}"
+                f"{name.ljust(w_name)}{' '*spacing}"
+                f"{engine_str}{' '*spacing}"
+                f"{status_color}{status.ljust(w_stat)}{RESET}{' '*spacing}"
+                f"{ptype.ljust(w_type)}{' '*spacing}"
+                f"{langs}"
+            )
             print(row_str)
 
         print()
