@@ -24,6 +24,9 @@ DEFAULT_CONFIG = {
     "auto_download_next": False,
     "auto_delete_watched": False,
     "auto_delete_buffer": 1,
+    "download_sub_langs": "multi",
+    "download_audio_langs": "multi",
+    "subtitle_mode": "sidecar",
 }
 
 LEGACY_CONFIG_KEY_MAP = {
@@ -109,8 +112,11 @@ def serialize_conf(config: dict) -> str:
         f"provider = {config.get('provider', 'miruro')}",
         f"title_language = {config.get('title_language', 'romaji')}",
         "",
-        "# Download Destination",
+        "# Download Destination & Media Preferences",
         f"download_dir = {config.get('download_dir', '')}",
+        f"download_sub_langs = {config.get('download_sub_langs', 'multi')}",
+        f"download_audio_langs = {config.get('download_audio_langs', 'multi')}",
+        f"subtitle_mode = {config.get('subtitle_mode', 'sidecar')}",
         "",
         "# Automation & Binge",
         f"auto_download_next = {'true' if _is_truthy(config.get('auto_download_next'), False) else 'false'}",
@@ -132,7 +138,8 @@ def serialize_conf(config: dict) -> str:
     ]
     known = {
         "quality", "translation_type", "player", "provider", "title_language",
-        "download_dir", "auto_download_next", "auto_delete_watched", "auto_delete_buffer",
+        "download_dir", "download_sub_langs", "download_audio_langs", "subtitle_mode",
+        "auto_download_next", "auto_delete_watched", "auto_delete_buffer",
         "binge", "sync", "anilist_token", "anilist_sort", "anilist_sort_reverse",
         "cover", "spinner", "aniskip", "auto_skip"
     }

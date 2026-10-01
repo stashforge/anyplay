@@ -1333,6 +1333,9 @@ def _execute_batch_download(flags, ui, ms, cfg, args, ttype, action_show, queued
             download_dir,
             downloader=downloader_choice,
             extra_args=extra_args,
+            download_sub_langs=getattr(args, "download_sub_langs", None),
+            download_audio_langs=getattr(args, "download_audio_langs", None),
+            subtitle_mode=getattr(args, "subtitle_mode", None),
         )
         if dl_ok:
             success_count += 1
@@ -1342,15 +1345,17 @@ def _execute_batch_download(flags, ui, ms, cfg, args, ttype, action_show, queued
                     save_downloads_db,
                 )
 
+                from media_cli.media.download import sanitize_filename
                 db = load_downloads_db()
                 title = ms.show_title
-                if title not in db["shows"]:
-                    db["shows"][title] = {"episodes": []}
-                if "metadata" not in db["shows"][title]:
-                    db["shows"][title]["metadata"] = action_show
+                folder_key = sanitize_filename(title) or title
+                if folder_key not in db["shows"]:
+                    db["shows"][folder_key] = {"episodes": []}
+                if "metadata" not in db["shows"][folder_key]:
+                    db["shows"][folder_key]["metadata"] = action_show
                 ep_str = str(ep_id)
-                if ep_str not in db["shows"][title]["episodes"]:
-                    db["shows"][title]["episodes"].append(ep_str)
+                if ep_str not in db["shows"][folder_key]["episodes"]:
+                    db["shows"][folder_key]["episodes"].append(ep_str)
                 save_downloads_db(db)
             except Exception:
                 pass

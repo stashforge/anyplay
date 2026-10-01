@@ -7,11 +7,11 @@ from ..constants import APP_NAME
 from ..providers import available_providers
 
 BASE_COMMANDS = (
-    "search", "download", "downloads", "anilist", "history", "continue",
+    "search", "downloads", "anilist", "history", "continue",
     "auth", "providers", "completion", "config",
 )
 ANILIST_LISTS = (
-    "airing", "watching", "planning", "completed", "paused", "dropped", "rewatching",
+    "airing", "watching", "planning", "completed", "dropped", "paused", "rewatching",
     "search",
 )
 AUTH_ACTIONS = ("login", "logout", "status", "token")
@@ -31,25 +31,21 @@ ROOT_OPTIONS = ("-h", "--help", "-v", "--version", "--debug", "--plain", "--no-t
 
 SEARCH_OPTIONS = (
     "-e", "--episode", "-q", "--quality", "--dub", "--sub", "-b", "--binge",
-    "-p", "--player", "-s", "--sources", "--print-url",
+    "-p", "--player", "-s", "--sources", "--print-url", "-d", "--download",
     "--aniskip", "--no-aniskip", "--auto-skip", "--no-auto-skip",
     "--auto-download", "--no-auto-download", "--auto-delete", "--no-auto-delete",
+    "--downloader", "--download-dir", "--dir",
+    "--sub-langs", "--audio-langs", "--embed-subs", "--sidecar-subs", "--no-subs",
     "-t", "--sync", "--no-sync",
-    "-d", "--download-dir", "--dir",
     "--cover", "--no-cover", "--json", "--history", "--clear-history",
     "-P", "--provider", "--incognito", "--debug", "--plain", "--no-tui",
     "-h", "--help",
 )
 
-DOWNLOAD_OPTIONS = (
-    "-e", "--episode", "-q", "--quality", "--dub", "--sub", "-s", "--sources",
-    "--downloader", "-d", "--download-dir", "--dir",
-    "--cover", "--no-cover", "-P", "--provider",
-    "--debug", "--plain", "--no-tui", "-h", "--help",
-)
+DOWNLOAD_OPTIONS = SEARCH_OPTIONS
 
 DOWNLOADS_OPTIONS = (
-    "-d", "--download-dir", "--dir",
+    "--download-dir", "--dir",
     "-p", "--player",
     "--cover", "--no-cover",
     "--debug", "--plain", "--no-tui", "-h", "--help",
@@ -83,6 +79,7 @@ CONFIG_KEYS = (
     "download_dir", "auto_download_next", "auto_delete_watched", "auto_delete_buffer",
     "binge", "sync", "anilist_token", "anilist_sort", "anilist_sort_reverse",
     "cover", "spinner", "aniskip", "auto_skip",
+    "download_sub_langs", "download_audio_langs", "subtitle_mode",
 )
 
 
@@ -127,7 +124,7 @@ def bash_completion():
             COMPREPLY=( $(compgen -W "{_words(DOWNLOADERS)}" -- "$cur") )
             return 0
             ;;
-        -d|--download-dir|--dir)
+        --download-dir|--dir)
             COMPREPLY=( $(compgen -d -- "$cur") )
             return 0
             ;;
@@ -209,23 +206,24 @@ def bash_completion():
                 return 0
             fi
             ;;
+        subtitle_mode)
+            if [[ "$cmd" == "config" ]]; then
+                COMPREPLY=( $(compgen -W "sidecar embed none" -- "$cur") )
+                return 0
+            fi
+            ;;
     esac
 
     case "$cmd" in
         {_case_words(PROVIDERS)})
             if [[ $COMP_CWORD -eq 2 ]]; then
-                COMPREPLY=( $(compgen -W "search download" -- "$cur") )
-            elif [[ "${{COMP_WORDS[2]}}" == "download" ]]; then
-                COMPREPLY=( $(compgen -W "{_words(DOWNLOAD_OPTIONS)}" -- "$cur") )
+                COMPREPLY=( $(compgen -W "search" -- "$cur") )
             else
                 COMPREPLY=( $(compgen -W "{_words(SEARCH_OPTIONS)}" -- "$cur") )
             fi
             ;;
         search)
             COMPREPLY=( $(compgen -W "{_words(SEARCH_OPTIONS)}" -- "$cur") )
-            ;;
-        download)
-            COMPREPLY=( $(compgen -W "{_words(DOWNLOAD_OPTIONS)}" -- "$cur") )
             ;;
         downloads)
             COMPREPLY=( $(compgen -W "{_words(DOWNLOADS_OPTIONS)}" -- "$cur") )
@@ -261,7 +259,6 @@ def zsh_completion():
 local -a commands
 commands=(
   'search:Search and watch anime'
-  'download:Download episodes'
   'downloads:Browse downloaded episodes'
   'anilist:Browse or search AniList'
   'history:Browse watch history'
@@ -276,9 +273,7 @@ commands=(
 case $words[2] in
   {'|'.join(PROVIDERS)})
     if [[ $CURRENT -eq 3 ]]; then
-      _arguments '*:: :(search download)'
-    elif [[ $words[3] == "download" ]]; then
-      _arguments '*:: :(({_words(DOWNLOAD_OPTIONS)}))'
+      _arguments '*:: :(search)'
     else
       _arguments '*:: :(({_words(SEARCH_OPTIONS)}))'
     fi
@@ -300,9 +295,6 @@ case $words[2] in
     ;;
   search)
     _arguments '*:: :(({_words(SEARCH_OPTIONS)}))'
-    ;;
-  download)
-    _arguments '*:: :(({_words(DOWNLOAD_OPTIONS)}))'
     ;;
   downloads)
     _arguments '*:: :(({_words(DOWNLOADS_OPTIONS)}))'
@@ -358,7 +350,6 @@ def fish_completion():
 
     command_options = {
         "search": SEARCH_OPTIONS,
-        "download": DOWNLOAD_OPTIONS,
         "downloads": DOWNLOADS_OPTIONS,
         "anilist": ANILIST_OPTIONS,
         "history": RESUME_OPTIONS,
@@ -371,7 +362,7 @@ def fish_completion():
     for provider in PROVIDERS:
         lines.append(
             f"complete -c {APP_NAME} -n "
-            f"'__fish_seen_subcommand_from {provider}' -a 'search download'"
+            f"'__fish_seen_subcommand_from {provider}' -a 'search'"
         )
         command_options[provider] = SEARCH_OPTIONS
     for command, options in command_options.items():

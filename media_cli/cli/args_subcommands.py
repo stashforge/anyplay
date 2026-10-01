@@ -47,17 +47,12 @@ def add_provider_subcommands(commands):
         provider_parser = commands.add_parser(
             provider_id,
             help="==SUPPRESS==",
-            usage=f"{APP_NAME} {provider_id} <command> <query> [options]",
-            description=(
-                f"Search and watch anime from {provider.name}.\n\n"
-                "Commands:\n"
-                "  search          Search and stream anime\n"
-                "  download        Download anime episodes"
-            ),
+            usage=f"{APP_NAME} {provider_id} <query> [options]",
+            description=f"Search and watch anime from {provider.name}.",
             epilog=(
                 "Examples:\n"
-                f"  {APP_NAME} {provider_id} search renegade\n"
-                f"  {APP_NAME} {provider_id} download renegade -e 3"
+                f"  {APP_NAME} {provider_id} renegade\n"
+                f"  {APP_NAME} {provider_id} renegade -e 3 --download"
             ),
             add_help=False,
             formatter_class=MinimalHelpFormatter,
@@ -66,35 +61,14 @@ def add_provider_subcommands(commands):
         provider_parser._positionals.title = "Arguments"
         provider_parser.add_argument(
             "provider_action",
-            choices=["search", "download"],
-            metavar="<command>",
+            choices=["search"],
+            metavar="search",
             help=argparse.SUPPRESS,
         )
         provider_parser.add_argument("query", nargs="*", help="Anime title to search")
         provider_parser._is_provider_parser = True
         _add_search_options(provider_parser)
         provider_parser.set_defaults(provider=provider_id)
-
-
-def add_download_subcommand(commands):
-    download = commands.add_parser(
-        "download",
-        help="Download episodes",
-        usage=f"{APP_NAME} download <query> [options]",
-        description="Download anime episodes locally.",
-        epilog=(
-            "Examples:\n"
-            f"  {APP_NAME} download slime -e 3\n"
-            f'  {APP_NAME} download "one piece" -e 1000 -q 720p'
-        ),
-        add_help=False,
-        formatter_class=MinimalHelpFormatter,
-    )
-    _configure_help_parser(download)
-    download._positionals.title = "Arguments"
-    download.add_argument("query", nargs="*", help="Anime title to search")
-    _add_download_options(download)
-    return download
 
 
 def add_downloads_subcommand(commands):
@@ -114,7 +88,7 @@ def add_downloads_subcommand(commands):
     _configure_help_parser(downloads)
     downloads.set_defaults(downloads=True)
     downloads.add_argument(
-        "-d", "--download-dir", "--dir",
+        "--download-dir", "--dir",
         dest="download_dir",
         type=str,
         help="Custom download directory to browse",
@@ -403,7 +377,6 @@ def add_config_subcommand(commands):
 def register_all_subcommands(commands):
     add_search_subcommand(commands)
     add_provider_subcommands(commands)
-    add_download_subcommand(commands)
     add_downloads_subcommand(commands)
     add_anilist_subcommand(commands)
     add_history_subcommand(commands)

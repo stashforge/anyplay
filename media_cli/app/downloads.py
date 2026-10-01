@@ -81,10 +81,20 @@ def handle_downloads_state(flags, ui, ms, cfg, args, ttype, resolveTracking):
     for title, data in list(shows.items()):
         folder_path = os.path.join(download_dir, title)
         if not os.path.isdir(folder_path):
-            if safe_to_prune:
+            from media_cli.media.download import sanitize_filename
+            alt_path = os.path.join(download_dir, sanitize_filename(title))
+            if os.path.isdir(alt_path):
+                shows[sanitize_filename(title)] = data
+                del shows[title]
+                title = sanitize_filename(title)
+                folder_path = alt_path
+                dirty = True
+            elif safe_to_prune:
                 del shows[title]
                 dirty = True
-            continue
+                continue
+            else:
+                continue
 
         meta = data.get("metadata", {})
         temp_show = {"name": title, "_folder_name": title, **meta}

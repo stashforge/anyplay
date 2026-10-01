@@ -745,4 +745,8 @@ def handle_search_state(
         if requested_episode_missing:
             return "EPISODE"
 
+        if getattr(args, "download", False):
+            from .playback_menu import handle_download_menu_state
+            return handle_download_menu_state(flags, ui, ms, cfg, args, ttype)
+
         return "DETAILS"

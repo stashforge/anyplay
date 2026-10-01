@@ -249,6 +249,47 @@ class TestDownloadsFullCatalog(unittest.TestCase):
                 self.assertNotIn("\033[38;5;244m", captured_opts[i])
                 self.assertEqual(captured_hints_fn(i), "")
 
+    def test_setup_download_directory_counts_only_disk_shows_and_prunes_phantoms(self):
+        from media_cli.app.orchestrator import setup_download_directory
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create Show 1 on disk
+            show1_dir = os.path.join(tmpdir, "Show One")
+            os.makedirs(show1_dir)
+            with open(os.path.join(show1_dir, "Show One - Episode 1.mp4"), "w") as f:
+                f.write("data")
+            with open(os.path.join(show1_dir, "Show One - Episode 2.mp4"), "w") as f:
+                f.write("data")
+
+            # Create Show 2 on disk
+            show2_dir = os.path.join(tmpdir, "Show Two")
+            os.makedirs(show2_dir)
+            with open(os.path.join(show2_dir, "Show Two - Episode 1.mkv"), "w") as f:
+                f.write("data")
+
+            # DB has Show 1 (2 eps), Phantom Show 3 (1 ep), but NOT Show 2
+            db_data = {
+                "current_download_dir": tmpdir,
+                "shows": {
+                    "Show One": {"episodes": ["1", "2"]},
+                    "Phantom Show 3": {"episodes": ["1"]},
+                }
+            }
+            cfg = {"download_dir": ""}
+
+            with patch("sys.stdin.isatty", return_value=True), \
+                 patch("builtins.input", return_value="1"), \
+                 patch("media_cli.app.orchestrator.save_config"), \
+                 patch("media_cli.app.orchestrator.save_downloads_db"):
+                chosen = setup_download_directory(cfg, db_data)
+                self.assertEqual(chosen, tmpdir)
+                # Phantom Show 3 should be pruned
+                self.assertNotIn("Phantom Show 3", db_data["shows"])
+                # Show One and Show Two should be in db
+                self.assertIn("Show One", db_data["shows"])
+                self.assertIn("Show Two", db_data["shows"])
+                self.assertEqual(len(db_data["shows"]), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
+

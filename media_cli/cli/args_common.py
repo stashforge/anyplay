@@ -247,6 +247,11 @@ def _add_search_options(parser):
         help="Choose a mirror before playback",
     )
     playback.add_argument("--print-url", action="store_true", help="Print selected stream URL")
+    playback.add_argument(
+        "-d", "--download",
+        action="store_true",
+        help="Download episode(s) locally instead of playing",
+    )
     playback.add_argument("--aniskip", dest="aniskip", action="store_true", default=None, help="Enable AniSkip")
     playback.add_argument("--no-aniskip", dest="aniskip", action="store_false", help="Disable AniSkip")
     playback.add_argument("--auto-skip", dest="auto_skip", action="store_true", default=None, help="Auto-skip OP/ED")
@@ -255,6 +260,58 @@ def _add_search_options(parser):
     playback.add_argument("--no-auto-download", dest="auto_download", action="store_false", help="Do not auto-download next episode")
     playback.add_argument("--auto-delete", dest="auto_delete", action="store_true", default=None, help="Auto-delete watched downloaded episodes")
     playback.add_argument("--no-auto-delete", dest="auto_delete", action="store_false", help="Do not auto-delete watched downloaded episodes")
+
+    download = parser.add_argument_group("Download options")
+    download.add_argument(
+        "--downloader",
+        choices=["auto", "yt-dlp", "ffmpeg"],
+        default=argparse.SUPPRESS,
+        help="Downloader backend to use: auto (default), yt-dlp, ffmpeg",
+    )
+    download.add_argument(
+        "--download-dir", "--dir",
+        dest="download_dir",
+        type=str,
+        help="Custom download directory for this session",
+    )
+    download.add_argument(
+        "--sub-langs",
+        dest="download_sub_langs",
+        type=str,
+        default=argparse.SUPPRESS,
+        help="Subtitle languages to download (e.g. 'eng,jpn' or 'multi')",
+    )
+    download.add_argument(
+        "--audio-langs",
+        dest="download_audio_langs",
+        type=str,
+        default=argparse.SUPPRESS,
+        help="Audio languages to download (e.g. 'jpn,eng' or 'multi')",
+    )
+    download.add_argument(
+        "--embed-subs",
+        dest="subtitle_mode",
+        action="store_const",
+        const="embed",
+        default=argparse.SUPPRESS,
+        help="Embed subtitles directly into .mkv container",
+    )
+    download.add_argument(
+        "--sidecar-subs",
+        dest="subtitle_mode",
+        action="store_const",
+        const="sidecar",
+        default=argparse.SUPPRESS,
+        help="Save subtitles as sidecar files (.vtt/.srt) alongside video",
+    )
+    download.add_argument(
+        "--no-subs",
+        dest="download_sub_langs",
+        action="store_const",
+        const="none",
+        default=argparse.SUPPRESS,
+        help="Do not download subtitles",
+    )
 
     tracking = parser.add_argument_group("Tracking options")
     tracking.add_argument(
@@ -314,6 +371,44 @@ def _add_download_options(parser):
         dest="download_dir",
         type=str,
         help="Custom download directory for this session",
+    )
+    download.add_argument(
+        "--sub-langs",
+        dest="download_sub_langs",
+        type=str,
+        default=argparse.SUPPRESS,
+        help="Subtitle languages to download (e.g. 'eng,jpn' or 'multi')",
+    )
+    download.add_argument(
+        "--audio-langs",
+        dest="download_audio_langs",
+        type=str,
+        default=argparse.SUPPRESS,
+        help="Audio languages to download (e.g. 'jpn,eng' or 'multi')",
+    )
+    download.add_argument(
+        "--embed-subs",
+        dest="subtitle_mode",
+        action="store_const",
+        const="embed",
+        default=argparse.SUPPRESS,
+        help="Embed subtitles directly into .mkv container",
+    )
+    download.add_argument(
+        "--sidecar-subs",
+        dest="subtitle_mode",
+        action="store_const",
+        const="sidecar",
+        default=argparse.SUPPRESS,
+        help="Save subtitles as sidecar files (.vtt/.srt) alongside video",
+    )
+    download.add_argument(
+        "--no-subs",
+        dest="download_sub_langs",
+        action="store_const",
+        const="none",
+        default=argparse.SUPPRESS,
+        help="Do not download subtitles",
     )
     output = parser.add_argument_group("Output options")
     output.add_argument("--cover", dest="cover", action="store_true", default=None, help="Show cover images")

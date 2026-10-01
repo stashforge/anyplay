@@ -95,6 +95,18 @@ def trigger_migration(old_dir_full: str, new_dir: str) -> None:
                 print(f"Failed to migrate files: {e}", file=sys.stderr)
 
 
+def _compact_path(p: str) -> str:
+    if not p:
+        return ""
+    home = os.path.expanduser("~")
+    p = os.path.abspath(os.path.expanduser(p))
+    if p == home:
+        return "~"
+    if p.startswith(home + os.sep):
+        return "~" + p[len(home):]
+    return p
+
+
 def setup_download_directory(cfg: dict, db: dict, runtime_dir: str | None = None) -> str:
     """Resolve effective download directory, safely handling runtime overrides,
     missing/inaccessible paths, and interactive recovery prompts."""
@@ -148,32 +160,98 @@ def setup_download_directory(cfg: dict, db: dict, runtime_dir: str | None = None
     prev_library_valid = False
     summary = ""
     if db_dir and os.path.isdir(db_dir):
+        from .downloads import VIDEO_EXTS, extract_offline_episode_info
+        from media_cli.media.download import sanitize_filename
+
         shows = db.get("shows", {})
-        show_count = len(shows)
-        total_eps = sum(len(s.get("episodes", [])) for s in shows.values())
-        if show_count > 0:
-            summary = f"{show_count} show{'' if show_count == 1 else 's'}, {total_eps} episode{'' if total_eps == 1 else 's'}"
+        dirty = False
+
+        # Prune dead shows that have no matching directory on disk
+        for title in list(shows.keys()):
+            show_dir = os.path.join(db_dir, title)
+            if not os.path.isdir(show_dir):
+                alt_dir = os.path.join(db_dir, sanitize_filename(title))
+                if os.path.isdir(alt_dir):
+                    shows[sanitize_filename(title)] = shows.pop(title)
+                    dirty = True
+                else:
+                    del shows[title]
+                    dirty = True
+
+        # Scan actual folders on disk in db_dir
+        valid_shows = 0
+        total_eps = 0
+        try:
+            for item in sorted(os.listdir(db_dir)):
+                subpath = os.path.join(db_dir, item)
+                if not os.path.isdir(subpath):
+                    continue
+                try:
+                    files = [
+                        f for f in os.listdir(subpath)
+                        if f.lower().endswith(VIDEO_EXTS)
+                    ]
+                except OSError:
+                    continue
+                if not files:
+                    continue
+                ep_ids = set()
+                for f in files:
+                    _, _, clean_id, _ = extract_offline_episode_info(f)
+                    if clean_id:
+                        ep_ids.add(clean_id)
+                eps_count = len(ep_ids) if ep_ids else len(files)
+                if eps_count > 0:
+                    valid_shows += 1
+                    total_eps += eps_count
+                    if item not in shows:
+                        shows[item] = {"metadata": {"name": item, "episodeCount": eps_count}, "episodes": sorted(list(ep_ids))}
+                        dirty = True
+                    else:
+                        shows[item]["episodes"] = sorted(list(ep_ids)) if ep_ids else shows[item].get("episodes", [])
+        except OSError:
+            pass
+
+        if dirty:
+            save_downloads_db(db)
+
+        if valid_shows > 0:
+            summary = f"{valid_shows} show{'' if valid_shows == 1 else 's'}, {total_eps} episode{'' if total_eps == 1 else 's'}"
             prev_library_valid = True
 
     os_default = get_default_download_dir(require_existing=True)
 
-    print("\n\033[1;34m[?] 'download_dir' is not set in your config.\033[0m")
+    print("\n\033[1;34m[?]\033[0m \033[1mDownload directory is not set.\033[0m\n")
 
+    info_lines = []
     options = []
     # Build options list: (label, action_type, path_value)
     if prev_library_valid:
-        options.append((f"Restore previous directory: {db_dir} ({summary}) (Recommended)", "prev", db_dir))
+        prev_disp = _compact_path(db_dir)
+        info_lines.append(f"    \033[1;36mPrevious:\033[0m {prev_disp} ({summary})")
+        options.append(("Restore previous directory  (Recommended)", "prev", db_dir))
+
         if os_default and os.path.abspath(os_default) != os.path.abspath(db_dir):
-            options.append((f"Set OS default directory: {os_default}", "default", os_default))
-        elif not os_default:
-            print("\033[38;5;244m(Note: Standard OS Downloads directory could not be detected)\033[0m")
-        options.append(("Enter custom path", "custom", None))
+            def_disp = _compact_path(os_default)
+            info_lines.append(f"    \033[1;36mDefault:\033[0m  {def_disp}")
+            options.append(("Use default directory", "default", os_default))
+
+        options.append(("Choose custom directory", "custom", None))
+
     elif os_default:
-        options.append((f"Use OS default directory: {os_default} (Recommended)", "default", os_default))
-        options.append(("Enter custom path", "custom", None))
+        def_disp = _compact_path(os_default)
+        info_lines.append(f"    \033[1;36mDefault:\033[0m  {def_disp}")
+        options.append(("Use default directory  (Recommended)", "default", os_default))
+        options.append(("Choose custom directory", "custom", None))
+
     else:
-        print("\033[93mCould not detect a standard OS Downloads folder.\033[0m")
-        options.append(("Enter custom path", "custom", None))
+        # Scenario D: 1st time, no previous directory, and cannot detect OS default directory
+        options.append(("Choose custom directory", "custom", None))
+
+    if info_lines:
+        for line in info_lines:
+            print(line)
+        print()
 
     selected_path = None
     if len(options) == 1 and options[0][1] == "custom":

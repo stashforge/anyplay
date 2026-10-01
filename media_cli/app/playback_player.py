@@ -105,9 +105,11 @@ def trigger_background_auto_download(show_ctx, current_ep_index, episode_ids, tt
             if download_ok:
                 try:
                     from media_cli.core.storage import load_downloads_db, save_downloads_db
+                    from media_cli.media.download import sanitize_filename
                     db = load_downloads_db()
-                    if show_title not in db["shows"]:
-                        db["shows"][show_title] = {"episodes": []}
+                    folder_key = sanitize_filename(show_title) or show_title
+                    if folder_key not in db["shows"]:
+                        db["shows"][folder_key] = {"episodes": []}
                     def build_offline_metadata(s):
                         meta = {}
                         keys_to_keep = [
@@ -128,10 +130,10 @@ def trigger_background_auto_download(show_ctx, current_ep_index, episode_ids, tt
                         if "originalEpisodeCount" not in meta and "episodeCount" in s:
                             meta["originalEpisodeCount"] = s["episodeCount"]
                         return meta
-                    db["shows"][show_title]["metadata"] = build_offline_metadata(show_ctx)
+                    db["shows"][folder_key]["metadata"] = build_offline_metadata(show_ctx)
                     ep_str = str(next_ep)
-                    if ep_str not in db["shows"][show_title]["episodes"]:
-                        db["shows"][show_title]["episodes"].append(ep_str)
+                    if ep_str not in db["shows"][folder_key]["episodes"]:
+                        db["shows"][folder_key]["episodes"].append(ep_str)
                     save_downloads_db(db)
 
                     new_f = app_core.find_offline_file_for_episode(show_title, lbl_next, cfg)
@@ -650,15 +652,20 @@ def handle_play_state(
             download_ok = app_core.download_episode(
                 ms.show_title, current_ep_label, ms.selected_stream,
                 cfg.get("download_dir", ""), downloader=downloader_choice,
-                extra_args=extra_args
+                extra_args=extra_args,
+                download_sub_langs=getattr(args, "download_sub_langs", None),
+                download_audio_langs=getattr(args, "download_audio_langs", None),
+                subtitle_mode=getattr(args, "subtitle_mode", None),
             )
             if download_ok:
                 try:
                     from media_cli.core.storage import load_downloads_db, save_downloads_db
+                    from media_cli.media.download import sanitize_filename
                     db = load_downloads_db()
                     title = ms.show_title
-                    if title not in db["shows"]:
-                        db["shows"][title] = {"episodes": []}
+                    folder_key = sanitize_filename(title) or title
+                    if folder_key not in db["shows"]:
+                        db["shows"][folder_key] = {"episodes": []}
 
                     def build_offline_metadata(s):
                         meta = {}
@@ -681,10 +688,10 @@ def handle_play_state(
                             meta["originalEpisodeCount"] = s["episodeCount"]
                         return meta
 
-                    db["shows"][title]["metadata"] = build_offline_metadata(s_ctx)
+                    db["shows"][folder_key]["metadata"] = build_offline_metadata(s_ctx)
                     ep_str = str(ms.current_ep)
-                    if ep_str not in db["shows"][title]["episodes"]:
-                        db["shows"][title]["episodes"].append(ep_str)
+                    if ep_str not in db["shows"][folder_key]["episodes"]:
+                        db["shows"][folder_key]["episodes"].append(ep_str)
                     save_downloads_db(db)
                 except Exception:
                     pass

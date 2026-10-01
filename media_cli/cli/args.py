@@ -29,13 +29,14 @@ def build_command_parser():
         epilog=(
             "Quick start:\n"
             f"  {APP_NAME} search frieren\n"
+            f"  {APP_NAME} search frieren -e 1 --download\n"
             f"  {APP_NAME} continue\n"
-            f"  {APP_NAME} download frieren\n"
+            f"  {APP_NAME} downloads\n"
             f"  {APP_NAME} anilist watching\n\n"
             f"Run '{APP_NAME} <command> --help' for command-specific help.\n\n"
             "Examples:\n"
             f"  {APP_NAME} search --help\n"
-            f"  {APP_NAME} download --help\n"
+            f"  {APP_NAME} downloads --help\n"
             f"  {APP_NAME} anilist --help"
         ),
         formatter_class=CommandHelpFormatter,
@@ -81,22 +82,28 @@ def parse_cli_args(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     meaningful = [arg for arg in argv if arg != "--debug"]
 
-    # Support: allmanga-cli <provider> anilist ...
-    if meaningful and meaningful[0] in _provider_command_names() and len(meaningful) > 1 and meaningful[1] == "anilist":
+    # Support: anyplay <provider> ...
+    if meaningful and meaningful[0] in _provider_command_names():
         p_id = meaningful[0]
-        rest = meaningful[2:]
-        if rest and rest[0] == "search":
-            parser = build_anilist_search_parser()
-            parsed_args = parser.parse_args(rest[1:] + ["--provider", p_id] + (["--debug"] if "--debug" in argv else []))
-            return parsed_args, parser
-        else:
-            parser = build_command_parser()
-            parsed_args, _ = parser.parse_known_args(["anilist"] + rest + ["--provider", p_id] + (["--debug"] if "--debug" in argv else []))
-            target = str(getattr(parsed_args, "target", "menu") or "menu").lower()
-            parsed_args.anilist = ANILIST_COMMAND_TARGETS.get(target, target)
-            if hasattr(parsed_args, "target"):
-                del parsed_args.target
-            return parsed_args, parser
+        if len(meaningful) > 1 and meaningful[1] == "anilist":
+            rest = meaningful[2:]
+            if rest and rest[0] == "search":
+                parser = build_anilist_search_parser()
+                parsed_args = parser.parse_args(rest[1:] + ["--provider", p_id] + (["--debug"] if "--debug" in argv else []))
+                return parsed_args, parser
+            else:
+                parser = build_command_parser()
+                parsed_args, _ = parser.parse_known_args(["anilist"] + rest + ["--provider", p_id] + (["--debug"] if "--debug" in argv else []))
+                target = str(getattr(parsed_args, "target", "menu") or "menu").lower()
+                parsed_args.anilist = ANILIST_COMMAND_TARGETS.get(target, target)
+                if hasattr(parsed_args, "target"):
+                    del parsed_args.target
+                return parsed_args, parser
+        elif len(meaningful) == 1 or (len(meaningful) > 1 and meaningful[1] != "search"):
+            # Auto-insert 'search' so 'anyplay <provider> <query>' works directly
+            idx = argv.index(p_id)
+            argv.insert(idx + 1, "search")
+            meaningful = [arg for arg in argv if arg != "--debug"]
 
     if meaningful[:2] == ["anilist", "search"]:
         debug_enabled = "--debug" in argv
@@ -109,7 +116,7 @@ def parse_cli_args(argv=None):
     args, extra = parser.parse_known_args(argv)
 
     if extra:
-        if args.command == "download" or (args.command in _provider_command_names() and getattr(args, "provider_action", "") == "download"):
+        if getattr(args, "download", False):
             args.extra_args = extra
         else:
             parser.error(f"unrecognized arguments: {' '.join(extra)}")
@@ -152,7 +159,8 @@ def parse_cli_args(argv=None):
             args.completion_shell = values[0]
         del args.completion_args
     elif args.command in _provider_command_names():
-        args.download = (args.provider_action == "download")
-        args.command = args.provider_action
-        del args.provider_action
+        args.download = getattr(args, "download", False) or (getattr(args, "provider_action", "") == "download")
+        args.command = "search"
+        if hasattr(args, "provider_action"):
+            del args.provider_action
     return args, parser
