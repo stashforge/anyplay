@@ -50,6 +50,28 @@ def is_fixed_resolution(src: dict) -> bool:
     return False
 
 
+def torrent_size_sort_value(item: dict) -> int:
+    """Return a stable ascending sort value for torrent mirrors."""
+    if not isinstance(item, dict):
+        return 0
+    torrent = item.get("torrent") if isinstance(item.get("torrent"), dict) else {}
+    if str(item.get("type") or "").strip().lower() != "torrent" and not torrent:
+        return 0
+    try:
+        size = int(torrent.get("size_bytes") or item.get("size_bytes") or 0)
+    except (TypeError, ValueError):
+        size = 0
+    return size if size > 0 else 10**30
+
+
+def torrent_fallback_sort_value(item: dict) -> int:
+    """Keep torrent mirrors after regular provider mirrors."""
+    if not isinstance(item, dict):
+        return 0
+    torrent = item.get("torrent") if isinstance(item.get("torrent"), dict) else {}
+    return 1 if str(item.get("type") or "").strip().lower() == "torrent" or torrent else 0
+
+
 def expand_direct_sources(sources: list) -> list:
     """
     If a source provides a direct auto/adaptive stream without parsed variants,
@@ -204,7 +226,15 @@ def _compute_ep_data_version(ep_data: dict) -> str:
     # Create a stable hash from source names and URLs
     import hashlib
     content = "".join(
-        f"{s.get('sourceName', '')}|{s.get('link', '')}|{s.get('streamUrl', '')}"
+        "|".join(
+            (
+                str(s.get("sourceName", "")),
+                str(s.get("sourceUrl", "")),
+                str(s.get("link", "")),
+                str(s.get("streamUrl", "")),
+                str((s.get("torrent") or {}).get("infohash", "")),
+            )
+        )
         for s in source_urls
     )
     return hashlib.md5(content.encode()).hexdigest()[:12]
@@ -350,11 +380,27 @@ def _set_cached_ep_data(ep_data: dict, key=None, show_id=None, ep=None, ttype="s
             k = make_stream_key(show_id, ep, ttype, provider_id, quality)
         else:
             return
+        source_urls = ep_data.get("episode", {}).get("sourceUrls", [])
+        unresolved_state = "STALE" if source_urls else "FAILED"
         if k not in _streams_cache:
-            _streams_cache[k] = {"state": "READY", "streams": [], "resolved_at": now, "ep_data": ep_data, "ep_data_version": ep_data_version}
+            _streams_cache[k] = {
+                "state": unresolved_state,
+                "streams": [],
+                "resolved_at": now,
+                "ep_data": ep_data,
+                "ep_data_version": ep_data_version,
+            }
         else:
+            old_version = _streams_cache[k].get("ep_data_version", "")
             _streams_cache[k]["ep_data"] = ep_data
             _streams_cache[k]["ep_data_version"] = ep_data_version
+            if ep_data_version != old_version and (ep_data_version or old_version):
+                _streams_cache[k]["streams"] = []
+                _streams_cache[k]["state"] = unresolved_state
+            elif source_urls and not _streams_cache[k].get("streams"):
+                _streams_cache[k]["state"] = "STALE"
+
+
 def _publish_stream(stream, generation, key=None):
     """Publish a resolved stream only while its episode generation is current."""
     now = time.time()
@@ -475,13 +521,32 @@ def start_bg_resolve(
 
         prio = source_priority(s)
         q_key = quality_preference_key(res, quality)
-        return (pref_boost, sub_rank, audio_penalty, q_key, prio)
+        return (
+            pref_boost,
+            torrent_fallback_sort_value(s),
+            sub_rank,
+            audio_penalty,
+            q_key,
+            prio,
+            torrent_size_sort_value(s),
+        )
 
     sources = sorted(sources, key=_bg_sort_key)
     now = time.time()
 
     ep_data_version = _compute_ep_data_version(ep_data)
     stream_key = make_stream_key(show_id, ep, ttype, provider_id, quality) if show_id is not None else None
+
+    def _is_excluded_source(src):
+        sname = str(src.get("sourceName") or "")
+        if not sname:
+            return True
+        clean_sname = sname.title()
+        return (
+            sname in exclude_names
+            or clean_sname in exclude_names
+            or any(sname.lower() in str(ex).lower() for ex in exclude_names)
+        )
 
     with _streams_lock:
         _streams_generation += 1
@@ -537,10 +602,7 @@ def start_bg_resolve(
             if not _generation_is_current(generation):
                 return
             sname = src.get("sourceName", "")
-            if not sname:
-                continue
-            clean_sname = sname.title()
-            if sname in exclude_names or clean_sname in exclude_names or any(sname.lower() in ex.lower() for ex in exclude_names):
+            if _is_excluded_source(src):
                 continue
 
             display_name = sname
@@ -627,7 +689,14 @@ def fetch_episode_stream(show_id, ep_number, ttype="sub", quality="best", provid
             sub_rank = 0 if is_soft else (2 if is_hard else 1)
         prio = source_priority(src)
         q_key = quality_preference_key(res, quality)
-        return (sub_rank, audio_penalty, q_key, prio)
+        return (
+            torrent_fallback_sort_value(src),
+            sub_rank,
+            audio_penalty,
+            q_key,
+            prio,
+            torrent_size_sort_value(src),
+        )
 
     from ..media.resolver import generate_source_passes
     exclude_sources = set(exclude_sources or [])

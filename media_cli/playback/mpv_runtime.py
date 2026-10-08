@@ -11,6 +11,7 @@ ANISKIP_LUA_SCRIPT = """
 local utils = require 'mp.utils'
 local intervals = {}
 local auto_skip = true
+local clear_chapters = false
 local skipped = {}
 local active_prompt = nil
 
@@ -72,7 +73,12 @@ local function manual_skip()
 end
 
 local function apply_chapters()
-    if not intervals or #intervals == 0 then return end
+    if not intervals or #intervals == 0 then
+        if clear_chapters then
+            mp.set_property_native("chapter-list", {})
+        end
+        return
+    end
     local chaps = {}
     local curr = 0.0
     for _, item in ipairs(intervals) do
@@ -99,11 +105,12 @@ mp.observe_property("time-pos", "number", on_time_pos)
 mp.add_key_binding("tab", "aniskip_tab", manual_skip)
 mp.add_key_binding("s", "aniskip_s", manual_skip)
 mp.register_script_message("skip_interval", manual_skip)
-mp.register_script_message("set_skip_intervals", function(json_str, auto_flag)
+mp.register_script_message("set_skip_intervals", function(json_str, auto_flag, chapter_mode)
     intervals = {}
     skipped = {}
     active_prompt = nil
     auto_skip = (auto_flag == "yes" or auto_flag == "true" or auto_flag == "1")
+    clear_chapters = (chapter_mode == "clear")
     if json_str and json_str ~= "" then
         local parsed = utils.parse_json(json_str)
         if parsed and type(parsed) == "table" then

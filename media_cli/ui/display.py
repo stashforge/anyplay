@@ -166,6 +166,10 @@ def set_alt_screen_active(active):
     _alt_screen_active = bool(active)
 
 
+def is_alt_screen_active():
+    return bool(_alt_screen_active)
+
+
 def enter_alt_screen():
     from ..context import FLAGS
     if getattr(FLAGS, "plain_mode", False) or not sys.stdin.isatty():
@@ -207,6 +211,11 @@ def exit_alt_screen():
 
 def restore_terminal():
     """Fully restore terminal echo, canonical mode, cursor, alt screen, and clear active terminal images."""
+    try:
+        from .player_screen import stop_loading_ticker
+        stop_loading_ticker()
+    except Exception:
+        pass
     try:
         terminal_images.clear_if_active()
     except Exception:

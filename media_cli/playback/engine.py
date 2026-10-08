@@ -90,6 +90,22 @@ def _redraw_player(props: dict) -> None:
         pass
 
 
+def _torrent_progress(message: str) -> None:
+    try:
+        from media_cli.ui.player_screen import loading_cancel_requested
+        if loading_cancel_requested():
+            from media_cli.torrents.runtime import TorrentCancelled
+            raise TorrentCancelled("Torrent loading cancelled.")
+    except Exception as exc:
+        if exc.__class__.__name__ == "TorrentCancelled":
+            raise
+    try:
+        from media_cli.ui.player_screen import add_status_line
+        add_status_line(message, "\033[1;92m")
+    except Exception:
+        pass
+
+
 _ipc_player = MpvIpc(_redraw_player)
 atexit.register(_ipc_player.quit)
 
@@ -114,7 +130,14 @@ def play_desktop(
     aniskip_enabled: bool = True,
     aniskip_auto: bool = True,
     start_time_override: float | None = None,
+    cancel_check: Callable[[], bool] | None = None,
 ):
+    if cancel_check is None:
+        try:
+            from media_cli.ui.player_screen import loading_cancel_requested
+            cancel_check = loading_cancel_requested
+        except Exception:
+            cancel_check = None
     return desktop_playback.play_desktop(
         _ipc_player,
         title,
@@ -136,6 +159,8 @@ def play_desktop(
         aniskip_enabled=aniskip_enabled,
         aniskip_auto=aniskip_auto,
         start_time_override=start_time_override,
+        torrent_progress_callback=_torrent_progress,
+        cancel_check=cancel_check,
     )
 
 

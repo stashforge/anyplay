@@ -33,6 +33,11 @@ from ..core.api import ProviderDependencyError
 from ..core.processes import (
     kill_active_subprocesses,
 )
+from ..core.diagnostics import (
+    configure_file_logging,
+    get_log_paths,
+    tail_file,
+)
 from ..core.storage import (
     clear_search_history,
     get_default_download_dir,
@@ -49,6 +54,7 @@ from ..domain.metadata import prepare_show_display_state
 from ..domain.titles import get_show_display_title
 from ..providers import (
     _DEFAULT_PROVIDER_ID,
+    available_providers,
     get_provider,
     get_provider_registry,
     provider_key,
@@ -160,7 +166,8 @@ def setup_download_directory(cfg: dict, db: dict, runtime_dir: str | None = None
     prev_library_valid = False
     summary = ""
     if db_dir and os.path.isdir(db_dir):
-        from .downloads import VIDEO_EXTS, extract_offline_episode_info
+        from .downloads import extract_offline_episode_info
+        from media_cli.core.storage import is_valid_download_video
         from media_cli.media.download import sanitize_filename
 
         shows = db.get("shows", {})
@@ -189,7 +196,7 @@ def setup_download_directory(cfg: dict, db: dict, runtime_dir: str | None = None
                 try:
                     files = [
                         f for f in os.listdir(subpath)
-                        if f.lower().endswith(VIDEO_EXTS)
+                        if is_valid_download_video(os.path.join(subpath, f))
                     ]
                 except OSError:
                     continue
@@ -404,22 +411,77 @@ def handle_config_command(args: Any) -> None:
             print(f"Config updated: {key} = {val}")
 
 
+def handle_logs_command(args: Any) -> None:
+    log_path = get_log_paths()["anyplay"]
+    tail_count = int(getattr(args, "logs_tail", 0) or 0)
+    if tail_count > 0:
+        lines = tail_file(log_path, tail_count)
+    elif os.path.exists(log_path):
+        with open(log_path, "r", encoding="utf-8", errors="replace") as fh:
+            lines = list(fh)
+    else:
+        print(f"No anyplay log file yet: {log_path}")
+        return
+
+    if not lines:
+        print(f"No anyplay log lines yet: {log_path}")
+        return
+
+    for line in lines:
+        print(line.rstrip("\n"))
+
+
+def _resolve_quit_with_active_downloads() -> str:
+    """Return the next app state after handling active-download quit choices."""
+    from media_cli.media.download_worker import has_active_downloads
+
+    act_c, q_c = has_active_downloads()
+    if act_c <= 0 and q_c <= 0:
+        return "QUIT"
+
+    from media_cli.ui.download_manager import prompt_download_exit_cli
+    from media_cli.media.download_worker import get_global_worker, stop_global_worker
+
+    act = prompt_download_exit_cli(act_c, q_c)
+    if act == "CANCEL":
+        try:
+            from media_cli.ui.picker import invalidate_screen_buffer
+            invalidate_screen_buffer()
+        except Exception:
+            pass
+        return "SEARCH"
+
+    if act == "FINISH_QUIT":
+        w = get_global_worker()
+        from media_cli.ui.download_manager import run_download_manager
+        manager_result = run_download_manager(w, standalone=False, auto_quit=True)
+        if manager_result != "QUIT":
+            try:
+                from media_cli.ui.picker import invalidate_screen_buffer
+                invalidate_screen_buffer()
+            except Exception:
+                pass
+            return "SEARCH"
+        stop_global_worker()
+        return "QUIT"
+
+    stop_global_worker()
+    return "QUIT"
+
+
 def main() -> None:
     from .. import app_core
 
     def _force_exit(sig, frame):
-        kill_active_subprocesses()
-        try:
-            restore_terminal()
-        except Exception:
-            pass
-        os._exit(130)
+        raise KeyboardInterrupt
 
     signal.signal(signal.SIGINT, _force_exit)
 
     args, pa = parse_cli_args()
+    runtime_flags.debug_mode = bool(getattr(args, "debug", False))
+    configure_file_logging(debug=runtime_flags.debug_mode)
 
-    if getattr(args, "command", None) != "config" and not getattr(args, "completion_shell", None) and not getattr(args, "show_search_history", False) and not getattr(args, "clear_search_history", False) and not getattr(args, "list_providers", False):
+    if getattr(args, "command", None) not in ("config", "logs") and not getattr(args, "completion_shell", None) and not getattr(args, "show_search_history", False) and not getattr(args, "clear_search_history", False) and not getattr(args, "list_providers", False):
         cfg = load_config()
         db = load_downloads_db()
         runtime_dl_dir = getattr(args, "download_dir", None)
@@ -460,6 +522,11 @@ def main() -> None:
         handle_config_command(args)
         return
 
+    if getattr(args, "logs", False):
+        globals()["SUPPRESS_FINAL_CURSOR_RESTORE"] = True
+        handle_logs_command(args)
+        return
+
     if getattr(args, "list_providers", False):
         globals()["SUPPRESS_FINAL_CURSOR_RESTORE"] = True
         cfg = load_config()
@@ -479,7 +546,10 @@ def main() -> None:
         term_width = shutil.get_terminal_size((80, 20)).columns
 
         rows = []
+        active_provider_ids = set(available_providers())
         for pid, meta in registry.items():
+            if pid not in active_provider_ids:
+                continue
             name = meta.get("name", pid.title())
             engine = meta.get("engine", "unknown")
             status = meta.get("status", "unknown")
@@ -608,6 +678,7 @@ def main() -> None:
     display._configure_spinner_from_config(cfg)
 
     runtime_flags.debug_mode = args.debug
+    configure_file_logging(debug=bool(args.debug), max_bytes=int(cfg.get("log_max_bytes", 1_048_576) or 1_048_576), backup_count=int(cfg.get("log_backup_count", 5) or 5))
     runtime_flags.incognito_mode = bool(args.incognito)
     if args.incognito:
         allow_history = bool(
@@ -923,5 +994,8 @@ def main() -> None:
         else:
             print(f"Unknown state: {state}", file=sys.stderr)
             state = "QUIT"
+
+        if state == "QUIT":
+            state = _resolve_quit_with_active_downloads()
 
     app_core._ipc_player.quit()

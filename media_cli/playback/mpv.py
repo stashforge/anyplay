@@ -1,6 +1,7 @@
 """Persistent mpv process and IPC playback controller."""
 
 import json
+import logging
 import os
 import select
 import socket
@@ -21,6 +22,8 @@ from .rules import (
     playback_is_actively_advancing,
     prefetch_matches_request,
 )
+
+_logger = logging.getLogger(__name__)
 
 
 class MpvIpc:
@@ -58,7 +61,8 @@ class MpvIpc:
             self.process = subprocess.Popen([
                 "mpv", "--idle=yes", "--keep-open=no", f"--input-ipc-server={self.socket_path}",
                 f"--input-conf={self.conf_path}", f"--chapters-file={self.chapters_path}",
-                f"--script={self.lua_path}", "--force-window=yes", "--no-ytdl"
+                f"--script={self.lua_path}", "--force-window=yes", "--no-ytdl",
+                "--autoload-files=no",
             ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
             for _ in range(20):
@@ -91,7 +95,8 @@ class MpvIpc:
 
     def load(
             self, url, title, headers, referer, start_time=0, osd_msg="",
-            audio_url="", subtitle_url="", subtitles=None, skip_intervals=None, aniskip_auto=True, audio_tracks=None):
+            audio_url="", subtitle_url="", subtitles=None, skip_intervals=None, aniskip_auto=True, audio_tracks=None,
+            suppress_chapters=False):
         self.start()
         self.running = True
         if self.client:
@@ -162,6 +167,7 @@ class MpvIpc:
             "set_skip_intervals",
             json.dumps(self.skip_intervals),
             "yes" if self.aniskip_auto else "no",
+            "clear" if suppress_chapters else "keep",
         )
 
 
@@ -299,6 +305,12 @@ class MpvIpc:
         def redraw():
             if self.redraw_callback:
                 self.redraw_callback(self.props)
+
+        def process_exited():
+            try:
+                return self.process is not None and self.process.poll() is not None
+            except Exception:
+                return False
 
         try:
             done = False
@@ -462,11 +474,22 @@ class MpvIpc:
                                         result = pending_action
                                         if pending_action == "QUIT":
                                             self.running = False
+                                    elif reason == "error" and process_exited():
+                                        result = "QUIT"
+                                        self.running = False
                                     elif reason == "error":
                                         if dur > 0 and curr_pos >= (dur - 30.0):
                                             result = "EOF"
                                         else:
                                             result = "ERROR"
+                                            _logger.warning(
+                                                "mpv playback error fallback reason=%r file_loaded=%s duration=%.2f current=%.2f played=%.2f",
+                                                reason,
+                                                file_loaded,
+                                                dur,
+                                                curr_pos,
+                                                played_seconds,
+                                            )
                                             self.send_cmd("show-text", "⚠ Playback failed. Trying next mirror...", 10000)
                                     elif reason in ("quit", "stop"):
                                         result = "QUIT"
@@ -474,9 +497,25 @@ class MpvIpc:
                                     elif reason == "eof":
                                         if dur > 60.0 and curr_pos < (dur * 0.90) and curr_pos < (dur - 60.0):
                                             result = "ERROR"
+                                            _logger.warning(
+                                                "mpv premature eof fallback reason=%r file_loaded=%s duration=%.2f current=%.2f played=%.2f",
+                                                reason,
+                                                file_loaded,
+                                                dur,
+                                                curr_pos,
+                                                played_seconds,
+                                            )
                                             self.send_cmd("show-text", "⚠ Stream ended prematurely. Trying next mirror...", 10000)
                                         elif not file_loaded or (played_seconds < 2.0 and curr_pos <= 0.0):
                                             result = "ERROR"
+                                            _logger.warning(
+                                                "mpv early eof fallback reason=%r file_loaded=%s duration=%.2f current=%.2f played=%.2f",
+                                                reason,
+                                                file_loaded,
+                                                dur,
+                                                curr_pos,
+                                                played_seconds,
+                                            )
                                         else:
                                             result = "EOF"
                                     done = True

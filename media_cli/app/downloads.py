@@ -4,7 +4,7 @@ import shutil
 
 from .. import app_core
 from ..app_core import _get_poster, _poster_footer_line, build_info_panel, make_info_fn, set_ui_context, warn
-from ..core.storage import get_default_download_dir, load_config, load_downloads_db, save_config, save_downloads_db
+from ..core.storage import get_default_download_dir, is_valid_download_video, load_config, load_downloads_db, save_config, save_downloads_db
 from ..core.terminal import truncate_display as _truncate_display
 from ..ui.help import picker_help
 from ..ui.picker import tui_pick
@@ -133,7 +133,7 @@ def handle_downloads_state(flags, ui, ms, cfg, args, ttype, resolveTracking):
             actual_files = [
                 os.path.join(folder_path, f)
                 for f in os.listdir(folder_path)
-                if f.lower().endswith(VIDEO_EXTS)
+                if is_valid_download_video(os.path.join(folder_path, f))
             ]
             actual_files.sort(key=offline_file_sort_key)
         except OSError:
@@ -179,7 +179,7 @@ def handle_downloads_state(flags, ui, ms, cfg, args, ttype, resolveTracking):
                 files = [
                     os.path.join(folder_path, f)
                     for f in os.listdir(folder_path)
-                    if f.lower().endswith(VIDEO_EXTS)
+                    if is_valid_download_video(os.path.join(folder_path, f))
                 ]
                 files.sort(key=offline_file_sort_key)
             except OSError:
@@ -229,7 +229,7 @@ def handle_downloads_state(flags, ui, ms, cfg, args, ttype, resolveTracking):
             build_info_panel(show, "sub", w, parts, local_only=True)
 
 
-        online_badge = "" if app_core.is_online() else "\033[38;2;225;85;85m[Offline]\033[0m │ "
+        online_badge = "\033[38;2;225;85;85m[Offline]\033[0m │ " if app_core.is_confirmed_offline() else ""
         line = f"{online_badge}Downloaded anime  │  {download_dir}  │  Enter=episodes  Del=delete title  Esc=quit"
         if 0 <= si < len(valid_titles):
             title, data = valid_titles[si]
@@ -282,7 +282,7 @@ def handle_downloads_state(flags, ui, ms, cfg, args, ttype, resolveTracking):
     folder_path = os.path.join(download_dir, title)
     try:
         raw_files = os.listdir(folder_path)
-        files = [os.path.join(folder_path, f) for f in raw_files if f.lower().endswith(VIDEO_EXTS)]
+        files = [os.path.join(folder_path, f) for f in raw_files if is_valid_download_video(os.path.join(folder_path, f))]
         files.sort(key=offline_file_sort_key)
     except OSError:
         files = []

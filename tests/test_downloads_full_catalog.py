@@ -67,6 +67,41 @@ class TestDownloadsFullCatalog(unittest.TestCase):
                 self.assertNotIn("1", ms._download_files)
                 self.assertNotIn("29", ms._download_files)
 
+    def test_downloads_mode_ignores_playlist_text_disguised_as_video(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            show_dir = os.path.join(tmpdir, "Fake Show")
+            os.makedirs(show_dir)
+            fake_file = os.path.join(show_dir, "Fake Show - Episode 1.mp4")
+            with open(fake_file, "w", encoding="utf-8") as f:
+                f.write("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=123\nseg.m3u8\n")
+
+            db_data = {
+                "current_download_dir": tmpdir,
+                "shows": {
+                    "Fake Show": {
+                        "metadata": {"name": "Fake Show", "episodeCount": 1},
+                        "episodes": ["1"],
+                    }
+                },
+            }
+
+            ui = UiState()
+            ms = MachineState()
+            cfg = {"download_dir": tmpdir}
+            flags = CliFlags()
+
+            with patch("media_cli.app.downloads.load_downloads_db", return_value=db_data), \
+                 patch("media_cli.app.downloads.save_downloads_db") as mock_save, \
+                 patch("media_cli.app.downloads.warn") as mock_warn, \
+                 patch("media_cli.app_core.is_online", return_value=False), \
+                 patch("media_cli.app_core.get_history_entry", return_value=None):
+                res = downloads.handle_downloads_state(flags, ui, ms, cfg, MagicMock(), "sub", MagicMock(return_value=False))
+
+            self.assertEqual(res, "QUIT")
+            mock_warn.assert_called_once()
+            self.assertEqual(db_data["shows"], {})
+            mock_save.assert_called()
+
     def test_progress_picker_shows_full_range_for_downloads(self):
         """build_progress_entries on backfilled show should return 0..41 entries."""
         eids = [str(i) for i in range(1, 42)]
@@ -97,7 +132,6 @@ class TestDownloadsFullCatalog(unittest.TestCase):
         ms = MachineState()
         ms._is_downloads = True
         ms.show_title = "Beyond Times Gaze"
-        ms._download_files = {str(i): f"/path/ep{i}.mp4" for i in range(30, 42)}
         ms.total_eps = 41
         ms.current_ep_index = 0
 
@@ -125,31 +159,39 @@ class TestDownloadsFullCatalog(unittest.TestCase):
             captured_hints_fn = kwargs.get("hints")
             return -2  # return to details
 
-        with patch("media_cli.app_core.ensure_episode_ids", return_value=eids), \
-             patch("media_cli.app.playback_episodes.tui_pick", side_effect=fake_tui_pick):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ms._download_files = {}
+            for i in range(30, 42):
+                path = os.path.join(tmpdir, f"ep{i}.mp4")
+                with open(path, "wb") as fh:
+                    fh.write(b"video")
+                ms._download_files[str(i)] = path
 
-            res = playback_episodes.handle_episode_state(flags, ui, ms, cfg, MagicMock(), "sub", MagicMock(return_value=False))
-            self.assertEqual(res, "DETAILS")
+            with patch("media_cli.app_core.ensure_episode_ids", return_value=eids), \
+                 patch("media_cli.app.playback_episodes.tui_pick", side_effect=fake_tui_pick):
 
-            # 1. Ep 1: Watched + Not Downloaded -> greyed out, hint "watched • not downloaded"
-            ep1_opt = captured_opts[0]
-            self.assertIn("\033[38;5;244mEpisode 1\033[0m", ep1_opt)
-            self.assertNotIn("✔", ep1_opt)
-            self.assertEqual(captured_hints_fn(0), "\033[38;5;244mwatched • not downloaded\033[0m")
+                res = playback_episodes.handle_episode_state(flags, ui, ms, cfg, MagicMock(), "sub", MagicMock(return_value=False))
+                self.assertEqual(res, "DETAILS")
 
-            # 2. Ep 30: Watched + Downloaded -> greyed out with green checkmark
-            ep30_opt = captured_opts[29]
-            self.assertIn("\033[38;5;244mEpisode 30  \033[38;2;166;227;161m✔\033[0m", ep30_opt)
-            self.assertEqual(captured_hints_fn(29), "watched • ready to watch")
+                # 1. Ep 1: Watched + Not Downloaded -> greyed out, hint "watched • not downloaded"
+                ep1_opt = captured_opts[0]
+                self.assertIn("\033[38;5;244mEpisode 1\033[0m", ep1_opt)
+                self.assertNotIn("✔", ep1_opt)
+                self.assertEqual(captured_hints_fn(0), "\033[38;5;244mwatched • not downloaded\033[0m")
 
-            # 3. Ep 35: Unwatched + Downloaded -> normal text with green checkmark
-            ep35_opt = captured_opts[34]
-            self.assertIn("Episode 35  \033[38;2;166;227;161m✔\033[0m", ep35_opt)
-            self.assertNotIn("\033[38;5;244mEpisode 35", ep35_opt)
-            self.assertEqual(captured_hints_fn(34), "ready to watch")
+                # 2. Ep 30: Watched + Downloaded -> greyed out with green checkmark
+                ep30_opt = captured_opts[29]
+                self.assertIn("\033[38;5;244mEpisode 30  \033[38;2;166;227;161m✔\033[0m", ep30_opt)
+                self.assertEqual(captured_hints_fn(29), "watched • ready to watch")
 
-    def test_toggle_auto_download_and_delete_persists(self):
-        """Toggling auto-download and auto-delete should save to config.json."""
+                # 3. Ep 35: Unwatched + Downloaded -> normal text with green checkmark
+                ep35_opt = captured_opts[34]
+                self.assertIn("Episode 35  \033[38;2;166;227;161m✔\033[0m", ep35_opt)
+                self.assertNotIn("\033[38;5;244mEpisode 35", ep35_opt)
+                self.assertEqual(captured_hints_fn(34), "ready to watch")
+
+    def test_playback_submenu_toggles_are_session_only(self):
+        """Playback submenu toggles auto-download and auto-delete without saving config."""
         flags = CliFlags()
         ui = UiState()
         ui.ui_show_ctx = {
@@ -168,11 +210,21 @@ class TestDownloadsFullCatalog(unittest.TestCase):
         ms.auto_delete_watched = False
         cfg = {"auto_download_next": False, "auto_delete_watched": False}
 
+        playback_picks = 0
+
         def pick_action(fl, u, title, opts, **kwargs):
-            # Pick auto-download
-            for i, o in enumerate(opts):
-                if "Auto-Download" in o:
-                    return i
+            nonlocal playback_picks
+            if title == "Select action":
+                self.assertIn("Playback", opts)
+                self.assertFalse(any("Auto-Download" in o for o in opts))
+                return opts.index("Playback")
+            if title == "Playback":
+                playback_picks += 1
+                if playback_picks > 1:
+                    return -2
+                for i, o in enumerate(opts):
+                    if "Auto-Download" in o:
+                        return i
             return -2
 
         with patch("media_cli.app.playback_menu.tui_pick", side_effect=pick_action), \
@@ -180,14 +232,22 @@ class TestDownloadsFullCatalog(unittest.TestCase):
 
             playback_menu.handle_action_menu_state(flags, ui, ms, cfg, MagicMock(), "sub", MagicMock(return_value=False))
             self.assertTrue(ms.auto_download_next)
-            self.assertTrue(cfg["auto_download_next"])
-            mock_save.assert_called_with(cfg)
+            self.assertFalse(cfg["auto_download_next"])
+            mock_save.assert_not_called()
+
+        delete_playback_picks = 0
 
         def pick_delete(fl, u, title, opts, **kwargs):
-            # Pick auto-delete
-            for i, o in enumerate(opts):
-                if "Auto-Delete" in o:
-                    return i
+            nonlocal delete_playback_picks
+            if title == "Select action":
+                return opts.index("Playback")
+            if title == "Playback":
+                delete_playback_picks += 1
+                if delete_playback_picks > 1:
+                    return -2
+                for i, o in enumerate(opts):
+                    if "Auto-Delete" in o:
+                        return i
             return -2
 
         with patch("media_cli.app.playback_menu.tui_pick", side_effect=pick_delete), \
@@ -195,8 +255,8 @@ class TestDownloadsFullCatalog(unittest.TestCase):
 
             playback_menu.handle_action_menu_state(flags, ui, ms, cfg, MagicMock(), "sub", MagicMock(return_value=False))
             self.assertTrue(ms.auto_delete_watched)
-            self.assertTrue(cfg["auto_delete_watched"])
-            mock_save.assert_called_with(cfg)
+            self.assertFalse(cfg["auto_delete_watched"])
+            mock_save.assert_not_called()
 
     def test_online_mode_episode_picker_greys_out_watched_episodes(self):
         """In regular online mode (not downloads), watched episodes must still be greyed out."""
@@ -292,4 +352,3 @@ class TestDownloadsFullCatalog(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

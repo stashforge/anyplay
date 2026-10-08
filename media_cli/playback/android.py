@@ -278,6 +278,8 @@ def play_android(
                 episode=episode,
                 duration=duration_val,
                 on_progress=handle_progress,
+                flixcloud_w_payload=stream.get("flixcloud_w_payload"),
+                flixcloud_xor_mask=stream.get("flixcloud_xor_mask"),
             )
             replace_active_local_proxy(proxy_server)
             intent_type = "video/*"

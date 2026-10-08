@@ -30,6 +30,23 @@ _EXCHANGE_KEY_3 = ["CPYvHj09Au3", "0jHA9CPYu3v"]
 _KEY_3 = "736y1uTJpBLUX"
 
 
+def _slug_title_from_watch_href(href: str) -> str:
+    path = urllib.parse.urlparse(href).path
+    slug = path.split("/watch/", 1)[-1].split("/ep-", 1)[0].strip("/")
+    slug = re.sub(r"-[a-z0-9]{4,}$", "", slug)
+    return slug.replace("-", " ").strip()
+
+
+def _season_from_title(title: str) -> int:
+    s_m = re.search(r'season\s*(\d+)|(\d+)(?:nd|rd|th)\s*season', title, re.I)
+    if s_m:
+        return int(s_m.group(1) or s_m.group(2))
+    trailing = re.search(r'\b([2-9])\s*$', title.strip())
+    if trailing:
+        return int(trailing.group(1))
+    return 1
+
+
 def _rc4(key: bytes, data: bytes) -> bytes:
     s = list(range(256))
     j = 0
@@ -206,7 +223,11 @@ class AnikotoProvider:
                 w_html = urllib.request.urlopen(req_watch, timeout=6).read().decode("utf-8", errors="ignore")
                 w_soup = BeautifulSoup(w_html, "html.parser")
                 main_div = w_soup.find(id="watch-main")
-                anime_id = main_div.get("data-id") if main_div else None
+                anime_id = (
+                    (main_div.get("data-id") if main_div else None)
+                    or (w_soup.select_one("[data-id]").get("data-id") if w_soup.select_one("[data-id]") else None)
+                    or (w_soup.select_one("[data-tip]").get("data-tip") if w_soup.select_one("[data-tip]") else None)
+                )
                 if anime_id and watch_url:
                     self._anime_page_cache[pid_clean] = (anime_id, watch_url)
                     return anime_id, watch_url
@@ -217,7 +238,11 @@ class AnikotoProvider:
         if not media:
             return None, None
 
-        titles = [media.get("title", {}).get(k) for k in ["english", "romaji", "userPreferred"] if media.get("title", {}).get(k)]
+        titles = [
+            media.get("title", {}).get(k)
+            for k in ["english", "romaji", "native", "userPreferred"]
+            if media.get("title", {}).get(k)
+        ]
         if not titles and isinstance(media.get("title"), str):
             titles = [media["title"]]
         for alt in media.get("synonyms") or []:
@@ -225,19 +250,37 @@ class AnikotoProvider:
                 titles.append(alt)
 
         main_title = titles[0] if titles else pid_clean
-        s_m = re.search(r'season\s*(\d+)|(\d+)(?:nd|rd|th)\s*season', main_title, re.I)
-        target_season = int(s_m.group(1) or s_m.group(2)) if s_m else 1
-
-        clean_q = re.sub(r'[^a-zA-Z0-9\s]', ' ', main_title)
-        short_q = ' '.join(clean_q.split()[:4])
-        vrf_q = _vrf_encrypt(short_q)
-        search_url = f"{self.anikoto_url}/filter?keyword={urllib.parse.quote_plus(short_q)}"
-        if vrf_q:
-            search_url += f"&vrf={vrf_q}"
-
         try:
-            req_search = urllib.request.Request(search_url, headers={**self.headers, "Referer": f"{self.anikoto_url}/"})
-            html_search = urllib.request.urlopen(req_search, timeout=6).read().decode('utf-8', errors='ignore')
+            query_terms = []
+            for title in titles or [main_title]:
+                if not title:
+                    continue
+                if re.search(r"[A-Za-z0-9]", title):
+                    clean_q = re.sub(r'[^a-zA-Z0-9\s]', ' ', title)
+                    short_q = ' '.join(clean_q.split()[:4])
+                else:
+                    short_q = str(title).strip()
+                if short_q and short_q not in query_terms:
+                    query_terms.append(short_q)
+
+            search_urls = []
+            for short_q in query_terms:
+                base_search_url = f"{self.anikoto_url}/filter?keyword={urllib.parse.quote_plus(short_q)}"
+                vrf_q = _vrf_encrypt(short_q)
+                if vrf_q:
+                    search_urls.append(f"{base_search_url}&vrf={vrf_q}")
+                search_urls.append(base_search_url)
+
+            html_search = ""
+            for search_url in search_urls:
+                try:
+                    req_search = urllib.request.Request(search_url, headers={**self.headers, "Referer": f"{self.anikoto_url}/"})
+                    html_search = urllib.request.urlopen(req_search, timeout=6).read().decode('utf-8', errors='ignore')
+                    break
+                except Exception as search_err:
+                    _logger.debug("Anikoto search URL failed (%s): %s", search_url, search_err)
+            if not html_search:
+                return None, None
             soup_search = BeautifulSoup(html_search, "html.parser")
 
             candidates = []
@@ -245,10 +288,21 @@ class AnikotoProvider:
             for a in soup_search.find_all("a", href=True):
                 if "/watch/" in a["href"] and a.text.strip():
                     txt = a.text.strip()
+                    candidate_text = " ".join(
+                        part for part in [
+                            a.get("title") or "",
+                            txt,
+                            _slug_title_from_watch_href(a["href"]),
+                        ]
+                        if part
+                    )
                     if not re.match(r'^\d+(\.\d+)?\s+(TV|Movie|Special|OVA|ONA)', txt) and not re.match(r'^\d+\s+\d+', txt):
                         if a["href"] not in seen_candidates:
                             seen_candidates.add(a["href"])
-                            candidates.append((txt, a["href"]))
+                            candidates.append((candidate_text, a["href"]))
+                    elif a["href"] not in seen_candidates and _slug_title_from_watch_href(a["href"]):
+                        seen_candidates.add(a["href"])
+                        candidates.append((candidate_text, a["href"]))
 
             def _score_match(c_title: str, t_title: str, t_season: int) -> float:
                 c_norm = re.sub(r'[^a-z0-9]', '', c_title.lower())
@@ -273,7 +327,10 @@ class AnikotoProvider:
                         extra_penalty += 0.3
                 return max(0.0, overlap - extra_penalty)
 
-            scored = [(max(_score_match(c_txt, t, target_season) for t in titles), c_txt, c_href) for c_txt, c_href in candidates]
+            scored = [
+                (max(_score_match(c_txt, t, _season_from_title(t)) for t in titles), c_txt, c_href)
+                for c_txt, c_href in candidates
+            ]
             scored.sort(key=lambda x: x[0], reverse=True)
 
             if scored and scored[0][0] > 0.1:
@@ -284,7 +341,11 @@ class AnikotoProvider:
                 w_html = urllib.request.urlopen(req_watch, timeout=6).read().decode('utf-8', errors='ignore')
                 w_soup = BeautifulSoup(w_html, "html.parser")
                 main_div = w_soup.find(id="watch-main")
-                anime_id = main_div.get("data-id") if main_div else None
+                anime_id = (
+                    (main_div.get("data-id") if main_div else None)
+                    or (w_soup.select_one("[data-id]").get("data-id") if w_soup.select_one("[data-id]") else None)
+                    or (w_soup.select_one("[data-tip]").get("data-tip") if w_soup.select_one("[data-tip]") else None)
+                )
                 if anime_id and watch_url:
                     self._anime_page_cache[pid_clean] = (anime_id, watch_url)
                     if "id" in media:

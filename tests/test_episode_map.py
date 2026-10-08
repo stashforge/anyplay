@@ -46,6 +46,16 @@ class TestEpisodeMap(unittest.TestCase):
         self.assertEqual(entry["tags"], [])
         self.assertIn("92 [156]", entry["label"])
 
+    def test_create_episode_entry_collapses_duplicate_episode_label(self):
+        entry = create_episode_entry(
+            {
+                "id": "ep-1",
+                "label": "Episode 1. Episode 1",
+            }
+        )
+        self.assertEqual(entry["label"], "Episode 1")
+        self.assertEqual(entry["display_number"], "1")
+
     def test_build_episode_map_deduplication_and_sorting(self):
         # Simulates Lucifer's scrambled DOM with duplicate episode 42 inserted between 33 and 34
         raw = [

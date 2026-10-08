@@ -32,10 +32,15 @@ def test_cli_search_with_download_and_sub_langs():
     assert args.subtitle_mode == "sidecar"
 
 
-def test_cli_provider_with_download_flag():
-    args, _ = parse_cli_args(["anikoto", "slime", "-e", "2", "--download"])
+def test_cli_provider_search_with_download_flag():
+    args, _ = parse_cli_args(["anikoto", "search", "slime", "-e", "2", "--download"])
     assert args.command == "search"
     assert args.provider == "anikoto"
     assert args.query == ["slime"]
     assert args.episode == "2"
     assert args.download is True
+
+
+def test_cli_provider_requires_search_subcommand():
+    with pytest.raises(SystemExit):
+        parse_cli_args(["anikoto", "slime"])

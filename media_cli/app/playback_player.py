@@ -6,6 +6,7 @@ import os
 import re
 import sys
 import time
+import logging
 from typing import Any
 
 from .. import app_core
@@ -26,7 +27,7 @@ from ..playback.rules import (
     playback_updates_history,
     sync_queued_osd,
 )
-from ..providers import title_provider_key
+from ..providers import title_provider_id, title_provider_key
 from ..ui.display import suppress_terminal_echo
 from . import playback as playback_mod
 
@@ -34,6 +35,7 @@ GREEN = "\033[1;32m"
 YELLOW = "\033[1;33m"
 RED = "\033[1;31m"
 RESET = "\033[0m"
+_logger = logging.getLogger(__name__)
 
 
 
@@ -76,14 +78,15 @@ def trigger_background_auto_download(show_ctx, current_ep_index, episode_ids, tt
     import threading
     def _bg_worker():
         try:
-            p_id = app_core.title_provider_id(show_ctx)
+            provider_title_id = title_provider_id(show_ctx)
+            provider_id = title_provider_key(show_ctx)
             ep_d = (show_ctx.get("_provider_data") or {}).get(str(next_ep))
             res = app_core.fetch_episode_stream(
-                show_ctx.get("_id") or p_id,
+                provider_title_id,
                 next_ep,
                 ttype,
                 cfg.get("quality", "best"),
-                provider_id=p_id,
+                provider_id=provider_id,
                 ep_data=ep_d,
             )
             if not res:
@@ -145,12 +148,74 @@ def trigger_background_auto_download(show_ctx, current_ep_index, episode_ids, tt
                 except Exception:
                     pass
         except Exception:
-            pass
+            _logger.exception(
+                "Background auto-download failed show=%r next_ep=%r ttype=%r",
+                show_title,
+                next_ep,
+                ttype,
+            )
         finally:
             bg_tasks.discard(task_key)
 
     th = threading.Thread(target=_bg_worker, daemon=True)
     th.start()
+
+
+def _mark_watched_in_show(show_ctx, episode) -> None:
+    watched = show_ctx.get("watched_episodes", [])
+    if not isinstance(watched, list):
+        watched = []
+    if str(episode) not in watched:
+        watched.append(str(episode))
+    show_ctx["watched_episodes"] = watched
+
+
+def _auto_delete_watched_downloads(show_ctx, episode_ids, ttype, cfg, ms) -> list[str]:
+    if not (cfg.get("auto_delete_watched", False) or getattr(ms, "auto_delete_watched", False)):
+        return []
+    buf = int(getattr(ms, "auto_delete_buffer", cfg.get("auto_delete_buffer", 1)))
+    if buf < 0:
+        return []
+
+    folder_name = show_ctx.get("_folder_name", getattr(ms, "show_title", ""))
+    watched_list = show_ctx.get("watched_episodes", [])
+    dl_files = getattr(ms, "_download_files", {})
+    watched_dl = []
+    for eid in episode_ids:
+        eid_lbl = playback_mod._display_episode_label(show_ctx, eid, ttype)
+        is_watched = str(eid) in watched_list or str(eid_lbl) in watched_list
+        if not is_watched:
+            continue
+        is_downloaded = (
+            str(eid) in dl_files
+            or str(eid_lbl) in dl_files
+            or bool(app_core.find_offline_file_for_episode(folder_name, eid_lbl, cfg))
+            or bool(app_core.find_offline_file_for_episode(folder_name, str(eid), cfg))
+        )
+        if is_downloaded:
+            watched_dl.append((eid, eid_lbl))
+
+    if len(watched_dl) <= buf:
+        return []
+
+    to_del = watched_dl[:-buf] if buf > 0 else watched_dl
+    deleted_labels = []
+    for deid, dlbl in to_del:
+        if app_core.delete_offline_episode(folder_name, dlbl, cfg) or app_core.delete_offline_episode(folder_name, str(deid), cfg):
+            for key in (str(deid), str(dlbl), deid, dlbl):
+                dl_files.pop(key, None)
+            dl_eps = show_ctx.get("_downloaded_episodes", [])
+            if str(dlbl) in dl_eps:
+                dl_eps.remove(str(dlbl))
+            if str(deid) in dl_eps:
+                dl_eps.remove(str(deid))
+            deleted_labels.append(str(dlbl))
+    if deleted_labels:
+        app_core.set_action_feedback(
+            show_ctx,
+            f"Auto-deleted watched EP {', '.join(deleted_labels)}"
+        )
+    return deleted_labels
 
 
 def handle_play_state(
@@ -219,6 +284,25 @@ def handle_play_state(
     with suppress_terminal_echo():
         provider_id = title_provider_key(ui.ui_show_ctx)
         p_name = (ui.ui_show_ctx.get("_provider_name") or ui.ui_show_ctx.get("provider_name") or provider_id).title()
+
+        def _with_torrent_sources(data):
+            if is_download_mode or app_core.is_termux():
+                return data
+            if str(provider_id or "").lower() == "torrent" or str((ui.ui_show_ctx or {}).get("_provider") or "").lower() == "torrent":
+                return data
+            try:
+                from ..ui.player_screen import loading_cancel_requested
+                cancel_check = loading_cancel_requested
+            except Exception:
+                cancel_check = None
+            return playback_mod._augment_episode_sources_with_torrents(
+                data,
+                ui.ui_show_ctx,
+                ms.current_ep,
+                ttype,
+                cancel_check=cancel_check,
+            )
+
         _ipc_player = app_core._ipc_player
         is_prefetched = (
             _ipc_player is not None
@@ -253,7 +337,8 @@ def handle_play_state(
                 _player_ui_state["loading_start_time"] = time.time()
 
                 try:
-                    from ..ui.player_screen import start_loading_ticker
+                    from ..ui.player_screen import reset_loading_cancel, start_loading_ticker
+                    reset_loading_cancel()
                     start_loading_ticker(
                         poster_manager=getattr(app_core, "_poster_manager", None),
                         ui=ui,
@@ -279,7 +364,8 @@ def handle_play_state(
             if getattr(ms, "_is_downloads", False) and not is_download_mode:
                 ep_data = {"is_local": True}
             elif _cache_key == ms.ep_cache_key and ms.ep_cache_data:
-                ep_data = ms.ep_cache_data
+                ep_data = _with_torrent_sources(ms.ep_cache_data)
+                ms.ep_cache_data = ep_data
             else:
                 app_core.info(f"[{p_name}] Requesting {playback_mod._fmt_ep(current_ep_label)} metadata...")
                 ep_data = app_core.get_episode_data(
@@ -288,8 +374,24 @@ def handle_play_state(
                     ttype,
                     provider_id=provider_id,
                 )
+                ep_data = _with_torrent_sources(ep_data)
                 ms.ep_cache_key  = _cache_key
                 ms.ep_cache_data = ep_data
+
+            try:
+                from ..ui.player_screen import loading_cancel_requested
+                cancelled_loading = loading_cancel_requested()
+            except Exception:
+                cancelled_loading = False
+            if cancelled_loading:
+                if _skip_pool:
+                    try:
+                        _skip_pool.shutdown(wait=False)
+                    except Exception:
+                        pass
+                app_core._exit_player_screen()
+                app_core.set_action_feedback(ui.ui_show_ctx, "Loading cancelled.")
+                return "DETAILS"
 
             if not ep_data:
                 if _skip_pool:
@@ -337,6 +439,7 @@ def handle_play_state(
                     # Start background resolver to populate cache if not already running
                     if not cached_ep_data:
                         cached_ep_data = app_core.get_episode_data(ms.show_id, ms.current_ep, ttype, provider_id=provider_id)
+                    cached_ep_data = _with_torrent_sources(cached_ep_data)
 
                     # Start background resolver to populate cache
                     streams_mod.start_bg_resolve(cached_ep_data, set(), ms.show_id, ms.current_ep, ttype, provider_id, target_quality)
@@ -345,6 +448,14 @@ def handle_play_state(
                     import time as _time
                     wait_start = _time.time()
                     while _time.time() - wait_start < 5:  # Max 5 seconds wait
+                        try:
+                            from ..ui.player_screen import loading_cancel_requested
+                            if loading_cancel_requested():
+                                app_core._exit_player_screen()
+                                app_core.set_action_feedback(ui.ui_show_ctx, "Loading cancelled.")
+                                return "DETAILS"
+                        except Exception:
+                            pass
                         cached_streams = app_core._stream_snapshot(ms.show_id, ms.current_ep, ttype, provider_id, target_quality, cached_ep_data)
                         if cached_streams:
                             break
@@ -404,7 +515,15 @@ def handle_play_state(
                                         pref_boost = -100
 
                                 q_key = quality_preference_key(res, target_quality)
-                                return (pref_boost, sub_rank, audio_penalty, q_key, prio)
+                                return (
+                                    pref_boost,
+                                    streams_mod.torrent_fallback_sort_value(s),
+                                    sub_rank,
+                                    audio_penalty,
+                                    q_key,
+                                    prio,
+                                    streams_mod.torrent_size_sort_value(s),
+                                )
 
                             sorted_cached = sorted(cached_streams, key=_cached_sort_key)
                             candidates = []
@@ -639,6 +758,131 @@ def handle_play_state(
 
     if getattr(args, 'download', False):
         app_core._exit_player_screen(close_alt=True)
+
+        if not getattr(args, "no_tui", False) and not getattr(flags, "plain_mode", False) and sys.stdin.isatty() and sys.stdout.isatty():
+            downloader_choice = getattr(args, "downloader", cfg.get("downloader", "auto"))
+            download_dir = cfg.get("download_dir", "")
+            from media_cli.media.download_worker import DownloadItem, get_global_worker
+            from media_cli.ui.download_manager import run_download_manager
+            from media_cli.media.download import sanitize_filename
+
+            safe_title = sanitize_filename(ms.show_title) or ms.show_title
+            target_dir = os.path.join(download_dir, safe_title)
+            try:
+                os.makedirs(target_dir, exist_ok=True)
+            except Exception:
+                pass
+
+            worker = get_global_worker(download_dir)
+
+            target_eps = []
+            if ms.download_batch_end is not None:
+                for idx in range(ms.current_ep_index, ms.total_eps):
+                    epid = episode_id_at(episode_ids, idx)
+                    eplbl = playback_mod._display_episode_label(s_ctx, epid, ttype)
+                    target_eps.append((epid, eplbl))
+                    try:
+                        if int(float(str(eplbl))) >= int(float(str(ms.download_batch_end))):
+                            break
+                    except ValueError:
+                        if idx >= ms.total_eps - 1:
+                            break
+            else:
+                target_eps.append((ms.current_ep, current_ep_label))
+
+            def _make_resolver(show_id, ep_id, ttype, provider_id, quality):
+                def _res(item):
+                    stream_res = app_core.fetch_episode_stream(
+                        show_id,
+                        ep_id,
+                        ttype,
+                        quality,
+                        provider_id=provider_id,
+                        exclude_sources=getattr(item, "failed_mirrors", set()),
+                    )
+                    if not stream_res or not stream_res[0]:
+                        raise RuntimeError(f"No stream found for episode {ep_id}")
+                    stream, first_source_name = stream_res[0], stream_res[1]
+                    raw_url = stream.get("link") or stream.get("streamUrl") or stream.get("sourceUrl") or ""
+                    if not raw_url:
+                        raise RuntimeError("No stream URL in resolved stream")
+                    item.current_mirror_name = first_source_name or stream.get("source_name") or stream.get("source_parent_name") or "selected mirror"
+                    item.current_mirror_url = raw_url
+                    item.logs.append(f"▶ Testing mirror: {item.current_mirror_name}")
+                    headers = dict(stream.get("headers") or {})
+                    referer = stream.get("referer", "")
+                    if referer and "Referer" not in headers:
+                        headers["Referer"] = referer
+                    proxy_srv = None
+                    if (
+                        stream.get("requires_proxy")
+                        or "uwucdn.top" in raw_url
+                        or "owocdn.top" in raw_url
+                        or "kwik." in referer
+                        or "megap." in raw_url
+                        or "akirax.buzz" in raw_url
+                    ):
+                        try:
+                            from media_cli.media.local_proxy import start_local_proxy
+                            raw_url, proxy_srv = start_local_proxy(raw_url, headers=headers, referer=referer)
+                        except Exception:
+                            pass
+                    item.audio_tracks = list(stream.get("audio_tracks") or [])
+                    item.audio_url = stream.get("audio_url", "")
+                    item.subtitles = list(stream.get("subtitles") or stream.get("vtt") or [])
+                    item.subtitle_url = stream.get("subtitle_url", "")
+                    return raw_url, headers, proxy_srv
+                return _res
+
+            def _on_complete(item):
+                try:
+                    from media_cli.core.storage import load_downloads_db, save_downloads_db
+                    db = load_downloads_db()
+                    f_key = sanitize_filename(item.title) or item.title
+                    if f_key not in db["shows"]:
+                        db["shows"][f_key] = {"episodes": []}
+                    if getattr(item, "show_metadata", None):
+                        db["shows"][f_key]["metadata"] = item.show_metadata
+                    ep_str = str(getattr(item, "ep_id", item.episode))
+                    if ep_str not in db["shows"][f_key]["episodes"]:
+                        db["shows"][f_key]["episodes"].append(ep_str)
+                    save_downloads_db(db)
+                except Exception:
+                    pass
+
+            quality = cfg.get("quality", "best")
+            effective_subtitle_mode = getattr(args, "subtitle_mode", None) or cfg.get("subtitle_mode", "embed")
+            embed_subs = effective_subtitle_mode == "embed"
+            ext = ".mkv" if embed_subs else ".mp4"
+
+            for epid, eplbl in target_eps:
+                item_id = f"{ms.show_id or safe_title}:{epid}"
+                dest_path = os.path.join(target_dir, f"{safe_title} - Episode {eplbl}{ext}")
+                item = DownloadItem(
+                    id=item_id,
+                    title=ms.show_title,
+                    episode=f"Episode {eplbl}",
+                    destination_path=dest_path,
+                    engine=downloader_choice if downloader_choice in ("yt-dlp", "aria2c", "ffmpeg") else "auto",
+                    resolve_fn=_make_resolver(ms.show_id, epid, ttype, provider_id, quality),
+                    on_complete=_on_complete,
+                    ep_id=epid,
+                    show_metadata=s_ctx,
+                    download_sub_langs=getattr(args, "download_sub_langs", None),
+                    download_audio_langs=getattr(args, "download_audio_langs", None),
+                    subtitle_mode=getattr(args, "subtitle_mode", None),
+                )
+                worker.add_item(item)
+
+            manager_result = run_download_manager(worker, standalone=True)
+            args.download = False
+            ms.selected_stream = None
+            app_core._clear_streams()
+            if manager_result == "QUIT":
+                return "QUIT"
+            if getattr(flags, "plain_mode", False) or not sys.stdin.isatty() or getattr(args, "_cli_episode_passed", False):
+                return "QUIT"
+            return "DETAILS"
 
         exclude_sources = set()
         download_ok = False
@@ -899,16 +1143,34 @@ def handle_play_state(
         start_time_override = getattr(ms, "pending_resume_time", None)
         ms.pending_resume_time = None
 
+        try:
+            from ..ui.player_screen import loading_cancel_requested
+            cancel_check = loading_cancel_requested
+        except Exception:
+            cancel_check = None
+
         result, percent, time_pos, duration, played_seconds = app_core.play_desktop(
             ms.show_title, current_ep_label, ms.selected_stream, fetch_cb,
             ms.total_eps, is_binge, ms.show_id, ms.pending_osd_msg,
             ms.current_ep_index, next_episode,
             mal_id=mal_id, aniskip_enabled=aniskip_enabled, aniskip_auto=aniskip_auto,
             start_time_override=start_time_override,
+            cancel_check=cancel_check,
         )
 
         ms.pending_osd_msg = ""
         app_core._exit_player_screen()
+
+        try:
+            from ..ui.player_screen import loading_cancel_requested
+            cancelled_after_playback = loading_cancel_requested()
+        except Exception:
+            cancelled_after_playback = False
+
+        if result == "CANCELLED" or cancelled_after_playback:
+            _logger.debug("Playback loading cancelled; returning to details result=%r", result)
+            app_core.set_action_feedback(ui.ui_show_ctx, "Loading cancelled.")
+            return "DETAILS"
 
         if result in ("ERROR", "NEXT_MIRROR"):
             is_manual_switch = (result == "NEXT_MIRROR")
@@ -968,7 +1230,13 @@ def handle_play_state(
                     else:
                         sub_rank = 0 if is_soft else (2 if is_hard else 1)
                     q_key = quality_preference_key(res, target_quality)
-                    return (sub_rank, q_key, s.get("source_priority", 4))
+                    return (
+                        streams_mod.torrent_fallback_sort_value(s),
+                        sub_rank,
+                        q_key,
+                        s.get("source_priority", 4),
+                        streams_mod.torrent_size_sort_value(s),
+                    )
 
                 sorted_remaining = sorted(remaining, key=_failover_sort_key)
                 for cand in sorted_remaining:
@@ -1070,59 +1338,30 @@ def handle_play_state(
                 app_core.save_resume_time(ms.show_id, pending_ep, 0)
                 app_core.clear_pending_completion(ms.show_id)
 
+        completed_for_history = playback_updates_history(
+            result, percent, time_pos, duration, played_seconds, start_time=start_time
+        )
         should_update_history = (
             not getattr(ms, "_is_downloads", False)
-            and playback_updates_history(
-                result, percent, time_pos, duration, played_seconds, start_time=start_time
-            )
+            and completed_for_history
         )
         if should_update_history:
             app_core.save_history(ui.ui_show_ctx, ms.current_ep, ttype)
+            _mark_watched_in_show(ui.ui_show_ctx, ms.current_ep)
         elif not getattr(ms, "_is_downloads", False) and played_seconds >= 5:
             app_core.touch_history(ui.ui_show_ctx, ttype)
 
-        if getattr(ms, "_is_downloads", False) and playback_updates_history(
-            result, percent, time_pos, duration, played_seconds, start_time=start_time
-        ):
+        if getattr(ms, "_is_downloads", False) and completed_for_history:
             try:
                 from media_cli.core.storage import update_offline_watch_status
                 folder_name = ui.ui_show_ctx.get("_folder_name", ms.show_title)
                 if update_offline_watch_status(folder_name, ms.current_ep):
-                    watched = ui.ui_show_ctx.get("watched_episodes", [])
-                    if str(ms.current_ep) not in watched:
-                        watched.append(str(ms.current_ep))
-                    ui.ui_show_ctx["watched_episodes"] = watched
-
-                if getattr(ms, "auto_delete_watched", False):
-                    buf = int(getattr(ms, "auto_delete_buffer", 1))
-                    watched_list = ui.ui_show_ctx.get("watched_episodes", [])
-                    dl_files = getattr(ms, "_download_files", {})
-                    watched_dl = []
-                    for eid in episode_ids:
-                        eid_lbl = playback_mod._display_episode_label(ui.ui_show_ctx, eid, ttype)
-                        if (str(eid) in watched_list or str(eid_lbl) in watched_list) and (str(eid) in dl_files or str(eid_lbl) in dl_files):
-                            watched_dl.append((eid, eid_lbl))
-
-                    if buf >= 0 and len(watched_dl) > buf:
-                        to_del = watched_dl[:-buf] if buf > 0 else watched_dl
-                        deleted_labels = []
-                        for deid, dlbl in to_del:
-                            if app_core.delete_offline_episode(folder_name, dlbl, cfg) or app_core.delete_offline_episode(folder_name, str(deid), cfg):
-                                dl_files.pop(str(deid), None)
-                                dl_files.pop(str(dlbl), None)
-                                dl_files.pop(deid, None)
-                                dl_files.pop(dlbl, None)
-                                dl_eps = ui.ui_show_ctx.get("_downloaded_episodes", [])
-                                if str(dlbl) in dl_eps:
-                                    dl_eps.remove(str(dlbl))
-                                if str(deid) in dl_eps:
-                                    dl_eps.remove(str(deid))
-                                deleted_labels.append(str(dlbl))
-                        if deleted_labels:
-                            app_core.set_action_feedback(
-                                ui.ui_show_ctx,
-                                f"Auto-deleted watched EP {', '.join(deleted_labels)}"
-                            )
+                    _mark_watched_in_show(ui.ui_show_ctx, ms.current_ep)
+            except Exception:
+                pass
+        if completed_for_history:
+            try:
+                _auto_delete_watched_downloads(ui.ui_show_ctx, episode_ids, ttype, cfg, ms)
             except Exception:
                 pass
 

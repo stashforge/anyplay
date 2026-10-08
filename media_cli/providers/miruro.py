@@ -421,6 +421,24 @@ class MiruroProvider:
 
         sourceUrls = list(grouped_streams.values())
 
+        if not sourceUrls:
+            for fallback_id in ("anikoto", "reanime"):
+                try:
+                    from media_cli.providers import get_provider
+                    fallback = get_provider(fallback_id)
+                    fallback_sources = fallback.episode_sources(str(provider_id), str(episode), ttype)
+                    fallback_urls = (
+                        ((fallback_sources or {}).get("episode") or {}).get("sourceUrls")
+                        if isinstance(fallback_sources, dict)
+                        else None
+                    ) or []
+                    if fallback_urls:
+                        sourceUrls = [dict(src) for src in fallback_urls if isinstance(src, dict)]
+                        reporting.ok(f"[Miruro] Fallback resolved via {getattr(fallback, 'name', fallback_id)}")
+                        break
+                except Exception as exc:
+                    reporting.warn(f"[Miruro] Fallback {fallback_id}: unavailable ({exc})")
+
         def _miruro_sort(src):
             name = src.get("sourceName", "").lower()
             if "pewe" in name or "anidbapp" in name:

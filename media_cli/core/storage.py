@@ -31,6 +31,7 @@ import shutil
 import tempfile
 import time
 import traceback
+from datetime import datetime
 
 from ..context import FLAGS
 from ..domain import history as history_domain
@@ -44,6 +45,7 @@ from ..state.config import (
 )
 from ..state.io import atomic_write_json, write_private_text
 from .reporting import debug_warn, warn
+from .diagnostics import append_rotating_text, get_log_paths
 
 # ---------------------------------------------------------------------------
 # Runtime mode + injected upper-layer helpers
@@ -180,7 +182,16 @@ def write_private_log(filename, content):
 
 
 def write_exception_log(filename):
-    return write_private_log(filename, traceback.format_exc())
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    content = redact_sensitive_text(f"{timestamp} ERROR crash traceback\n{traceback.format_exc()}")
+    if is_incognito() and not FLAGS.debug_mode:
+        return None
+    target = os.path.join(paths.LOG_DIR, filename)
+    if os.path.basename(filename) == filename:
+        paths_map = get_log_paths()
+        if filename == "crash.log":
+            target = paths_map["crash"]
+    return append_rotating_text(target, content)
 
 
 def _preserve_invalid_state_file(path, label):
@@ -983,6 +994,50 @@ def update_offline_watch_status(title, episode):
     return False
 
 
+VIDEO_DOWNLOAD_EXTS = (".mp4", ".mkv", ".webm", ".avi", ".ts")
+_TEXT_FAKE_VIDEO_MARKERS = (
+    b"#EXTM3U",
+    b"#EXT-X-",
+    b"<html",
+    b"<!doctype html",
+    b"<?xml",
+)
+
+
+def is_valid_download_video(filepath: str) -> bool:
+    """Return False for known non-video payloads saved with video extensions.
+
+    Keep this cheap because downloads/history views call it while scanning
+    folders. It intentionally rejects known playlist/error text, while leaving
+    deeper media probing to the downloader completion path.
+    """
+    if not filepath:
+        return False
+    path = os.path.abspath(os.path.expanduser(str(filepath)))
+    if not path.lower().endswith(VIDEO_DOWNLOAD_EXTS):
+        return False
+    try:
+        if not os.path.isfile(path) or os.path.getsize(path) <= 0:
+            return False
+        with open(path, "rb") as fh:
+            head = fh.read(4096)
+    except OSError:
+        return False
+
+    stripped = head.lstrip().lower()
+    if any(stripped.startswith(marker.lower()) for marker in _TEXT_FAKE_VIDEO_MARKERS):
+        return False
+    if b"#extm3u" in stripped[:512] or b"#ext-x-" in stripped[:1024]:
+        return False
+    if len(head) < 1024 * 1024:
+        textish = sum(1 for b in head if b in (9, 10, 13) or 32 <= b <= 126)
+        if head and textish / len(head) > 0.92:
+            sample = stripped[:2048]
+            if b".m3u8" in sample or b"content-type: text" in sample or b"not found" in sample:
+                return False
+    return True
+
+
 def find_offline_file_for_episode(show_title: str, episode, cfg: dict | None = None) -> str | None:
     if not show_title or episode is None:
         return None
@@ -1009,7 +1064,8 @@ def find_offline_file_for_episode(show_title: str, episode, cfg: dict | None = N
     EP_FALLBACK_RE = re.compile(r'(?:^|[^\d])0*(\d+(?:\.\d+)?)(?:[^\d]|$)')
     try:
         for fname in sorted(os.listdir(full_show_path)):
-            if not fname.lower().endswith((".mp4", ".mkv", ".webm", ".avi", ".ts")):
+            full_path = os.path.join(full_show_path, fname)
+            if not is_valid_download_video(full_path):
                 continue
             stem = os.path.splitext(fname)[0]
             m_exp = EP_EXPLICIT_RE.search(stem)
@@ -1025,13 +1081,13 @@ def find_offline_file_for_episode(show_title: str, episode, cfg: dict | None = N
                     or (target_sec_clean and f_clean == target_sec_clean)
                     or (f_sec_clean and target_sec_clean and f_sec_clean == target_sec_clean)
                 ):
-                    return os.path.join(full_show_path, fname)
+                    return full_path
             else:
                 m = EP_FALLBACK_RE.search(fname)
                 if m:
                     found_num = m.group(1).lstrip("0") or "0"
                     if found_num == target_clean or m.group(1) == target_ep_str:
-                        return os.path.join(full_show_path, fname)
+                        return full_path
     except OSError:
         pass
     return None
@@ -1074,4 +1130,3 @@ def delete_offline_episode(show_title: str, episode, cfg: dict | None = None) ->
             break
 
     return deleted
-

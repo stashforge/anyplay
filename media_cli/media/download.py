@@ -19,6 +19,33 @@ def _error(message):
     print(f"{RED}[ERR]{RESET} {message}")
 
 
+def _partial_output_path(final_path: str) -> str:
+    final_abs = os.path.abspath(os.path.expanduser(final_path))
+    final_dir = os.path.dirname(final_abs)
+    return os.path.join(final_dir, ".anyplay-partials", os.path.basename(final_abs))
+
+
+def _commit_partial_output(partial_path: str, final_path: str) -> None:
+    if not os.path.isfile(partial_path) or os.path.getsize(partial_path) <= 0:
+        raise RuntimeError("ffmpeg did not produce a complete output file")
+    os.makedirs(os.path.dirname(os.path.abspath(final_path)), exist_ok=True)
+    os.replace(partial_path, final_path)
+    try:
+        partial_dir = os.path.dirname(partial_path)
+        if not os.listdir(partial_dir):
+            os.rmdir(partial_dir)
+    except OSError:
+        pass
+
+
+def _discard_partial_output(partial_path: str) -> None:
+    try:
+        if partial_path and os.path.exists(partial_path):
+            os.remove(partial_path)
+    except OSError:
+        pass
+
+
 def sanitize_filename(title: str) -> str:
     return "".join(
         char for char in str(title or "") if char.isalnum() or char in " -_"
@@ -48,7 +75,7 @@ def download_episode(
     if download_audio_langs is None:
         download_audio_langs = cfg.get("download_audio_langs", "multi")
     if subtitle_mode is None:
-        subtitle_mode = cfg.get("subtitle_mode", "sidecar")
+        subtitle_mode = cfg.get("subtitle_mode", "embed")
 
     raw_url = stream.get("link") or stream.get("streamUrl") or stream.get("sourceUrl") or ""
     if not raw_url:
@@ -124,6 +151,7 @@ def download_episode(
     # If using yt-dlp to download video before remuxing into mkv with ffmpeg
     yt_dlp_remux = (downloader == "yt-dlp" and embed_subs)
     download_filename = f"{base_filename}.temp.mp4" if yt_dlp_remux else final_filename
+    ffmpeg_partial_filename = _partial_output_path(final_filename) if downloader == "ffmpeg" else ""
 
     if not quiet:
         print(f"\n{CYAN}[Download]{RESET} {final_filename}")
@@ -152,6 +180,8 @@ def download_episode(
                 headers,
                 stream_type=stream.get("type", "mp4"),
                 title=safe_title,
+                flixcloud_w_payload=stream.get("flixcloud_w_payload"),
+                flixcloud_xor_mask=stream.get("flixcloud_xor_mask"),
             )
         except Exception:
             proxy_server = None
@@ -243,8 +273,10 @@ def download_episode(
                 command.extend([f"-metadata:s:s:{s_stream_idx}", f"language={s_lang}"])
                 command.extend([f"-metadata:s:s:{s_stream_idx}", f"title={s_title}"])
 
+        os.makedirs(os.path.dirname(ffmpeg_partial_filename), exist_ok=True)
+
         # Stream copy without re-encoding
-        command.extend(["-c", "copy", final_filename])
+        command.extend(["-c", "copy", ffmpeg_partial_filename])
     else:
         command = ["yt-dlp", url, "-o", download_filename]
 
@@ -293,6 +325,9 @@ def download_episode(
                 raise subprocess.CalledProcessError(proc.returncode, command)
         finally:
             unregister_subprocess(proc)
+
+        if downloader == "ffmpeg":
+            _commit_partial_output(ffmpeg_partial_filename, final_filename)
 
         if yt_dlp_remux:
             actual_download_path = download_filename
@@ -348,6 +383,8 @@ def download_episode(
             print(f"\n{GREEN}[Success]{RESET} Download complete.")
         return True
     except Exception as exc:
+        if downloader == "ffmpeg":
+            _discard_partial_output(ffmpeg_partial_filename)
         if not quiet:
             print(f"\n{RED}[Error]{RESET} Download failed: {exc}")
         return False

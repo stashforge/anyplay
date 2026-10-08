@@ -13,8 +13,10 @@ The module owns the ``_player_ui_state`` dict and the
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import re
+import select
 import sys
 import threading
 import time
@@ -50,6 +52,8 @@ from .covers import (
 from .poster import PosterManager
 from .spinner import spinner_frame
 
+_logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
     from ..context import UiState
 
@@ -58,6 +62,17 @@ SECTION_LABEL = "\033[1;38;2;190;180;235m"
 TEXT_COLOR = "\033[38;2;170;180;195m"
 RESET = "\033[0m"
 
+
+def _safe_stdout_write(text: str, *, flush: bool = True) -> bool:
+    """Best-effort terminal write for redraws; skip frames on EAGAIN."""
+    try:
+        sys.stdout.write(text)
+        if flush:
+            sys.stdout.flush()
+        return True
+    except BlockingIOError:
+        _logger.debug("Dropped player-screen redraw because stdout would block")
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -126,6 +141,7 @@ def activate(show: dict, current_ep: object, total_eps: int) -> None:
 
     Call this before launching the player process.
     """
+    _loading_cancel_event.clear()
     _player_ui_state.update({
         "active": True,
         "show": show,
@@ -135,6 +151,7 @@ def activate(show: dict, current_ep: object, total_eps: int) -> None:
         "status_lines": [],
         "stream_info": {},
         "mpv_props": None,
+        "loading_cancel_requested": False,
         "_cleared_terminal_image": False,
         "_last_poster_key": None,
         "_poster_manager": None,
@@ -155,55 +172,294 @@ def activate(show: dict, current_ep: object, total_eps: int) -> None:
 
 _ticker_thread: threading.Thread | None = None
 _ticker_stop_event: threading.Event = threading.Event()
+_loading_cancel_event: threading.Event = threading.Event()
+_loading_input_lock: threading.Lock = threading.Lock()
+_loading_tty_file = None
+_loading_tty_fd: int | None = None
+_loading_tty_old_term = None
+_loading_tty_old_blocking: bool | None = None
+_loading_stdin_fd: int | None = None
+_loading_stdin_old_term = None
+_loading_stdin_old_blocking: bool | None = None
+_loading_input_thread: threading.Thread | None = None
+_loading_input_stop_event: threading.Event = threading.Event()
+
+
+def reset_loading_cancel() -> None:
+    """Clear any previous loading cancellation request."""
+    _loading_cancel_event.clear()
+    _player_ui_state["loading_cancel_requested"] = False
+
+
+def request_loading_cancel() -> None:
+    """Ask the current loading flow to stop and return to details."""
+    _player_ui_state["loading_cancel_requested"] = True
+    _loading_cancel_event.set()
+
+
+def _handle_loading_cancel_bytes(key: bytes) -> bool:
+    if b"q" in key or b"Q" in key or b"\x1b" in key:
+        _logger.debug("Player loading cancel requested key=%r", key)
+        request_loading_cancel()
+        return True
+    return False
+
+
+def _open_loading_input() -> None:
+    global _loading_tty_file, _loading_tty_fd, _loading_tty_old_term, _loading_tty_old_blocking
+    if _loading_tty_fd is not None:
+        return
+    try:
+        import termios
+
+        fd = os.open("/dev/tty", os.O_RDWR)
+        old_blocking = os.get_blocking(fd)
+        os.set_blocking(fd, False)
+        tty_file = os.fdopen(fd, "rb+", buffering=0)
+        old_term = termios.tcgetattr(fd)
+        _apply_loading_termios(fd, termios)
+    except Exception:
+        _logger.debug("Player loading cancel input unavailable", exc_info=True)
+        try:
+            tty_file.close()  # type: ignore[name-defined]
+        except Exception:
+            pass
+        return
+    _loading_tty_file = tty_file
+    _loading_tty_fd = fd
+    _loading_tty_old_term = old_term
+    _loading_tty_old_blocking = old_blocking
+    _logger.debug("Player loading cancel input using /dev/tty fd=%s", fd)
+
+
+def _apply_loading_termios(fd: int, termios_module) -> None:
+    new_term = termios_module.tcgetattr(fd)
+    new_term[3] = new_term[3] & ~(termios_module.ECHO | termios_module.ICANON)
+    new_term[6][termios_module.VMIN] = 0
+    new_term[6][termios_module.VTIME] = 0
+    termios_module.tcsetattr(fd, termios_module.TCSANOW, new_term)
+
+
+def _open_loading_stdin_input() -> int | None:
+    global _loading_stdin_fd, _loading_stdin_old_term, _loading_stdin_old_blocking
+    try:
+        import termios
+
+        fd = sys.stdin.fileno()
+        if not sys.stdin.isatty():
+            return None
+        if _loading_stdin_fd is None:
+            old_term = termios.tcgetattr(fd)
+            old_blocking = os.get_blocking(fd)
+            os.set_blocking(fd, False)
+            _loading_stdin_fd = fd
+            _loading_stdin_old_term = old_term
+            _loading_stdin_old_blocking = old_blocking
+            _logger.debug("Player loading cancel input using stdin fd=%s", fd)
+        _apply_loading_termios(fd, termios)
+    except Exception:
+        _logger.debug("Player loading stdin cancel input unavailable", exc_info=True)
+        return None
+    return fd
+
+
+def _close_loading_stdin_input() -> None:
+    global _loading_stdin_fd, _loading_stdin_old_term, _loading_stdin_old_blocking
+    fd = _loading_stdin_fd
+    old_term = _loading_stdin_old_term
+    old_blocking = _loading_stdin_old_blocking
+    _loading_stdin_fd = None
+    _loading_stdin_old_term = None
+    _loading_stdin_old_blocking = None
+    if fd is None:
+        return
+    try:
+        if old_term is not None:
+            import termios
+            termios.tcsetattr(fd, termios.TCSANOW, old_term)
+    except Exception:
+        pass
+    try:
+        if old_blocking is not None:
+            os.set_blocking(fd, old_blocking)
+    except Exception:
+        pass
+
+
+def _close_loading_input() -> None:
+    global _loading_tty_file, _loading_tty_fd, _loading_tty_old_term, _loading_tty_old_blocking
+    fd = _loading_tty_fd
+    old_term = _loading_tty_old_term
+    old_blocking = _loading_tty_old_blocking
+    tty_file = _loading_tty_file
+    _loading_tty_file = None
+    _loading_tty_fd = None
+    _loading_tty_old_term = None
+    _loading_tty_old_blocking = None
+    if fd is not None and old_term is not None:
+        try:
+            import termios
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_term)
+        except Exception:
+            pass
+    if fd is not None and old_blocking is not None:
+        try:
+            os.set_blocking(fd, old_blocking)
+        except Exception:
+            pass
+    if tty_file is not None:
+        try:
+            tty_file.close()
+        except Exception:
+            pass
+
+
+def _poll_loading_cancel_input() -> None:
+    stdin_fd = _open_loading_stdin_input()
+    fds = [stdin_fd] if stdin_fd is not None else []
+    if not fds:
+        if _loading_tty_fd is None and sys.stdout.isatty():
+            _open_loading_input()
+        if _loading_tty_fd is not None:
+            fds = [_loading_tty_fd]
+    if not fds:
+        return
+    with _loading_input_lock:
+        try:
+            import select
+            readable, _, _ = select.select(fds, [], [], 0)
+            if not readable:
+                return
+            chunks = []
+            for fd in readable:
+                try:
+                    chunks.append(os.read(fd, 32))
+                except BlockingIOError:
+                    pass
+                except Exception:
+                    pass
+            key = b"".join(chunks)
+        except Exception:
+            _logger.debug("Player loading cancel input poll failed", exc_info=True)
+            return
+    _handle_loading_cancel_bytes(key)
+
+
+def _start_loading_input_thread() -> None:
+    """Start a dedicated loading-screen key reader for q/Esc cancellation."""
+    global _loading_input_thread
+    if _loading_input_thread and _loading_input_thread.is_alive():
+        return
+    _loading_input_stop_event.clear()
+
+    def _loop() -> None:
+        while not _loading_input_stop_event.is_set():
+            stdin_fd = _open_loading_stdin_input()
+            fds = [stdin_fd] if stdin_fd is not None else []
+            if not fds:
+                if _loading_tty_fd is None and sys.stdout.isatty():
+                    _open_loading_input()
+                if _loading_tty_fd is not None:
+                    fds = [_loading_tty_fd]
+            if not fds:
+                _loading_input_stop_event.wait(0.1)
+                continue
+            with _loading_input_lock:
+                try:
+                    readable, _, _ = select.select(fds, [], [], 0.1)
+                    if not readable:
+                        continue
+                    chunks = []
+                    for fd in readable:
+                        try:
+                            chunks.append(os.read(fd, 32))
+                        except BlockingIOError:
+                            pass
+                    key = b"".join(chunks)
+                except Exception:
+                    _logger.debug("Player loading cancel input listener failed", exc_info=True)
+                    _loading_input_stop_event.wait(0.1)
+                    continue
+            _handle_loading_cancel_bytes(key)
+
+    _loading_input_thread = threading.Thread(target=_loop, daemon=True)
+    _loading_input_thread.start()
+    _logger.debug("Player loading cancel input listener started")
+
+
+def _stop_loading_input_thread() -> None:
+    _loading_input_stop_event.set()
+    if (
+        _loading_input_thread
+        and _loading_input_thread.is_alive()
+        and threading.current_thread() is not _loading_input_thread
+    ):
+        _loading_input_thread.join(timeout=0.3)
+    _close_loading_stdin_input()
+
+
+def loading_cancel_requested() -> bool:
+    """Return whether the user cancelled the active loading screen."""
+    _poll_loading_cancel_input()
+    requested = bool(_player_ui_state.get("loading_cancel_requested")) or _loading_cancel_event.is_set()
+    if requested:
+        _logger.debug("Player loading cancel flag observed")
+    return requested
 
 
 def start_loading_ticker(poster_manager=None, ui=None) -> None:
     """Start background ticker thread that smoothly animates the spinner and timer."""
     global _ticker_thread
     from ..context import FLAGS
-    if getattr(FLAGS, "plain_mode", False) or not sys.stdin.isatty():
+    if getattr(FLAGS, "plain_mode", False) or not sys.stdout.isatty():
         return
     _ticker_stop_event.clear()
+    _start_loading_input_thread()
     if _ticker_thread and _ticker_thread.is_alive():
         return
 
     def _loop():
-        while not _ticker_stop_event.is_set():
-            s = _player_ui_state
-            if not s.get("active") or s.get("mpv_props"):
-                break
-            row_spinner = s.get("_row_loading_spinner")
-            w = s.get("_cached_w", 0)
-            if row_spinner and w:
-                try:
-                    cur_w, cur_h = os.get_terminal_size(sys.stdin.fileno())
-                except Exception:
-                    cur_w, cur_h = w, s.get("_cached_h", 0)
-
-                if cur_w == w and cur_h == s.get("_cached_h", 0):
-                    p_name = s.get("loading_provider_name", "")
-                    p_str = f" from {p_name}" if p_name else ""
-                    start_t = s.get("loading_start_time")
-                    elapsed = f" ({int(time.time() - start_t)}s)" if start_t else ""
+        try:
+            while not _ticker_stop_event.is_set():
+                s = _player_ui_state
+                if not s.get("active") or s.get("mpv_props"):
+                    break
+                row_spinner = s.get("_row_loading_spinner")
+                w = s.get("_cached_w", 0)
+                if row_spinner and w:
                     try:
-                        from .display import _spinner_style
-                        spin = spinner_frame(_spinner_style)
+                        cur_w, cur_h = os.get_terminal_size(sys.stdin.fileno())
                     except Exception:
-                        spin = spinner_frame()
-                    spin_line = f"\033[1;36m{spin} Loading stream{p_str}...{elapsed}\033[0m"
-                    sys.stdout.write(f"\033[{row_spinner};1H\033[2K{_fit_terminal_line(spin_line, w)}\033[?25l")
-                    sys.stdout.flush()
+                        cur_w, cur_h = w, s.get("_cached_h", 0)
+
+                    if cur_w == w and cur_h == s.get("_cached_h", 0):
+                        p_name = s.get("loading_provider_name", "")
+                        p_str = f" from {p_name}" if p_name else ""
+                        start_t = s.get("loading_start_time")
+                        elapsed = f" ({int(time.time() - start_t)}s)" if start_t else ""
+                        try:
+                            from .display import _spinner_style
+                            spin = spinner_frame(_spinner_style)
+                        except Exception:
+                            spin = spinner_frame()
+                        spin_line = f"\033[1;36m{spin} Loading stream{p_str}...{elapsed}\033[0m"
+                        _safe_stdout_write(
+                            f"\033[{row_spinner};1H\033[2K{_fit_terminal_line(spin_line, w)}\033[?25l"
+                        )
+                    else:
+                        try:
+                            render(poster_manager=poster_manager, ui=ui)
+                        except Exception:
+                            pass
                 else:
                     try:
                         render(poster_manager=poster_manager, ui=ui)
                     except Exception:
                         pass
-            else:
-                try:
-                    render(poster_manager=poster_manager, ui=ui)
-                except Exception:
-                    pass
-            _ticker_stop_event.wait(0.1)
+                _ticker_stop_event.wait(0.1)
+        finally:
+            _stop_loading_input_thread()
+            _close_loading_input()
 
     _ticker_thread = threading.Thread(target=_loop, daemon=True)
     _ticker_thread.start()
@@ -212,6 +468,10 @@ def start_loading_ticker(poster_manager=None, ui=None) -> None:
 def stop_loading_ticker() -> None:
     """Stop the background loading ticker thread."""
     _ticker_stop_event.set()
+    _stop_loading_input_thread()
+    if _ticker_thread and _ticker_thread.is_alive() and threading.current_thread() is not _ticker_thread:
+        _ticker_thread.join(timeout=0.3)
+    _close_loading_input()
 
 
 def deactivate(close_alt: bool = False) -> None:
@@ -240,11 +500,9 @@ def deactivate(close_alt: bool = False) -> None:
         return
     if close_alt:
         # Exit alt screen
-        sys.stdout.write("\033[?1049l\033[?25h")
-        sys.stdout.flush()
+        _safe_stdout_write("\033[?1049l\033[?25h")
     else:
-        sys.stdout.write("\033[2J\033[H\033[?25l")
-        sys.stdout.flush()
+        _safe_stdout_write("\033[2J\033[H\033[?25l")
     _player_ui_state["active"] = False
 
 
@@ -260,11 +518,10 @@ def add_status_line(message: str, color: str = "\033[94m") -> bool:
     from ..context import FLAGS
     if getattr(FLAGS, "plain_mode", False) or not sys.stdin.isatty():
         if sys.stdout.isatty():
-            sys.stdout.write(f"{color}{message}\033[0m\n")
+            _safe_stdout_write(f"{color}{message}\033[0m\n")
         else:
             from .plain_picker import strip_ansi
-            sys.stdout.write(f"{strip_ansi(message)}\n")
-        sys.stdout.flush()
+            _safe_stdout_write(f"{strip_ansi(message)}\n")
         return True
     s["status_lines"].append(f"{color}{message}\033[0m")
     if len(s["status_lines"]) > 8:
@@ -557,6 +814,7 @@ def render(
         _idx_loading_spinner = len(content)
 
         content.append(f"\033[1;36m{spin} Loading stream{p_str}...{elapsed}\033[0m")
+        content.append("\033[38;5;244mq/Esc cancel and return to details\033[0m")
         content.append("")
         for sl in s["status_lines"]:
             content.append(sl)
@@ -585,11 +843,10 @@ def render(
             clear_images = terminal_images.clear_if_active()
             s["_cleared_terminal_image"] = True
         overlay = f"\033[1;1H{native_poster}" if native_poster and poster_changed else ""
-        sys.stdout.write(
+        _safe_stdout_write(
             clear_images + "\033[H" + "\r\n".join(out) + "\033[J"
             + overlay + "\033[1;1H\033[?25l"
         )
-        sys.stdout.flush()
 
     # ── Cache terminal size and dynamic row positions for partial render ──
     s["_cached_w"] = w
@@ -639,13 +896,12 @@ def update_mpv_props(props: dict | None) -> None:
             if dur_sec > 0:
                 time_line += f"  \u2022  -{_fmt_time(rem_sec)}"
 
-            sys.stdout.write(
+            _safe_stdout_write(
                 f"\033[{row_state};1H\033[2K\033[1;36m{_fit_terminal_line(state_str, w)}\033[0m"
                 f"\033[{row_bar};1H\033[2K{_fit_terminal_line(bar, w)}"
                 f"\033[{row_time};1H\033[2K\033[38;5;250m{_fit_terminal_line(time_line, w)}\033[0m"
                 "\033[?25l"
             )
-            sys.stdout.flush()
             return
 
     # Fall back to full render (resize, first tick, or no cached rows)

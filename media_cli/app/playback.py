@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from .playback_episodes import (
+    _augment_episode_sources_with_torrents,
     _clear_episode_source_state,
     _display_episode_label,
     _episode_labels_for,
@@ -23,6 +24,7 @@ __all__ = [
     "_episode_labels_for",
     "_display_episode_label",
     "_fmt_ep",
+    "_augment_episode_sources_with_torrents",
     "_clear_episode_source_state",
     "format_mirror_label",
     "handle_episode_state",

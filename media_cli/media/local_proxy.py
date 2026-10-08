@@ -333,6 +333,58 @@ def _guess_ext(url):
     return "m3u8" if (".m3u8" in url.lower() or "master.txt" in url.lower() or "playlist.txt" in url.lower()) else "vtt" if ".vtt" in url.lower() else "ts"
 
 
+def _detect_fake_media_header(data: bytes) -> int:
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return 12
+    if len(data) >= 8 and data[:8] == b"\x89PNG\r\n\x1a\n":
+        iend_pos = data.find(b"IEND")
+        if iend_pos != -1 and len(data) > iend_pos + 8:
+            return iend_pos + 8
+        if len(data) > 252:
+            return 252
+        return 8
+    return 0
+
+
+def _xor_bytes(data: bytes, mask: list[int], start_index: int = 0) -> bytes:
+    if not data or not mask:
+        return data
+    out = bytearray(data)
+    mask_len = len(mask)
+    for idx, value in enumerate(out):
+        out[idx] = value ^ (int(mask[(start_index + idx) % mask_len]) & 255)
+    return bytes(out)
+
+
+def _flixcloud_ensure_token(segment_url: str, parent_url: str) -> str:
+    try:
+        seg = urllib.parse.urlsplit(segment_url)
+        seg_qs = urllib.parse.parse_qs(seg.query)
+        if seg_qs.get("token"):
+            return segment_url
+
+        token = None
+        current = parent_url
+        for _ in range(3):
+            parsed = urllib.parse.urlsplit(current)
+            qs = urllib.parse.parse_qs(parsed.query)
+            token_vals = qs.get("token")
+            if token_vals:
+                token = token_vals[0]
+                break
+            nested_vals = qs.get("url")
+            if not nested_vals:
+                break
+            current = nested_vals[0]
+        if not token:
+            return segment_url
+
+        query = urllib.parse.urlencode({**{k: v[-1] for k, v in seg_qs.items()}, "token": token})
+        return urllib.parse.urlunsplit((seg.scheme, seg.netloc, seg.path, query, seg.fragment))
+    except Exception:
+        return segment_url
+
+
 def _build_proxy_server(initial_entries, timeout, show_id=None, episode=None, duration=0.0, on_progress=None):
     """Spin up one local proxy server backing an arbitrary set of routes.
 
@@ -353,7 +405,7 @@ def _build_proxy_server(initial_entries, timeout, show_id=None, episode=None, du
         "duration": float(duration or 0.0),
     }
 
-    def register(url, ref, hdrs, content_type=None, time_offset=None):
+    def register(url, ref, hdrs, content_type=None, time_offset=None, extra=None):
         ext = _guess_ext(url)
         path = new_proxy_secret_path(ext)
         entry_content_type = content_type
@@ -376,6 +428,8 @@ def _build_proxy_server(initial_entries, timeout, show_id=None, episode=None, du
                 "hdrs": dict(hdrs),
                 "content_type": entry_content_type,
             }
+            if extra:
+                registry[path].update(extra)
             if time_offset is not None:
                 registry[path]["time_offset"] = float(time_offset)
         return path
@@ -418,7 +472,14 @@ def _build_proxy_server(initial_entries, timeout, show_id=None, episode=None, du
                 end = line.index('"', start)
                 target = line[start:end]
                 real = urllib.parse.urljoin(base, target)
-                path = register(real, ref, hdrs)
+                extra = {}
+                if entry.get("flixcloud_w_payload"):
+                    real = _flixcloud_ensure_token(real, base_url)
+                    extra = {
+                        "flixcloud_w_payload": entry.get("flixcloud_w_payload"),
+                        "flixcloud_xor_mask": entry.get("flixcloud_xor_mask"),
+                    }
+                path = register(real, ref, hdrs, extra=extra)
                 line = line[:start] + local_url_for(path) + line[end:]
                 out.append(line)
                 continue
@@ -428,12 +489,19 @@ def _build_proxy_server(initial_entries, timeout, show_id=None, episode=None, du
                 continue
 
             real = urllib.parse.urljoin(base, stripped)
+            extra = {}
+            if entry.get("flixcloud_w_payload"):
+                real = _flixcloud_ensure_token(real, base_url)
+                extra = {
+                    "flixcloud_w_payload": entry.get("flixcloud_w_payload"),
+                    "flixcloud_xor_mask": entry.get("flixcloud_xor_mask"),
+                }
             if pending_duration is not None:
-                path = register(real, ref, hdrs, time_offset=running_time)
+                path = register(real, ref, hdrs, time_offset=running_time, extra=extra)
                 running_time += pending_duration
                 pending_duration = None
             else:
-                path = register(real, ref, hdrs)
+                path = register(real, ref, hdrs, extra=extra)
             out.append(local_url_for(path))
 
         if running_time > 0:
@@ -599,19 +667,17 @@ def _build_proxy_server(initial_entries, timeout, show_id=None, episode=None, du
                                     break
                                 first_chunk += more
 
-                        is_png_ts = False
-                        png_offset = 0
-                        if first_chunk.startswith(b"\x89PNG\r\n\x1a\n"):
-                            iend_pos = first_chunk.find(b"IEND")
-                            if iend_pos != -1 and len(first_chunk) > (iend_pos + 8) and first_chunk[iend_pos + 8] == 0x47:
-                                is_png_ts = True
-                                png_offset = iend_pos + 8
-                            elif len(first_chunk) > 252 and first_chunk[252] == 0x47:
-                                is_png_ts = True
-                                png_offset = 252
-
-                        if is_png_ts and png_offset > 0:
-                            first_chunk = first_chunk[png_offset:]
+                        fake_header_size = _detect_fake_media_header(first_chunk)
+                        xor_mask = entry.get("flixcloud_xor_mask") or []
+                        should_xor = False
+                        if fake_header_size > 0:
+                            payload_probe = first_chunk[fake_header_size:fake_header_size + 1]
+                            if payload_probe:
+                                should_xor = bool(xor_mask) and ((payload_probe[0] ^ (int(xor_mask[0]) & 255)) == 0x47)
+                            first_chunk = first_chunk[fake_header_size:]
+                        if should_xor:
+                            first_chunk = _xor_bytes(first_chunk, xor_mask, 0)
+                        xor_index = len(first_chunk) if should_xor else 0
 
                         self.send_response(response.status)
                         content_type_sent = False
@@ -621,10 +687,10 @@ def _build_proxy_server(initial_entries, timeout, show_id=None, episode=None, du
                             if k_low == "accept-ranges":
                                 has_accept_ranges = True
                             elif k_low == "content-length":
-                                if is_png_ts and value.isdigit():
-                                    value = str(max(0, int(value) - png_offset))
+                                if fake_header_size or should_xor:
+                                    continue
                             elif k_low == "content-type":
-                                if is_png_ts:
+                                if fake_header_size or should_xor:
                                     value = "video/MP2T"
                                 elif entry.get("content_type"):
                                     value = entry["content_type"]
@@ -633,7 +699,7 @@ def _build_proxy_server(initial_entries, timeout, show_id=None, episode=None, du
                                 content_type_sent = True
                             self.send_header(key, value)
                         if not content_type_sent:
-                            self.send_header("Content-Type", "video/MP2T" if is_png_ts else entry.get("content_type", "video/MP2T"))
+                            self.send_header("Content-Type", "video/MP2T" if (fake_header_size or should_xor) else entry.get("content_type", "video/MP2T"))
                         if not has_accept_ranges and response.status == 200:
                             self.send_header("Accept-Ranges", "bytes")
                         self.send_header("Access-Control-Allow-Origin", "*")
@@ -643,6 +709,9 @@ def _build_proxy_server(initial_entries, timeout, show_id=None, episode=None, du
                             if first_chunk:
                                 self.wfile.write(first_chunk)
                             while chunk := response.read(65536):
+                                if should_xor:
+                                    chunk = _xor_bytes(chunk, xor_mask, xor_index)
+                                    xor_index += len(chunk)
                                 try:
                                     self.wfile.write(chunk)
                                 except (BrokenPipeError, ConnectionResetError):
@@ -748,19 +817,17 @@ def _build_proxy_server(initial_entries, timeout, show_id=None, episode=None, du
                                     except StopIteration:
                                         break
 
-                            is_png_ts = False
-                            png_offset = 0
-                            if first_chunk.startswith(b"\x89PNG\r\n\x1a\n"):
-                                iend_pos = first_chunk.find(b"IEND")
-                                if iend_pos != -1 and len(first_chunk) > (iend_pos + 8) and first_chunk[iend_pos + 8] == 0x47:
-                                    is_png_ts = True
-                                    png_offset = iend_pos + 8
-                                elif len(first_chunk) > 252 and first_chunk[252] == 0x47:
-                                    is_png_ts = True
-                                    png_offset = 252
-
-                            if is_png_ts and png_offset > 0:
-                                first_chunk = first_chunk[png_offset:]
+                            fake_header_size = _detect_fake_media_header(first_chunk)
+                            xor_mask = entry.get("flixcloud_xor_mask") or []
+                            should_xor = False
+                            if fake_header_size > 0:
+                                payload_probe = first_chunk[fake_header_size:fake_header_size + 1]
+                                if payload_probe:
+                                    should_xor = bool(xor_mask) and ((payload_probe[0] ^ (int(xor_mask[0]) & 255)) == 0x47)
+                                first_chunk = first_chunk[fake_header_size:]
+                            if should_xor:
+                                first_chunk = _xor_bytes(first_chunk, xor_mask, 0)
+                            xor_index = len(first_chunk) if should_xor else 0
 
                             self.send_response(resp.status_code)
                             content_type_sent = False
@@ -772,10 +839,10 @@ def _build_proxy_server(initial_entries, timeout, show_id=None, episode=None, du
                                 if k_low == "accept-ranges":
                                     has_accept_ranges = True
                                 elif k_low == "content-length":
-                                    if is_png_ts and str(value).isdigit():
-                                        value = str(max(0, int(value) - png_offset))
+                                    if fake_header_size or should_xor:
+                                        continue
                                 elif k_low == "content-type":
-                                    if is_png_ts:
+                                    if fake_header_size or should_xor:
                                         value = "video/MP2T"
                                     elif entry.get("content_type"):
                                         value = entry["content_type"]
@@ -795,6 +862,9 @@ def _build_proxy_server(initial_entries, timeout, show_id=None, episode=None, du
                                     self.wfile.write(first_chunk)
                                 if resp_iter:
                                     for chunk in resp_iter:
+                                        if should_xor:
+                                            chunk = _xor_bytes(chunk, xor_mask, xor_index)
+                                            xor_index += len(chunk)
                                         try:
                                             self.wfile.write(chunk)
                                         except (BrokenPipeError, ConnectionResetError):
@@ -848,7 +918,8 @@ def start_local_proxy(
         target_url, referer, headers=None, timeout=15,
         stream_type="mp4", title="stream", subtitles=None,
         target_player=None, show_id=None, episode=None,
-        duration=0.0, on_progress=None):
+        duration=0.0, on_progress=None,
+        flixcloud_w_payload=None, flixcloud_xor_mask=None):
     validate_http_url(target_url)
     is_hls = str(stream_type).lower() == "hls"
     extension = "m3u8" if is_hls else "mp4"
@@ -877,6 +948,8 @@ def start_local_proxy(
                 "url": target_fetch_url,
                 "ref": referer,
                 "hdrs": dict(forwarded_headers),
+                "flixcloud_w_payload": flixcloud_w_payload,
+                "flixcloud_xor_mask": flixcloud_xor_mask,
             },
         }
 
@@ -1010,7 +1083,14 @@ def start_local_proxy(
                         continue
                     if pending_inf is not None and not skip_next_var:
                         var_abs = urllib.parse.urljoin(base_target, stripped)
-                        var_path = _register(var_abs, referer, forwarded_headers)
+                        extra = None
+                        if flixcloud_w_payload:
+                            var_abs = _flixcloud_ensure_token(var_abs, target_fetch_url)
+                            extra = {
+                                "flixcloud_w_payload": flixcloud_w_payload,
+                                "flixcloud_xor_mask": flixcloud_xor_mask,
+                            }
+                        var_path = _register(var_abs, referer, forwarded_headers, extra=extra)
                         master_lines.append(f"http://127.0.0.1:{port}{var_path}")
                         pending_inf = None
             else:
@@ -1036,6 +1116,8 @@ def start_local_proxy(
             "url": target_fetch_url,
             "ref": referer,
             "hdrs": dict(forwarded_headers),
+            "flixcloud_w_payload": flixcloud_w_payload,
+            "flixcloud_xor_mask": flixcloud_xor_mask,
         }
     }
     port, _registry, _register, server = _build_proxy_server(

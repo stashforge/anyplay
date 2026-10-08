@@ -73,3 +73,96 @@ def test_anikoto_episode_catalog_site_parsing():
 
             cat_dub = p.episode_catalog("182205", "dub")
             assert cat_dub["ids"] == ["1", "2"]
+
+
+def test_anikoto_resolves_anime_id_from_generic_data_id():
+    p = AnikotoProvider()
+    p._media_cache["154587"] = {
+        "id": 154587,
+        "title": {"romaji": "Sousou no Frieren", "english": "Frieren: Beyond Journey's End"},
+        "synonyms": [],
+    }
+
+    search_html = '<a href="/watch/frieren-journey" class="film-name">Sousou no Frieren</a>'
+    watch_html = '<main data-id="9999"><h1>Sousou no Frieren</h1></main>'
+
+    def fake_urlopen(req, timeout=0):
+        url = req.full_url
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = (search_html if "/filter" in url else watch_html).encode("utf-8")
+        return mock_resp
+
+    with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        assert p._get_anime_page("154587") == ("9999", "https://anikototv.to/watch/frieren-journey")
+
+
+def test_anikoto_get_anime_page_retries_search_without_vrf():
+    import urllib.error
+
+    p = AnikotoProvider()
+    p._media_cache["154587"] = {
+        "id": 154587,
+        "title": {"english": "Frieren: Beyond Journey's End"},
+        "synonyms": [],
+    }
+
+    search_html = '<a href="/watch/frieren-journey" class="film-name">Frieren: Beyond Journey\'s End</a>'
+    watch_html = '<main data-id="9999"><h1>Frieren</h1></main>'
+    seen_urls = []
+
+    def fake_urlopen(req, timeout=0):
+        url = req.full_url
+        seen_urls.append(url)
+        if "/filter" in url and "vrf=" in url:
+            raise urllib.error.HTTPError(url, 500, "broken vrf", {}, None)
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = (search_html if "/filter" in url else watch_html).encode("utf-8")
+        return mock_resp
+
+    with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        assert p._get_anime_page("154587") == ("9999", "https://anikototv.to/watch/frieren-journey")
+
+    assert any("vrf=" in url for url in seen_urls)
+    assert any("/filter" in url and "vrf=" not in url for url in seen_urls)
+
+
+def test_anikoto_get_anime_page_tries_native_and_slug_candidates():
+    import urllib.error
+
+    p = AnikotoProvider()
+    p._media_cache["184872"] = {
+        "id": 184872,
+        "title": {
+            "romaji": "Nitian Xie Shen: Nian Fan",
+            "english": None,
+            "native": "逆天邪神 年番",
+        },
+        "synonyms": ["Against the Gods 2", "Nitian Xie Shen 2", "逆天邪神 第2季"],
+    }
+
+    native_search_html = """
+    <a href="/watch/against-the-gods-2nd-season-ghmos/ep-1">
+      <span>18</span><span>52</span><span>ONA</span>
+    </a>
+    """
+    watch_html = '<div id="watch-main" data-id="8765"><h1>Against the Gods 2nd Season</h1></div>'
+    seen_urls = []
+
+    def fake_urlopen(req, timeout=0):
+        url = req.full_url
+        seen_urls.append(url)
+        if "keyword=Nitian" in url or "keyword=Against" in url:
+            raise urllib.error.HTTPError(url, 500, "broken ascii search", {}, None)
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = (
+            native_search_html if "/filter" in url else watch_html
+        ).encode("utf-8")
+        return mock_resp
+
+    with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        assert p._get_anime_page("184872") == (
+            "8765",
+            "https://anikototv.to/watch/against-the-gods-2nd-season-ghmos/ep-1",
+        )
+
+    assert any("%E9%80%86" in url for url in seen_urls)

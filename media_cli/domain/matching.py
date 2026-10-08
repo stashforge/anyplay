@@ -326,6 +326,11 @@ def is_same_show(show1, show2, strict=False):
     if id1 and id1 == id2:
         return True
 
+    p1 = str(show1.get("_provider") or show1.get("provider") or "").casefold()
+    p2 = str(show2.get("_provider") or show2.get("provider") or "").casefold()
+    if "torrent" in {p1, p2}:
+        return False
+
     al1 = str(show1.get("aniListId") or show1.get("_anilist_id") or "")
     al2 = str(show2.get("aniListId") or show2.get("_anilist_id") or "")
     if al1 and al1 == al2:
@@ -342,8 +347,6 @@ def is_same_show(show1, show2, strict=False):
     if mal1 and mal2 and mal1 != mal2:
         return False
 
-    p1 = str(show1.get("_provider") or show1.get("provider") or "")
-    p2 = str(show2.get("_provider") or show2.get("provider") or "")
     if p1 and p2 and p1 == p2 and id1 and id2 and id1 != id2:
         return False
 
@@ -869,20 +872,20 @@ def _run_manual_match_search(flags, ui, anilist_show, ttype, provider_id=None, a
                 )
 
             def _cached_header_fn(si):
-                if ui.active_picker_query:
-                    return render_search_header(
-                        p_name,
-                        query,
-                        ttype,
-                        get_results,
-                        get_loading,
-                        selected_idx=si,
-                        esc_action="cancel",
-                        get_error_fn=_get_error_fn,
-                        filter_query=ui.active_picker_query or "",
-                        badges=None,
-                    )
-                return _precomputed_headers.get(si, "")
+                if not ui.active_picker_query and si in _precomputed_headers:
+                    return _precomputed_headers[si]
+                return render_search_header(
+                    p_name,
+                    query,
+                    ttype,
+                    get_results,
+                    get_loading,
+                    selected_idx=si,
+                    esc_action="cancel",
+                    get_error_fn=_get_error_fn,
+                    filter_query=ui.active_picker_query or "",
+                    badges=None,
+                )
 
             idx = tui_pick(
                 flags, ui, f"Match {p_name}",
@@ -916,7 +919,5 @@ def _run_manual_match_search(flags, ui, anilist_show, ttype, provider_id=None, a
 
 match_allanime_show_to_anilist = match_provider_show_to_anilist
 match_anilist_show_to_allanime = match_anilist_show_to_provider
-
-
 
 

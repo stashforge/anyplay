@@ -230,30 +230,59 @@ class AnimeGG(Provider):
         url = f"{self.base_url}/{episode}"
         html_content = self._fetch_html(url)
 
+        from bs4 import BeautifulSoup
+
         tabs = []
-        for match in re.finditer(r'<a\b[^>]*data-toggle=["\']tab["\'][^>]*>', html_content, re.IGNORECASE):
-            tag = match.group(0)
+        soup = BeautifulSoup(html_content, "html.parser")
+        for iframe in soup.select("iframe[src]"):
+            pane = iframe.find_parent(class_=lambda cls: cls and "tab-pane" in cls)
+            pane_id = pane.get("id", "") if pane else ""
+            server = "AnimeGG" if "animegg" in pane_id.lower() else (pane_id.rsplit("-", 1)[-1] or "AnimeGG")
+            version = pane_id.split("-", 1)[0] if "-" in pane_id else ""
+            embed_url = iframe.get("src", "")
+            if embed_url.startswith("//"):
+                embed_url = f"https:{embed_url}"
+            elif embed_url.startswith("/"):
+                embed_url = f"{self.base_url}{embed_url}"
+            if embed_url:
+                tabs.append({
+                    "embedUrl": embed_url,
+                    "server": server,
+                    "version": version,
+                })
 
-            id_match = re.search(r'data-id=[\'"]([^\'"]+)[\'"]', tag)
-            if not id_match: continue
-            embed_id = html.unescape(id_match.group(1))
+        if not tabs:
+            for match in re.finditer(r'<a\b[^>]*data-toggle=["\']tab["\'][^>]*>', html_content, re.IGNORECASE):
+                tag = match.group(0)
 
-            mirror_match = re.search(r'data-mirror=[\'"]([^\'"]+)[\'"]', tag)
-            server = html.unescape(mirror_match.group(1)) if mirror_match else "AnimeGG"
+                id_match = re.search(r'data-id=[\'"]([^\'"]+)[\'"]', tag)
+                if not id_match:
+                    continue
+                embed_id = html.unescape(id_match.group(1))
 
-            version_match = re.search(r'data-version=[\'"]([^\'"]+)[\'"]', tag)
-            version = html.unescape(version_match.group(1)) if version_match else "subbed"
+                mirror_match = re.search(r'data-mirror=[\'"]([^\'"]+)[\'"]', tag)
+                server = html.unescape(mirror_match.group(1)) if mirror_match else "AnimeGG"
 
-            tabs.append({
-                "embedId": embed_id,
-                "server": server,
-                "version": version
-            })
+                version_match = re.search(r'data-version=[\'"]([^\'"]+)[\'"]', tag)
+                version = html.unescape(version_match.group(1)) if version_match else "subbed"
+
+                tabs.append({
+                    "embedUrl": f"{self.base_url}/embed/{embed_id}",
+                    "server": server,
+                    "version": version,
+                })
+
+        wanted = "dub" if str(ttype).lower() == "dub" else "sub"
+        wanted_tabs = [
+            tab for tab in tabs
+            if wanted in str(tab.get("version") or "").lower()
+        ]
+        active_tabs = wanted_tabs or tabs
 
         all_sources = []
-        for tab in tabs:
-            if tab["server"].lower() == "animegg" and "sub" in tab["version"].lower():
-                embed_url = f"{self.base_url}/embed/{tab['embedId']}"
+        for tab in active_tabs:
+            if tab["server"].lower() == "animegg":
+                embed_url = tab["embedUrl"]
                 embed_html = self._fetch_html(embed_url)
 
                 vid_match = re.search(r'var\s+videoSources\s*=\s*(\[[\s\S]*?\]);', embed_html)
@@ -282,6 +311,7 @@ class AnimeGG(Provider):
                         all_sources.append({
                             "sourceName": f"AnimeGG ({q_num}p)",
                             "link": s_url,
+                            "streamUrl": s_url,
                             "resolution": q_num,
                             "type": "mp4",
                             "priority": 0,

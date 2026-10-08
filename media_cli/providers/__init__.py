@@ -131,8 +131,35 @@ for p_id, p_inst in PROVIDERS.items():
 ALLANIME = PROVIDERS.get("mkissa") or PROVIDERS[_DEFAULT_PROVIDER_ID]
 
 
+def _split_provider_list(value: Any) -> set[str]:
+    if value is None:
+        return set()
+    if isinstance(value, (list, tuple, set)):
+        raw_items = value
+    else:
+        raw_items = str(value).replace(";", ",").split(",")
+    out = set()
+    for item in raw_items:
+        key = str(item or "").strip().casefold()
+        if not key:
+            continue
+        out.add(_PROVIDER_ALIASES.get(key, key))
+    return out
+
+
+def disabled_providers_from_config(config: dict[str, Any] | None = None) -> set[str]:
+    if config is None:
+        try:
+            from ..state import paths
+            from ..state.config import load_config_file
+            config = load_config_file(paths.CONFIG_PATH, disabled=True)
+        except Exception:
+            config = {}
+    return _split_provider_list((config or {}).get("disabled_providers", ""))
+
+
 def available_providers():
-    return {k: v for k, v in PROVIDERS.items() if k in PROVIDER_REGISTRY}
+    return {k: v for k, v in PROVIDERS.items() if k in PROVIDER_REGISTRY and is_provider_active(k)}
 
 def get_provider_registry() -> dict[str, Any]:
     return PROVIDER_REGISTRY
@@ -145,6 +172,8 @@ def is_provider_active(provider_id: str) -> bool:
     if key not in PROVIDERS and key in _PROVIDER_ALIASES:
         key = _PROVIDER_ALIASES[key]
     if key in _DISABLED_PROVIDERS or key not in PROVIDERS:
+        return False
+    if key in disabled_providers_from_config():
         return False
     status = PROVIDER_REGISTRY.get(key, {}).get("status", "active")
     if status in ("broken", "disabled", "deprecated"):
@@ -162,7 +191,10 @@ def provider_key(provider_id=_DEFAULT_PROVIDER_ID):
     for k, v in _PROVIDER_ALIASES.items():
         if key == v and is_provider_active(k):
             return k
-    return _DEFAULT_PROVIDER_ID
+    if is_provider_active(_DEFAULT_PROVIDER_ID):
+        return _DEFAULT_PROVIDER_ID
+    active = available_providers()
+    return next(iter(active), _DEFAULT_PROVIDER_ID)
 
 
 def get_provider(provider_id=_DEFAULT_PROVIDER_ID, request_json_fn=None):

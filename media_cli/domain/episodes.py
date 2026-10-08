@@ -419,6 +419,24 @@ def extract_episode_tags(raw: str) -> tuple[str, list[str]]:
     return clean, tags
 
 
+def collapse_duplicate_episode_label(raw: str) -> str:
+    """Collapse labels like ``Episode 1. Episode 1`` without removing real titles."""
+    s = str(raw or "").strip()
+    if not s:
+        return ""
+    m = re.match(
+        r"^(?P<label>(?:episode|ep|part)\s+[0-9]+(?:\.[0-9]+)?)\s*(?:[.\-:|/]+|\s+)\s*(?P=label)$",
+        s,
+        re.I,
+    )
+    if m:
+        label = m.group("label")
+        if label.lower().startswith("ep "):
+            return "Episode " + label[3:].strip()
+        return label[0].upper() + label[1:]
+    return s
+
+
 def create_episode_entry(
     item: Any,
     *,
@@ -448,7 +466,9 @@ def create_episode_entry(
 
     # 1. Extract quality/audio tags from label and title
     clean_label, label_tags = extract_episode_tags(raw_label)
+    clean_label = collapse_duplicate_episode_label(clean_label)
     clean_title, title_tags = extract_episode_tags(raw_title)
+    clean_title = collapse_duplicate_episode_label(clean_title)
     all_tags = []
     for t in label_tags + title_tags:
         if t not in all_tags:

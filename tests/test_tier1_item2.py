@@ -624,8 +624,9 @@ def test_is_online_detects_status_and_caches():
     from unittest.mock import patch
     import media_cli.core.network as net
 
-    net._online_cache = None
-    net._cache_time = 0.0
+    net._last_check_time = 0.0
+    net._last_status = True
+    net._consecutive_failures = 0
 
     # 1. Successful connection -> True
     with patch("socket.create_connection", return_value=MagicMock()):
@@ -641,6 +642,44 @@ def test_is_online_detects_status_and_caches():
     with patch("socket.create_connection", side_effect=OSError("Offline")):
         status = net.force_check_online()
         assert status is False
+
+
+def test_offline_indicator_requires_confirmed_failures():
+    from unittest.mock import patch
+    import media_cli.core.network as net
+
+    net._last_check_time = 0.0
+    net._last_status = True
+    net._consecutive_failures = 0
+
+    with patch("socket.create_connection", side_effect=OSError("flaky")):
+        assert net.force_check_online() is False
+        assert net.is_confirmed_offline() is False
+
+    with patch("socket.create_connection", side_effect=OSError("offline")):
+        assert net.force_check_online() is False
+        assert net.is_confirmed_offline() is True
+
+    with patch("socket.create_connection", return_value=MagicMock()):
+        assert net.force_check_online() is True
+        assert net.is_confirmed_offline() is False
+
+
+def test_metadata_hides_offline_badge_until_offline_confirmed(monkeypatch):
+    import media_cli.core.network as net
+    from media_cli.domain.metadata import format_info_metadata_line
+
+    net._last_check_time = 0.0
+    net._last_status = False
+    net._consecutive_failures = 1
+
+    line = format_info_metadata_line({"name": "Test", "type": "ONA"}, "sub")
+    assert "OFFLINE" not in line
+
+    net._consecutive_failures = 2
+
+    line = format_info_metadata_line({"name": "Test", "type": "ONA"}, "sub")
+    assert "OFFLINE" in line
 
 
 def test_delete_offline_episode_disk_and_db():
@@ -686,6 +725,18 @@ def test_delete_offline_episode_disk_and_db():
             assert "2" in show_data["episodes"]
             assert "1" not in show_data.get("watched_episodes", [])
             assert show_data["metadata"]["downloadedCount"] == 1
+
+
+def test_find_offline_file_ignores_playlist_text_disguised_as_mp4(tmp_path):
+    from media_cli.core.storage import find_offline_file_for_episode, is_valid_download_video
+
+    show_dir = tmp_path / "Fake Show"
+    show_dir.mkdir()
+    fake_video = show_dir / "Fake Show - Episode 1.mp4"
+    fake_video.write_text("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=123\nseg.m3u8\n", encoding="utf-8")
+
+    assert is_valid_download_video(str(fake_video)) is False
+    assert find_offline_file_for_episode("Fake Show", "1", {"download_dir": str(tmp_path)}) is None
 
 
 def test_downloads_mode_defaults_to_first_downloaded_episode():
@@ -749,16 +800,25 @@ def test_playback_menu_session_toggles():
     }
     ui.ui_show_ctx = show
 
-    # Simulate selecting TOGGLE_AUTO_DOWNLOAD in action menu
+    # Session toggles live under the Playback submenu, not directly in details.
     captured_opts = []
+    captured_playback_opts = []
+    playback_picks = 0
 
     def mock_pick(flags, ui, title, opts, acts=None, **kwargs):
-        nonlocal captured_opts
-        captured_opts = list(opts)
-        for i, o in enumerate(opts):
-            if "Auto-Download" in o:
-                return i
-        return 0
+        nonlocal captured_opts, captured_playback_opts, playback_picks
+        if title == "Select action":
+            captured_opts = list(opts)
+            return opts.index("Playback")
+        if title == "Playback":
+            captured_playback_opts = list(opts)
+            playback_picks += 1
+            if playback_picks > 1:
+                return -2
+            for i, o in enumerate(opts):
+                if "Auto-Download" in o:
+                    return i
+        return -2
 
     with patch("media_cli.app.playback_menu.tui_pick", side_effect=mock_pick), \
          patch("media_cli.app_core.save_config"), \
@@ -766,11 +826,13 @@ def test_playback_menu_session_toggles():
         next_state = handle_action_menu_state(flags, ui, ms, {}, MagicMock(), "sub", lambda *a: False)
         assert next_state == "DETAILS"
         assert ms.auto_download_next is True
-        assert any("Auto-Download" in opt for opt in captured_opts)
-        assert any("Auto-Delete" in opt for opt in captured_opts)
+        assert captured_opts[-1] == "Playback"
+        assert not any("Auto-Download" in opt for opt in captured_opts)
+        assert any("Auto-Download" in opt for opt in captured_playback_opts)
+        assert any("Auto-Delete" in opt for opt in captured_playback_opts)
 
 
-def test_playback_episodes_downloads_mode_options_and_hints():
+def test_playback_episodes_downloads_mode_options_and_hints(tmp_path):
     from media_cli.context import CliFlags, UiState, MachineState
     from media_cli.app.playback_episodes import handle_episode_state
 
@@ -781,7 +843,9 @@ def test_playback_episodes_downloads_mode_options_and_hints():
     ms._is_downloads = True
     ms.show_title = "Slime S4"
     ms.show_id = "slime-s4"
-    ms._download_files = {"3": "/path/to/ep3.mp4"}
+    ep3_file = tmp_path / "ep3.mp4"
+    ep3_file.write_bytes(b"video")
+    ms._download_files = {"3": str(ep3_file)}
 
     show = {
         "_id": "slime-s4",
@@ -845,6 +909,120 @@ def test_playback_episodes_downloads_mode_options_and_hints():
         assert captured_can_delete_fn(2) is True   # EP 3 is downloaded -> can delete
         assert callable(captured_delete_prompt)
         assert captured_delete_prompt(2) == "Delete downloaded EP 3? y/N"
+
+
+def test_playback_episodes_delete_prunes_download_aliases(tmp_path):
+    from media_cli.context import CliFlags, UiState, MachineState
+    from media_cli.app.playback_episodes import handle_episode_state
+
+    flags = CliFlags()
+    ui = UiState()
+    ui.ep_prev_state = "DETAILS"
+    ms = MachineState()
+    ms._is_downloads = True
+    ms.show_title = "Slime S4"
+    ms.show_id = "slime-s4"
+    ep3_file = tmp_path / "Slime S4 - Episode 3.mp4"
+    ep3_file.write_bytes(b"video")
+    ms._download_files = {
+        "3": str(ep3_file),
+        "Episode 3": str(ep3_file),
+        ep3_file.name: str(ep3_file),
+    }
+
+    show = {
+        "_id": "slime-s4",
+        "name": "Slime S4",
+        "_folder_name": "Slime S4",
+        "_episode_ids": ["1", "2", "3"],
+        "_episode_ids_ttype": "sub",
+        "_episode_labels": {"1": "1", "2": "2", "3": "3"},
+        "availableEpisodes": {"sub": 3},
+        "_downloaded_episodes": ["3", "Episode 3"],
+    }
+    ui.ui_show_ctx = show
+
+    captured_opts_after_delete = []
+    captured_can_delete_fn = None
+
+    def mock_pick(flags, ui, title, opts, delete_fn=None, can_delete_fn=None, **kwargs):
+        nonlocal captured_opts_after_delete, captured_can_delete_fn
+        captured_can_delete_fn = can_delete_fn
+        assert can_delete_fn(2) is True
+        new_opts, _header = delete_fn(2)
+        captured_opts_after_delete = list(new_opts)
+        return -2
+
+    def mock_delete_offline_episode(*args, **kwargs):
+        ep3_file.unlink()
+        return True
+
+    with patch("media_cli.app.playback_episodes.tui_pick", side_effect=mock_pick), \
+         patch("media_cli.app_core.delete_offline_episode", side_effect=mock_delete_offline_episode), \
+         patch("media_cli.app_core.find_offline_file_for_episode", return_value=None), \
+         patch("media_cli.app_core.is_online", return_value=True), \
+         patch("media_cli.app_core.get_local_progress", return_value=None), \
+         patch("media_cli.app_core.build_info_panel"):
+        next_state = handle_episode_state(flags, ui, ms, {}, MagicMock(), "sub", lambda *a: False)
+
+    assert next_state == "DETAILS"
+    assert "✔" not in captured_opts_after_delete[2]
+    assert captured_can_delete_fn(2) is False
+    assert ms._download_files == {}
+
+
+def test_playback_episodes_allows_deleting_downloaded_episode_outside_downloads_mode(tmp_path):
+    from media_cli.context import CliFlags, UiState, MachineState
+    from media_cli.app.playback_episodes import handle_episode_state
+
+    flags = CliFlags()
+    ui = UiState()
+    ui.ep_prev_state = "HISTORY"
+    ms = MachineState()
+    ms._is_downloads = False
+    ms.show_title = "Slime S4"
+    ms.show_id = "slime-s4"
+    ep3_file = tmp_path / "Slime S4 - Episode 3.mp4"
+    ep3_file.write_bytes(b"video")
+    ms._download_files = {"3": str(ep3_file)}
+
+    show = {
+        "_id": "slime-s4",
+        "name": "Slime S4",
+        "_folder_name": "Slime S4",
+        "_episode_ids": ["1", "2", "3"],
+        "_episode_ids_ttype": "sub",
+        "_episode_labels": {"1": "1", "2": "2", "3": "3"},
+        "availableEpisodes": {"sub": 3},
+    }
+    ui.ui_show_ctx = show
+
+    captured_delete_fn = None
+    captured_can_delete_fn = None
+    captured_delete_prompt = None
+    captured_header_fn = None
+
+    def mock_pick(flags, ui, title, opts, header_fn=None, delete_fn=None, can_delete_fn=None, delete_prompt=None, **kwargs):
+        nonlocal captured_delete_fn, captured_can_delete_fn, captured_delete_prompt, captured_header_fn
+        captured_delete_fn = delete_fn
+        captured_can_delete_fn = can_delete_fn
+        captured_delete_prompt = delete_prompt
+        captured_header_fn = header_fn
+        return -2
+
+    with patch("media_cli.app.playback_episodes.tui_pick", side_effect=mock_pick), \
+         patch("media_cli.app_core.is_online", return_value=True), \
+         patch("media_cli.app_core.get_local_progress", return_value=None), \
+         patch("media_cli.app_core.build_info_panel"):
+        next_state = handle_episode_state(flags, ui, ms, {}, MagicMock(), "sub", lambda *a: False)
+
+    assert next_state == "HISTORY"
+    assert callable(captured_delete_fn)
+    assert callable(captured_can_delete_fn)
+    assert captured_can_delete_fn(0) is False
+    assert captured_can_delete_fn(2) is True
+    assert captured_delete_prompt(2) == "Delete downloaded EP 3? y/N"
+    assert "Del=Delete" in captured_header_fn(2)
 
 
 def test_playback_player_rolling_deletion():
@@ -978,10 +1156,3 @@ def test_plain_picker_delete_guard():
     )
     # Deletion was rejected by can_delete_fn
     assert len(deleted) == 0
-
-
-
-
-
-
-

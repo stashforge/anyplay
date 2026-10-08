@@ -65,6 +65,10 @@ def err(m):
 
 
 def debug_warn(context, exc=None):
+    if exc is not None:
+        _logger.warning("%s: %s", context, exc, exc_info=FLAGS.debug_mode)
+    else:
+        _logger.warning("%s", context)
     if FLAGS.debug_mode:
         if exc is not None:
             warn(f"{context}: {exc}")

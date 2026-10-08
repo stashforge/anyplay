@@ -23,7 +23,45 @@ def play_desktop(
         mal_id=None,
         aniskip_enabled=True,
         aniskip_auto=True,
-        start_time_override=None):
+        start_time_override=None,
+        torrent_progress_callback=None,
+        cancel_check=None):
+    prepared_torrent = None
+    torrent_ready_message = ""
+    suppress_embedded_chapters = stream.get("type") == "torrent"
+    if suppress_embedded_chapters:
+        from ..torrents.runtime import TorrentCancelled, prepare_torrent_stream
+        try:
+            prepared_torrent = prepare_torrent_stream(
+                stream,
+                progress_callback=torrent_progress_callback,
+                cancel_check=cancel_check,
+            )
+        except TorrentCancelled as exc:
+            import logging
+            logging.getLogger(__name__).debug("Torrent playback cancelled during preparation")
+            if torrent_progress_callback:
+                try:
+                    torrent_progress_callback(str(exc))
+                except TorrentCancelled:
+                    pass
+            return ("CANCELLED", 0, 0, 0, 0)
+        except RuntimeError as exc:
+            if torrent_progress_callback:
+                torrent_progress_callback(str(exc))
+            return ("ERROR", 0, 0, 0, 0)
+        torrent_ready_message = "Torrent buffer ready"
+        stream = dict(stream)
+        stream["link"] = prepared_torrent.path
+        stream["type"] = "mp4"
+
+    if cancel_check and cancel_check():
+        import logging
+        logging.getLogger(__name__).debug("Playback cancelled before mpv load")
+        if prepared_torrent is not None:
+            prepared_torrent.close()
+        return ("CANCELLED", 0, 0, 0, 0)
+
     url = validate_stream_url(stream["link"])
     audio_url = (
         validate_stream_url(stream["audio_url"])
@@ -55,7 +93,10 @@ def play_desktop(
     raw_ep = str(episode_label(episode)).strip()
     ep_str = clean_episode_identifier(raw_ep) or raw_ep
 
-    if ep_str.lower() in ("movie", "full"):
+    ep_key = ep_str.strip().lower()
+    if suppress_embedded_chapters and ep_key in ("file", "episode file", "movie", "episode movie", "full", "episode full"):
+        media_title = f"{title} ({resolution})" if resolution and str(resolution).lower() != "unknown" else title
+    elif ep_key in ("movie", "full"):
         media_title = f"{title} ({resolution})"
     else:
         if ep_str and ep_str[0].isdigit():
@@ -85,6 +126,8 @@ def play_desktop(
     osd_msg = (
         f"{osd_msg}\n{resume_message}" if (osd_msg and start_time > 0) else (resume_message if start_time > 0 else osd_msg)
     )
+    if torrent_ready_message:
+        osd_msg = f"{osd_msg}\n{torrent_ready_message}" if osd_msg else torrent_ready_message
 
 
     skip_intervals = []
@@ -114,6 +157,8 @@ def play_desktop(
                 title=media_title,
                 subtitles=subtitles,
                 target_player="mpv",
+                flixcloud_w_payload=stream.get("flixcloud_w_payload"),
+                flixcloud_xor_mask=stream.get("flixcloud_xor_mask"),
             )
             replace_active_local_proxy(proxy_server)
         except Exception:
@@ -132,6 +177,7 @@ def play_desktop(
         skip_intervals=skip_intervals,
         aniskip_auto=aniskip_auto,
         audio_tracks=audio_tracks,
+        suppress_chapters=suppress_embedded_chapters and not skip_intervals,
     )
 
 
@@ -161,6 +207,8 @@ def play_desktop(
         if proxy_server is not None:
             from ..media.local_proxy import cleanup_active_local_proxy
             cleanup_active_local_proxy()
+        if prepared_torrent is not None:
+            prepared_torrent.close()
     return (
         result,
         ipc_player.props.get("percent-pos", 0) or 0,

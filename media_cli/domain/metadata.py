@@ -412,8 +412,8 @@ def format_info_metadata_line(
     if anilist_label:
         details.append(anilist_label)
     try:
-        from media_cli.core.network import is_online
-        if not is_online():
+        from media_cli.core.network import is_confirmed_offline
+        if is_confirmed_offline():
             details.append("\033[38;2;230;80;80mOFFLINE\033[0m")
     except Exception:
         pass
@@ -703,6 +703,5 @@ def apply_provider_metadata_to_history_show(show, provider_show):
 
 
 apply_allanime_metadata_to_history_show = apply_provider_metadata_to_history_show
-
 
 

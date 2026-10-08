@@ -6,6 +6,7 @@ import pytest
 from media_cli.ui.modals import _show_needs_enrichment
 from media_cli.core import storage
 from media_cli.domain.metadata import apply_provider_metadata_to_history_show
+from media_cli.domain.matching import is_same_show
 from media_cli.core.anilist import (
     get_show_anilist_id,
     refresh_history_anilist_airing_batch,
@@ -62,6 +63,41 @@ def test_get_show_anilist_id_numeric_provider():
         "_provider": "animexin",
     }
     assert get_show_anilist_id(show_other) is None
+
+
+def test_torrent_provider_history_does_not_fuzzy_merge_with_normal_provider():
+    torrent_show = {
+        "_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "name": "[Group] Example Show S01E01 1080p",
+        "_provider": "torrent",
+        "aniListId": "123",
+        "malId": "456",
+    }
+    normal_show = {
+        "_id": "provider-example-show",
+        "name": "Example Show",
+        "_provider": "miruro",
+        "aniListId": "123",
+        "malId": "456",
+    }
+
+    assert is_same_show(torrent_show, normal_show) is False
+    assert is_same_show(normal_show, torrent_show) is False
+
+
+def test_torrent_provider_history_matches_same_infohash_only():
+    first = {
+        "_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "name": "[Group] Example Show S01E01 1080p",
+        "_provider": "torrent",
+    }
+    second = {
+        "_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "name": "[Other] Example Show S01E01 720p",
+        "_provider": "torrent",
+    }
+
+    assert is_same_show(first, second) is True
 
 
 def test_apply_provider_metadata_to_history_show():

@@ -125,7 +125,7 @@ class CLIParser(argparse.ArgumentParser):
                 super().error(message)
             print("\n\033[31mNo action specified.\033[0m\n")
             print("Usage:")
-            print(f"  {APP_NAME} {provider} <command> <query>\n")
+            print(f"  {APP_NAME} {provider} search <query>\n")
             print("Run:")
             print(f"  {APP_NAME} {provider} -h\n")
             sys.exit(2)

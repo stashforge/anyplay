@@ -4,30 +4,39 @@ import os
 import sys
 
 from .. import app_core as app
+from ..constants import APP_NAME
 from ..context import FLAGS as runtime_flags
 
 
 def run():
     exit_code = 0
     try:
+        if "--incognito" not in sys.argv:
+            try:
+                from ..state import paths
+                from ..state.config import load_config_file
+                load_config_file(paths.CONFIG_PATH)
+            except Exception:
+                pass
         app.app_main()
     except KeyboardInterrupt:
         app.restore_terminal()
-        exit_code = 130
+        exit_code = 0 if sys.stdin.isatty() else 130
     except app.ProviderDependencyError as exc:
         app.fatal_terminal_exit(str(exc))
         exit_code = 1
     except Exception as exc:
         app.restore_terminal()
-        if runtime_flags.debug_mode:
-            try:
-                log_path = app.write_exception_log("crash.log")
-            except Exception as log_error:
-                log_path = ""
+        try:
+            log_path = app.write_exception_log("crash.log")
+        except Exception as log_error:
+            log_path = ""
+            if runtime_flags.debug_mode:
                 print(
                     f"\n{app.RED}Could not save crash traceback: "
                     f"{log_error}{app.RESET}"
                 )
+        if runtime_flags.debug_mode:
             print(f"\n{app.RED}An unexpected error occurred!{app.RESET}")
             if log_path:
                 print(
@@ -41,8 +50,8 @@ def run():
                 f"{exc}{app.RESET}"
             )
             print(
-                f"{app.YELLOW}Tip: run with --debug to save a private "
-                f"crash traceback.{app.RESET}"
+                f"{app.YELLOW}Tip: run '{APP_NAME} logs --tail 80' for recent diagnostics, "
+                f"or rerun with --debug for more detail.{app.RESET}"
             )
             exit_code = 1
     finally:
@@ -77,6 +86,11 @@ def run():
             app.kill_active_subprocesses()
         except Exception:
             pass
+        try:
+            from ..media.download_worker import stop_global_worker
+            stop_global_worker()
+        except Exception:
+            pass
 
     for stream in (sys.stdout, sys.stderr, sys.__stdout__, sys.__stderr__):
         try:
@@ -88,4 +102,3 @@ def run():
     if not os.environ.get("ALLMANGA_NO_OS_EXIT"):
         os._exit(exit_code)
     return exit_code
-

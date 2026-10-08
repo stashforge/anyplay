@@ -26,7 +26,16 @@ DEFAULT_CONFIG = {
     "auto_delete_buffer": 1,
     "download_sub_langs": "multi",
     "download_audio_langs": "multi",
-    "subtitle_mode": "sidecar",
+    "subtitle_mode": "embed",
+    "disabled_providers": "",
+    "torrent_fallback": True,
+    "torrent_search_limit": 50,
+    "torrent_min_seeders": 2,
+    "torrent_hydrate_top": 5,
+    "torrent_prefer_size": "150MB:2500MB",
+    "torrent_allow_unknown_seeders": True,
+    "log_max_bytes": 1048576,
+    "log_backup_count": 5,
 }
 
 LEGACY_CONFIG_KEY_MAP = {
@@ -112,11 +121,23 @@ def serialize_conf(config: dict) -> str:
         f"provider = {config.get('provider', 'miruro')}",
         f"title_language = {config.get('title_language', 'romaji')}",
         "",
+        "# Providers",
+        "# Comma-separated provider IDs to hide/disable for this user, e.g. animegg,anidb",
+        f"disabled_providers = {config.get('disabled_providers', '')}",
+        "",
         "# Download Destination & Media Preferences",
         f"download_dir = {config.get('download_dir', '')}",
         f"download_sub_langs = {config.get('download_sub_langs', 'multi')}",
         f"download_audio_langs = {config.get('download_audio_langs', 'multi')}",
-        f"subtitle_mode = {config.get('subtitle_mode', 'sidecar')}",
+        f"subtitle_mode = {config.get('subtitle_mode', 'embed')}",
+        "",
+        "# Torrent Search & Fallback",
+        f"torrent_fallback = {'true' if _is_truthy(config.get('torrent_fallback'), True) else 'false'}",
+        f"torrent_search_limit = {config.get('torrent_search_limit', 50)}",
+        f"torrent_min_seeders = {config.get('torrent_min_seeders', 2)}",
+        f"torrent_hydrate_top = {config.get('torrent_hydrate_top', 5)}",
+        f"torrent_prefer_size = {config.get('torrent_prefer_size', '150MB:2500MB')}",
+        f"torrent_allow_unknown_seeders = {'true' if _is_truthy(config.get('torrent_allow_unknown_seeders'), True) else 'false'}",
         "",
         "# Automation & Binge",
         f"auto_download_next = {'true' if _is_truthy(config.get('auto_download_next'), False) else 'false'}",
@@ -135,13 +156,21 @@ def serialize_conf(config: dict) -> str:
         f"spinner = {config.get('spinner', 'braille')}",
         f"aniskip = {'true' if _is_truthy(config.get('aniskip'), True) else 'false'}",
         f"auto_skip = {'true' if _is_truthy(config.get('auto_skip'), True) else 'false'}",
+        "",
+        "# Diagnostics",
+        f"log_max_bytes = {config.get('log_max_bytes', 1048576)}",
+        f"log_backup_count = {config.get('log_backup_count', 5)}",
     ]
     known = {
         "quality", "translation_type", "player", "provider", "title_language",
+        "disabled_providers",
         "download_dir", "download_sub_langs", "download_audio_langs", "subtitle_mode",
+        "torrent_fallback", "torrent_search_limit", "torrent_min_seeders",
+        "torrent_hydrate_top", "torrent_prefer_size", "torrent_allow_unknown_seeders",
         "auto_download_next", "auto_delete_watched", "auto_delete_buffer",
         "binge", "sync", "anilist_token", "anilist_sort", "anilist_sort_reverse",
-        "cover", "spinner", "aniskip", "auto_skip"
+        "cover", "spinner", "aniskip", "auto_skip",
+        "log_max_bytes", "log_backup_count",
     }
     extra_keys = [k for k in config.keys() if k not in known and not k.startswith("_")]
     if extra_keys:
@@ -341,4 +370,3 @@ def open_config_editor(editor_override: str | None = None) -> int:
         print(f"\033[91m[!] Failed to launch editor '{editor_cmd}': {exc}\033[0m", file=sys.stderr)
         print(f"You can edit the file manually: {CONFIG_PATH}", file=sys.stderr)
         return 1
-

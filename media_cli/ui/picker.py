@@ -986,7 +986,50 @@ def tui_pick(
                 show_help = True
                 _persistent_rendered_lines.clear()
                 last_poster_key = None
+            elif key == "ALT_D":
+                from media_cli.media.download_worker import get_global_worker_if_started, has_tracked_downloads
+                from media_cli.ui.download_manager import run_download_manager
+                if not has_tracked_downloads():
+                    boundary_hint = "No downloads yet"
+                    boundary_hint_time = time.time()
+                    _needs_redraw = True
+                    continue
+                termios.tcsetattr(tty_fd, termios.TCSADRAIN, old_attrs)
+                try:
+                    w = get_global_worker_if_started()
+                    if w is None:
+                        boundary_hint = "No downloads yet"
+                        boundary_hint_time = time.time()
+                        _needs_redraw = True
+                        continue
+                    act = run_download_manager(w, standalone=False)
+                finally:
+                    tty.setraw(tty_fd)
+                    termios.tcflush(tty_fd, termios.TCIFLUSH)
+
+                if act == "QUIT":
+                    result = -2
+                    break
+                elif act == "FINISH_QUIT":
+                    termios.tcsetattr(tty_fd, termios.TCSADRAIN, old_attrs)
+                    try:
+                        act = run_download_manager(w, standalone=False, auto_quit=True)
+                    finally:
+                        tty.setraw(tty_fd)
+                        termios.tcflush(tty_fd, termios.TCIFLUSH)
+                    if act == "QUIT":
+                        result = -2
+                        break
+                    _persistent_rendered_lines.clear()
+                    last_poster_key = None
+                    _needs_redraw = True
+                    render(filt)
+                    continue
+
+                _persistent_rendered_lines.clear()
+                last_poster_key = None
                 _needs_redraw = True
+                render(filt)
             elif key == "ESC":
                 boundary_hint = ""
 
@@ -994,6 +1037,40 @@ def tui_pick(
                 result = -2
                 break
             elif key == "CTRL_C":
+                from media_cli.media.download_worker import has_active_downloads
+                act_c, q_c = has_active_downloads()
+                if act_c > 0 or q_c > 0:
+                    from media_cli.ui.download_manager import prompt_download_exit_cli, run_download_manager
+                    from media_cli.media.download_worker import get_global_worker, stop_global_worker
+                    termios.tcsetattr(tty_fd, termios.TCSADRAIN, old_attrs)
+                    try:
+                        act = prompt_download_exit_cli(act_c, q_c, tty_fd=tty_fd)
+                    finally:
+                        tty.setraw(tty_fd)
+                        termios.tcflush(tty_fd, termios.TCIFLUSH)
+                    if act == "STOP_QUIT":
+                        stop_global_worker()
+                        raise KeyboardInterrupt
+                    elif act == "FINISH_QUIT":
+                        termios.tcsetattr(tty_fd, termios.TCSADRAIN, old_attrs)
+                        try:
+                            w = get_global_worker()
+                            act = run_download_manager(w, standalone=False, auto_quit=True)
+                        finally:
+                            tty.setraw(tty_fd)
+                            termios.tcflush(tty_fd, termios.TCIFLUSH)
+                        if act == "QUIT":
+                            stop_global_worker()
+                            raise KeyboardInterrupt
+                        _persistent_rendered_lines.clear()
+                        last_poster_key = None
+                        _needs_redraw = True
+                        continue
+                    else:  # CANCEL
+                        _persistent_rendered_lines.clear()
+                        last_poster_key = None
+                        _needs_redraw = True
+                        continue
                 raise KeyboardInterrupt
             elif key == "LEFT":
                 if return_query_on_enter:
@@ -1242,4 +1319,3 @@ def _set_poster_tick_fn(fn: Callable) -> None:
 
     def _poster_needs_tick(show_obj) -> bool:  # type: ignore[misc]
         return bool(_poster_tick_fn and _poster_tick_fn(show_obj))
-

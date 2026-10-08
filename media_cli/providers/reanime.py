@@ -13,6 +13,7 @@ from typing import Any
 from ..media.sources import parse_resolution_height
 from ..services.http import SSL_CTX, UA
 from .shared.base import Provider
+from .shared.hls import parse_master_playlist_variants
 from .shared.models import (
     normalize_episode_catalog,
     normalize_episode_sources,
@@ -40,6 +41,28 @@ def _reanime_src_sort_key(s: dict, ttype: str = "sub") -> tuple:
     direct_bonus = 0 if "mkv" in sname or s.get("type") == "mp4" else 1
     prio = s.get("priority", 2)
     return (audio_penalty, direct_bonus, prio, -h)
+
+
+def _server_matches_ttype(server: dict, ttype: str) -> bool:
+    data_type = str(server.get("dataType") or "sub").lower()
+    want_dub = str(ttype).lower() == "dub"
+    return ("dub" in data_type) if want_dub else ("dub" not in data_type)
+
+
+def _audio_tag(data_type: str) -> str:
+    data_type = (data_type or "sub").lower()
+    if data_type == "dub":
+        return "[Dub]"
+    if data_type == "sub":
+        return "[Sub]"
+    return f"[{data_type}]"
+
+
+def _json5_to_json(raw: str) -> str:
+    raw = re.sub(r"([{,]\s*)([\w_]+)(\s*:)", r'\1"\2"\3', raw)
+    raw = re.sub(r",\s*([}\]])", r"\1", raw)
+    raw = re.sub(r":\s*undefined\b", ": null", raw)
+    return raw
 
 
 class ReAnimeProvider(Provider):
@@ -115,6 +138,23 @@ class ReAnimeProvider(Provider):
             except Exception:
                 pass
         return None
+
+    def _post_json(self, url: str, payload: dict[str, Any], timeout: int = 12) -> dict | None:
+        headers = {
+            "User-Agent": UA,
+            "Accept": "application/json, text/plain, */*",
+            "Content-Type": "application/json",
+            "Referer": "https://enc-dec.app/",
+            "Origin": "https://enc-dec.app",
+        }
+        data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, context=SSL_CTX, timeout=timeout) as response:
+                return json.loads(response.read().decode("utf-8", errors="ignore"))
+        except Exception as e:
+            _logger.debug("Re:ANIME post failed on %s: %s", url, e)
+            return None
 
     def search(self, query: str, ttype: str = "sub") -> list[dict[str, Any]]:
         if not query or not query.strip():
@@ -294,9 +334,10 @@ class ReAnimeProvider(Provider):
         stream_url = f"{base}/download/{file_id}?token={token}"
         server_name = server.get("serverName") or "HD-1"
         data_type = (server.get("dataType") or "sub").lower()
+        label = f"{_audio_tag(data_type)} {server_name} Download ({resolution})"
 
         return {
-            "sourceName": f"Re:ANIME ({server_name} · {resolution} MKV [{data_type.upper()}])",
+            "sourceName": label,
             "link": stream_url,
             "streamUrl": stream_url,
             "sourceUrl": stream_url,
@@ -308,6 +349,139 @@ class ReAnimeProvider(Provider):
             "headers": {"Referer": "https://flixcloud.cc/", "User-Agent": UA},
             "android_safe": True,
         }
+
+    def _resolve_flixcloud_hls(self, server: dict) -> list[dict[str, Any]]:
+        """Resolve Re:ANIME FlixCloud HLS hoster into concrete quality streams."""
+        link = server.get("dataLink") or ""
+        if not link:
+            return []
+
+        flix_headers = {
+            "Accept": "*/*",
+            "Origin": "https://flixcloud.cc",
+            "Referer": "https://flixcloud.cc/",
+            "User-Agent": UA,
+        }
+        html = self._fetch_page(link, headers=flix_headers, timeout=12)
+        if not html:
+            return []
+
+        xor_mask = [157, 42, 241, 71, 179, 142, 92, 112, 166, 25, 228, 59, 216, 98, 15, 197]
+        script_m = re.search(r'href="([^"]*hls\.js[^"]*)"', html)
+        if script_m:
+            script_url = script_m.group(1)
+            if script_url.startswith("/"):
+                script_url = f"https://flixcloud.cc{script_url}"
+            script = self._fetch_page(script_url, headers=flix_headers, timeout=8)
+            mask_m = re.search(r"for\(var f=\[(\d{1,3}(?:,\d{1,3}){15})]", script or "")
+            if mask_m:
+                try:
+                    xor_mask = [int(part.strip()) & 255 for part in mask_m.group(1).split(",")]
+                except Exception:
+                    pass
+
+        data_m = re.search(r'type:\s*"data",\s*data:\s*(\{.*?\})\s*,\s*uses:', html, re.DOTALL)
+        if not data_m:
+            return []
+
+        try:
+            embed_data_obj = json.loads(_json5_to_json(data_m.group(1)))
+        except Exception as e:
+            _logger.debug("Re:ANIME FlixCloud data parse failed: %s", e)
+            return []
+
+        subtitles = []
+        for sub in embed_data_obj.get("subtitles") or []:
+            if not isinstance(sub, dict):
+                continue
+            sub_url = sub.get("url")
+            if sub_url:
+                label = sub.get("language") or sub.get("label") or "Subtitle"
+                subtitles.append({"url": sub_url, "file": sub_url, "label": label, "default": "eng" in str(label).lower() or str(label).lower() == "en"})
+
+        enc_payload = dict(embed_data_obj)
+        enc_payload.pop("subtitles", None)
+        enc_payload.pop("intro_chapter", None)
+        enc_payload.pop("outro_chapter", None)
+
+        token_data = self._post_json(
+            "https://enc-dec.app/api/dec-flixcloud?type=token",
+            {"data": enc_payload},
+            timeout=12,
+        )
+        token_result = (token_data or {}).get("result") or {}
+        token = token_result.get("token")
+        context = token_result.get("context")
+        if not token or not isinstance(context, dict):
+            return []
+
+        m3u8_text = self._fetch_page(
+            f"https://flixcloud.cc/api/m3u8/{token}",
+            headers=flix_headers,
+            timeout=12,
+        )
+        try:
+            stream_response = json.loads(m3u8_text)
+        except Exception:
+            return []
+
+        stream_data = self._post_json(
+            "https://enc-dec.app/api/dec-flixcloud?type=stream",
+            {"data": {"context": context, "stream_response": stream_response}},
+            timeout=12,
+        )
+        stream_result = (stream_data or {}).get("result") or {}
+        stream_url = stream_result.get("stream")
+        stream_context = stream_result.get("context") or {}
+        w_payload = stream_context.get("w_payload")
+        if not stream_url or not w_payload:
+            return []
+
+        parse_url = (
+            "https://enc-dec.app/api/parse-flixcloud?"
+            f"url={urllib.parse.quote(stream_url, safe='')}"
+            f"&w_payload={urllib.parse.quote(str(w_payload), safe='')}"
+        )
+        master = self._fetch_page(
+            parse_url,
+            headers={"Accept": "*/*", "Referer": "https://enc-dec.app/", "Origin": "https://enc-dec.app", "User-Agent": UA},
+            timeout=12,
+        )
+        variants = parse_master_playlist_variants(parse_url, master)
+        if not variants:
+            variants = [{"url": stream_url, "resolution": "auto", "height": 0, "width": 0, "bandwidth": 0}]
+
+        server_name = server.get("serverName") or "HD"
+        data_type = (server.get("dataType") or "sub").lower()
+        base_label = f"{_audio_tag(data_type)} {server_name}"
+        if server.get("softsub"):
+            base_label = f"{base_label} [Softsub]"
+
+        sources = []
+        seen = set()
+        for variant in variants:
+            variant_url = variant.get("url")
+            if not variant_url or variant_url in seen:
+                continue
+            seen.add(variant_url)
+            resolution = variant.get("resolution") or "auto"
+            sources.append({
+                "sourceName": f"{base_label} ({str(resolution).upper()})",
+                "link": variant_url,
+                "sourceUrl": variant_url,
+                "type": "hls",
+                "resolution": resolution,
+                "priority": 2,
+                "audio": data_type,
+                "headers": flix_headers,
+                "referer": "https://flixcloud.cc/",
+                "requires_proxy": True,
+                "flixcloud_w_payload": str(w_payload),
+                "flixcloud_xor_mask": xor_mask,
+                "subtitles": subtitles,
+                "android_safe": True,
+            })
+        return sources
 
     def episode_sources(
         self,
@@ -342,37 +516,50 @@ class ReAnimeProvider(Provider):
         if not data or not isinstance(data, dict):
             return None
 
-        servers = data.get("servers") or []
+        servers = [s for s in (data.get("servers") or []) if _server_matches_ttype(s, ttype)]
         if not servers:
             return None
 
         source_urls = []
 
-        # 1. Concurrently resolve direct MKV streams
+        # 1. Resolve HLS hosters into quality variants.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(servers), 4)) as executor:
+            hls_results = list(executor.map(self._resolve_flixcloud_hls, servers))
+
+        for server, streams in zip(servers, hls_results, strict=False):
+            if streams:
+                source_urls.extend(streams)
+                continue
+            link = server.get("dataLink")
+            if not link:
+                continue
+            server_name = server.get("serverName") or "HD"
+            data_type = (server.get("dataType") or "sub").lower()
+            label = f"{_audio_tag(data_type)} {server_name}"
+            if server.get("softsub"):
+                label = f"{label} [Softsub]"
+            source_urls.append({
+                "sourceName": label,
+                "sourceUrl": link,
+                "link": link,
+                "type": "embed",
+                "resolution": "auto",
+                "priority": 3,
+                "audio": data_type,
+                "headers": {
+                    "Referer": "https://flixcloud.cc/",
+                    "Origin": "https://flixcloud.cc",
+                    "User-Agent": UA,
+                },
+            })
+
+        # 2. Concurrently resolve direct MKV download mirrors.
         with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(servers), 4)) as executor:
             mkv_results = list(executor.map(self._resolve_direct_mkv, servers))
 
         for stream in mkv_results:
             if stream:
                 source_urls.append(stream)
-
-        # 2. Add embed streams only as fallback if no direct MKV stream was resolved
-        if not source_urls:
-            for s in servers:
-                link = s.get("dataLink")
-                if not link:
-                    continue
-                server_name = s.get("serverName") or "HD"
-                data_type = (s.get("dataType") or "sub").lower()
-                source_urls.append({
-                    "sourceName": f"Re:ANIME ({server_name} [{data_type.upper()}])",
-                    "sourceUrl": link,
-                    "type": "embed",
-                    "resolution": "1080p",
-                    "priority": 3,
-                    "audio": data_type,
-                    "headers": {"Referer": f"{self.base_url}/", "User-Agent": UA},
-                })
 
         # Sort sources using _reanime_src_sort_key: matching ttype first, high resolution first, direct MKV first
         source_urls.sort(key=lambda s: _reanime_src_sort_key(s, ttype=ttype))

@@ -14,7 +14,7 @@ from media_cli.cli.completion import (
     generate_completion,
     completion_install_path,
 )
-from media_cli.state.config import resolve_editor, open_config_editor
+from media_cli.state.config import load_config_file, open_config_editor, resolve_editor, serialize_conf
 from media_cli.app.orchestrator import handle_config_command
 
 
@@ -100,6 +100,34 @@ class TestConfigCommand(unittest.TestCase):
             self.assertEqual(call_cmd[0], "nano")
             self.assertTrue(call_cmd[1].endswith("config.conf"))
 
+    def test_missing_config_keys_are_added_without_overwriting_existing_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "config.conf")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write("quality = 720p\n")
+                handle.write("torrent_min_seeders = 7\n")
+                handle.write("disabled_providers = animegg\n")
+
+            cfg = load_config_file(path)
+
+            self.assertEqual(cfg["quality"], "720p")
+            self.assertEqual(cfg["torrent_min_seeders"], 7)
+            self.assertEqual(cfg["disabled_providers"], "animegg")
+            self.assertIn("torrent_fallback", cfg)
+
+            with open(path, encoding="utf-8") as handle:
+                saved = handle.read()
+            self.assertIn("torrent_fallback = true", saved)
+            self.assertIn("disabled_providers = animegg", saved)
+
+    def test_serialized_config_shows_torrent_and_provider_settings(self):
+        text = serialize_conf({})
+
+        self.assertIn("# Providers", text)
+        self.assertIn("disabled_providers =", text)
+        self.assertIn("# Torrent Search & Fallback", text)
+        self.assertIn("torrent_min_seeders = 2", text)
+
 
 class TestShellCompletion(unittest.TestCase):
     def test_commands_include_config_and_providers(self):
@@ -129,6 +157,8 @@ class TestShellCompletion(unittest.TestCase):
         self.assertIn("-e|--editor", script)
         self.assertIn("download_dir", script)
         self.assertIn("translation_type", script)
+        self.assertIn("disabled_providers", script)
+        self.assertIn("torrent_fallback", script)
 
     def test_zsh_completion_content(self):
         script = generate_completion("zsh")
@@ -173,6 +203,23 @@ class TestProvidersDisplay(unittest.TestCase):
         self.assertIn("Engine", output)
         self.assertIn("Type", output)
         self.assertIn("Languages", output)
+        self.assertIn("AniDB", output)
+
+    def test_inactive_provider_hidden_from_cli_choices(self):
+        from media_cli.providers import available_providers, is_provider_active
+
+        self.assertTrue(is_provider_active("anidb"))
+        self.assertIn("anidb", available_providers())
+
+    def test_user_disabled_provider_is_inactive(self):
+        from media_cli import providers
+
+        with patch(
+            "media_cli.providers.disabled_providers_from_config",
+            return_value={"anidb"},
+        ):
+            self.assertFalse(providers.is_provider_active("anidb"))
+            self.assertNotIn("anidb", providers.available_providers())
 
     def test_providers_display_narrow(self):
         from io import StringIO
@@ -193,4 +240,3 @@ class TestProvidersDisplay(unittest.TestCase):
         self.assertIn("[anime]", output)
         self.assertIn("•", output)
         self.assertIn("▸ = default provider", output)
-

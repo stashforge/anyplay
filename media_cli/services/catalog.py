@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import sys
+import logging
 from typing import Callable
 
 from ..core.api import (
@@ -30,6 +30,8 @@ from ..providers.shared.models import (
 )
 from ..services.http import request_json as _req
 from ..ui.display import fatal_terminal_exit, with_loading
+
+_logger = logging.getLogger(__name__)
 
 
 def _current_provider():
@@ -312,8 +314,13 @@ def get_episode_data(show_id: str, ep: str, ttype: str = "sub", provider_id: str
     except ProviderDependencyError as exc:
         fatal_terminal_exit(str(exc))
     except Exception as e:
-        import traceback
-        sys.stderr.write(f"[Catalog] Episode fetch failed for {show_id} ep {ep} ({provider_id}): {e}\n{traceback.format_exc()}\n")
+        _logger.debug(
+            "Episode fetch failed for %s ep %s (%s)",
+            show_id,
+            ep,
+            provider_id,
+            exc_info=True,
+        )
         err(f"Episode fetch failed: {e}")
         return None
 

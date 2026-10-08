@@ -128,6 +128,11 @@ def invalidate_title_language_cache():
 def get_display_titles(show, main_title):
     main_clean = str(main_title or "").strip().lower()
 
+    if isinstance(show, dict) and show.get("_provider") == "torrent":
+        summary = str(show.get("_torrent_summary") or "").strip()
+        if summary:
+            return sanitize_terminal_text(summary)
+
     romaji = show.get("romajiName") or show.get("_display_name") or show.get("name")
     if romaji:
         romaji = str(romaji).strip()

@@ -99,11 +99,6 @@ def parse_cli_args(argv=None):
                 if hasattr(parsed_args, "target"):
                     del parsed_args.target
                 return parsed_args, parser
-        elif len(meaningful) == 1 or (len(meaningful) > 1 and meaningful[1] != "search"):
-            # Auto-insert 'search' so 'anyplay <provider> <query>' works directly
-            idx = argv.index(p_id)
-            argv.insert(idx + 1, "search")
-            meaningful = [arg for arg in argv if arg != "--debug"]
 
     if meaningful[:2] == ["anilist", "search"]:
         debug_enabled = "--debug" in argv
@@ -158,6 +153,8 @@ def parse_cli_args(argv=None):
                 parser.error("completion requires bash, zsh, or fish")
             args.completion_shell = values[0]
         del args.completion_args
+    elif args.command == "logs":
+        args.logs = True
     elif args.command in _provider_command_names():
         args.download = getattr(args, "download", False) or (getattr(args, "provider_action", "") == "download")
         args.command = "search"

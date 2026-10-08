@@ -459,5 +459,5 @@ from media_cli.providers import provider_key as _provider_key
 provider_key = _provider_key
 provider_display_name = _provider_display_name
 
-from media_cli.core.network import is_online, force_check_online
+from media_cli.core.network import is_online, force_check_online, is_confirmed_offline
 delete_offline_episode = storage.delete_offline_episode

@@ -60,10 +60,60 @@ def _fmt_ep(label):
     return label_str.title()
 
 
+def _prune_missing_download_files(ms: "MachineState") -> dict:
+    dl_files = getattr(ms, "_download_files", {}) or {}
+    if not isinstance(dl_files, dict):
+        ms._download_files = {}
+        return {}
+    stale_keys = []
+    for key, path in list(dl_files.items()):
+        if not path or not os.path.isfile(os.path.expanduser(str(path))):
+            stale_keys.append(key)
+    for key in stale_keys:
+        dl_files.pop(key, None)
+    ms._download_files = dl_files
+    return dl_files
+
+
 def _clear_episode_source_state(ms: MachineState) -> None:
     ms.ep_cache_key = None
     ms.ep_cache_data = None
     ms.selected_stream = None
+
+
+def _augment_episode_sources_with_torrents(
+    ep_data: dict | None,
+    show: dict | None,
+    episode_id,
+    ttype: str,
+    *,
+    cancel_check=None,
+) -> dict | None:
+    if not show:
+        return ep_data
+    try:
+        from media_cli.core.storage import load_config
+        from media_cli.providers import is_provider_active
+        cfg = load_config()
+        fallback_enabled = cfg.get("torrent_fallback", True)
+        if isinstance(fallback_enabled, str):
+            fallback_enabled = fallback_enabled.strip().casefold() in {"1", "true", "yes", "on"}
+        if not fallback_enabled or not is_provider_active("torrent"):
+            return ep_data
+        from media_cli.torrents import augment_episode_data_with_torrents
+        base_data = ep_data if isinstance(ep_data, dict) else {"episode": {"sourceUrls": []}}
+        ep_label = _display_episode_label(show, episode_id, ttype)
+        kwargs = {
+            "show": show,
+            "episode_label": ep_label,
+            "episode_id": episode_id,
+            "ttype": ttype,
+        }
+        if cancel_check is not None:
+            kwargs["cancel_check"] = cancel_check
+        return augment_episode_data_with_torrents(base_data, **kwargs)
+    except Exception:
+        return ep_data
 
 
 def format_mirror_label(stream: dict, *, prefix: str = "", safe_tag: str = "") -> str:
@@ -157,9 +207,46 @@ def handle_episode_state(
     display_order = list(range(len(episode_ids)))
     if app_core.get_episode_order(ms.show_id, cfg.get("episode_order", "asc")) == "desc":
         display_order.reverse()
+    deleted_download_keys: set[str] = set()
+
+    def _has_any_downloaded_episode() -> bool:
+        dl_files = _prune_missing_download_files(ms)
+        if dl_files:
+            return True
+        return any(
+            app_core.find_offline_file_for_episode(
+                ms.show_title or (show.get("name", "") if show else ""),
+                episode_label(eid, episode_labels),
+                cfg,
+            )
+            for eid in episode_ids
+        )
+
+    def _download_identity_keys(eid, lbl) -> set[str]:
+        from ..domain.episodes import clean_episode_identifier, parse_episode_dual_numbers
+        keys = {str(eid), str(lbl)}
+        prim, sec = parse_episode_dual_numbers(str(lbl))
+        clean = (prim or clean_episode_identifier(str(lbl)) or str(lbl)).lstrip("0") or "0"
+        if clean:
+            keys.add(clean)
+        clean_eid = clean_episode_identifier(str(eid))
+        if clean_eid:
+            keys.add(clean_eid.lstrip("0") or "0")
+        if sec:
+            keys.add(sec.lstrip("0") or "0")
+        ep_entry = episodes_map.get(str(eid))
+        if ep_entry:
+            for value in (ep_entry.get("display_number"), ep_entry.get("franchise_number")):
+                if value:
+                    keys.add(str(value))
+                    keys.add(f"Episode {value}")
+        return keys
 
     def _is_ep_downloaded(eid, lbl):
-        dl_files = getattr(ms, "_download_files", {}) or {}
+        identity_keys = _download_identity_keys(eid, lbl)
+        if deleted_download_keys.intersection(identity_keys):
+            return False
+        dl_files = _prune_missing_download_files(ms)
         if str(eid) in dl_files or str(lbl) in dl_files:
             return True
         ep_entry = episodes_map.get(str(eid))
@@ -336,16 +423,16 @@ def handle_episode_state(
             parts.append(f"\033[38;5;222m{_t(feedback)}{_RST}")
         else:
             p_name = (show.get("_provider_name") or (show.get("_provider") or "").title()) if show else ""
-            offline_badge = "\033[38;2;225;85;85m[Offline]\033[0m • " if not app_core.is_online() else ""
+            offline_badge = "\033[38;2;225;85;85m[Offline]\033[0m • " if app_core.is_confirmed_offline() else ""
             prefix = f"{offline_badge}{p_name} • " if p_name else offline_badge
             action_nav = ""
-            if getattr(ms, "_is_downloads", False) and 0 <= si < len(display_order):
+            if 0 <= si < len(display_order):
                 orig_i = display_order[si]
                 eid = episode_ids[orig_i]
                 lbl = episode_label(eid, episode_labels)
                 if _is_ep_downloaded(eid, lbl):
                     action_nav = "Enter=Play • Del=Delete • "
-                else:
+                elif getattr(ms, "_is_downloads", False):
                     action_nav = "Enter=Download • "
             parts.append(f"{_C_HINT}{_t(prefix + action_nav + 'Tab=Sub/Dub • Ctrl+R=flip • ?=Help • ' + nav_text)}{_RST}")
         res = "\n".join(parts)
@@ -396,9 +483,7 @@ def handle_episode_state(
         return (ep_opts, _ep_hdr(0), disabled_indices)
 
     def _delete_ep_file(sel_idx):
-        nonlocal ep_opts, disabled_indices
-        if not getattr(ms, "_is_downloads", False):
-            return None
+        nonlocal ep_opts, disabled_indices, deleted_download_keys
         if not (0 <= sel_idx < len(display_order)):
             return None
         orig_i = display_order[sel_idx]
@@ -415,7 +500,11 @@ def handle_episode_state(
             deleted = app_core.delete_offline_episode(folder_name, str(eid), cfg)
 
         if deleted:
-            dl_files = getattr(ms, "_download_files", {})
+            deleted_download_keys.update(_download_identity_keys(eid, lbl))
+            dl_files = _prune_missing_download_files(ms)
+            for key, path in list(dl_files.items()):
+                if not path or not os.path.isfile(os.path.expanduser(str(path))):
+                    dl_files.pop(key, None)
             dl_files.pop(str(eid), None)
             dl_files.pop(str(lbl), None)
             dl_files.pop(eid, None)
@@ -435,8 +524,6 @@ def handle_episode_state(
         return ep_opts, _ep_hdr(sel_idx)
 
     def _can_delete_ep(oi):
-        if not getattr(ms, "_is_downloads", False):
-            return False
         if not (0 <= oi < len(display_order)):
             return False
         orig_i = display_order[oi]
@@ -458,13 +545,14 @@ def handle_episode_state(
             idx = 0
         else:
             direct_single = ui.ep_prev_state == "SEARCH" and len(ms.shows) <= 1 and ms.just_searched
+            has_delete_actions = _has_any_downloaded_episode()
             hd6 = picker_help(
                 "Play episode",
                 "New search" if direct_single else "Go back",
                 "Quit" if direct_single else "Go back",
                 "Toggle Sub/Dub",
                 reverse_label="Flip order",
-                delete_label="Delete episode" if getattr(ms, "_is_downloads", False) else None,
+                delete_label="Delete episode" if has_delete_actions else None,
             )
             init_sel = display_order.index(ms.current_ep_index) if ms.current_ep_index in display_order else 0
             idx = tui_pick(
@@ -473,9 +561,9 @@ def handle_episode_state(
                 header_fn=_ep_hdr,
                 tab_fn=_ep_tab_fn,
                 reverse_fn=_ep_reverse_fn,
-                delete_fn=_delete_ep_file if getattr(ms, "_is_downloads", False) else None,
-                delete_prompt=_ep_delete_prompt if getattr(ms, "_is_downloads", False) else None,
-                can_delete_fn=_can_delete_ep if getattr(ms, "_is_downloads", False) else None,
+                delete_fn=_delete_ep_file if has_delete_actions else None,
+                delete_prompt=_ep_delete_prompt if has_delete_actions else None,
+                can_delete_fn=_can_delete_ep if has_delete_actions else None,
                 hints=_ep_hint_fn,
                 info_fn=app_core.make_single_show_info_fn(ui.ui_show_ctx, ui),
                 help_dict=hd6,

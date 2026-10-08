@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import html as html_lib
+import json
 import logging
+import re
 import urllib.parse
 import urllib.request
 from typing import Any
@@ -17,6 +20,113 @@ from .shared.models import (
     normalize_title,
     normalize_titles,
 )
+from .shared.hls import resolved_hls_streams_to_sources
+
+
+def _parse_json_parse_assignment(html: str, key: str) -> Any:
+    match = re.search(
+        rf'{re.escape(key)}\s*:\s*JSON\.parse\(([\'"])(.*?)\1\)',
+        html,
+        re.DOTALL,
+    )
+    if not match:
+        return None
+    raw_json = match.group(2)
+    candidates = [
+        raw_json,
+        html_lib.unescape(raw_json),
+    ]
+    for candidate in list(candidates):
+        try:
+            candidates.append(candidate.replace("\\/", "/").encode("utf-8").decode("unicode_escape"))
+        except Exception:
+            pass
+    for candidate in candidates:
+        try:
+            return json.loads(candidate.replace("\\/", "/"))
+        except Exception:
+            continue
+    return None
+
+
+def _title_map_from_html(html: str) -> dict[str, Any]:
+    data = _parse_json_parse_assignment(html, "anmTitles")
+    return data if isinstance(data, dict) else {}
+
+
+def _episode_items_from_html(html: str) -> list[dict[str, Any]]:
+    data = _parse_json_parse_assignment(html, "items")
+    return data if isinstance(data, list) else []
+
+
+def _clean_description(soup: BeautifulSoup) -> str:
+    heading = soup.find(
+        lambda tag: tag.name in {"h2", "h3", "h4"}
+        and "synopsis" in tag.get_text(" ", strip=True).casefold()
+    )
+    if heading:
+        for sibling in heading.find_all_next():
+            if sibling.name in {"div", "p"}:
+                lines = [
+                    line.strip()
+                    for line in sibling.get_text("\n", strip=True).splitlines()
+                    if line.strip()
+                ]
+                if lines:
+                    if lines[0].casefold().startswith("* based on") and len(lines) > 1:
+                        return " ".join(lines[1:])
+                    return " ".join(lines)
+
+    desc_tag = soup.find(class_=lambda c: c and ('desc' in c.lower() or 'synopsis' in c.lower()))
+    if desc_tag:
+        return desc_tag.get_text(separator=' ', strip=True)
+    for p in soup.find_all('p'):
+        text = p.get_text(strip=True)
+        if len(text) > 80:
+            return text
+    return ""
+
+
+def _first_anizone_cover(html: str, soup: BeautifulSoup) -> str:
+    meta_img = soup.find('meta', property='og:image')
+    if meta_img and meta_img.get('content'):
+        return str(meta_img['content'])
+    img_match = re.search(r'<img[^>]+src=["\']([^"\']*/images/anime/[^"\']+)["\']', html)
+    if img_match:
+        return img_match.group(1).replace("\\/", "/")
+    return ""
+
+
+def _status_from_html(html: str) -> str:
+    text = BeautifulSoup(html, "html.parser").get_text(" ", strip=True).casefold()
+    if "completed" in text or "finished" in text:
+        return "FINISHED"
+    if "ongoing" in text or "releasing" in text:
+        return "RELEASING"
+    return ""
+
+
+def _episode_count_from_html(html: str) -> int:
+    match = re.search(r'\b(\d+)\s+Episodes?\b', BeautifulSoup(html, "html.parser").get_text(" ", strip=True), re.I)
+    return int(match.group(1)) if match else 0
+
+
+def _start_year_from_html(html: str) -> int | None:
+    text = BeautifulSoup(html, "html.parser").get_text(" ", strip=True)
+    match = re.search(r'\b(19\d{2}|20\d{2})\b', text)
+    return int(match.group(1)) if match else None
+
+
+def _episode_label(item: dict[str, Any]) -> str:
+    title_list = item.get("title_list") if isinstance(item.get("title_list"), dict) else {}
+    return str(
+        title_list.get("1")
+        or title_list.get("5")
+        or title_list.get("2")
+        or item.get("title")
+        or item.get("slug")
+        or ""
+    )
 
 
 class AniZoneProvider:
@@ -42,8 +152,6 @@ class AniZoneProvider:
         return self.metadata.get("name", "AniZone")
 
     def search(self, query: str, ttype: str = "sub") -> list[dict[str, Any]]:
-        import json
-        import re
         search_url = f"{self.base_url}/anime?search={urllib.parse.quote(query)}"
         req = urllib.request.Request(search_url, headers=self.headers)
         try:
@@ -51,22 +159,8 @@ class AniZoneProvider:
             results = []
             seen_ids = set()
 
-            # Parse Alpine.js items JSON
-            m = re.search(r'items:\s*JSON\.parse\(([\'\"])(.*?)\1\)', html, re.DOTALL)
-            if m:
-                raw_json = m.group(2)
-                # Unescape unicode and slashes
-                try:
-                    cleaned_json = raw_json.encode('utf-8').decode('unicode_escape')
-                except Exception:
-                    cleaned_json = raw_json.replace('\\"', '"').replace('\\/', '/')
-
-                try:
-                    items = json.loads(cleaned_json)
-                except Exception:
-                    # Fallback standard json load
-                    items = json.loads(raw_json.replace('\\/', '/'))
-
+            items = _episode_items_from_html(html)
+            if items:
                 for it in items:
                     anime_id = it.get("slug")
                     if not anime_id or anime_id in seen_ids:
@@ -93,7 +187,7 @@ class AniZoneProvider:
                         "nativeName": native_title,
                         "thumbnail": cover,
                         "episodeCount": ep_count,
-                        "availableEpisodes": {"sub": ep_count, "dub": 0, "raw": 0},
+                        "availableEpisodes": {"sub": ep_count, "dub": ep_count, "raw": 0},
                         "status": "RELEASING" if is_ongoing else "FINISHED",
                         "type": str(it.get("type") or "TV").upper(),
                         "airedStart": {"year": start_year} if start_year else None,
@@ -109,64 +203,80 @@ class AniZoneProvider:
             return []
 
     def get_title(self, provider_id: str) -> dict[str, Any] | None:
-        import json
-        import re
         anime_url = f"{self.base_url}/anime/{provider_id}"
         req = urllib.request.Request(anime_url, headers=self.headers)
-        description = ""
         title = provider_id.replace('-', ' ').title()
+        english_title = ""
+        romaji_title = ""
+        native_title = ""
         cover = ""
+        description = ""
+        episode_count = 0
+        available_count = 0
+        status = ""
+        start_year = None
         try:
             html = urllib.request.urlopen(req, timeout=8).read().decode('utf-8', errors='ignore')
             soup = BeautifulSoup(html, 'html.parser')
 
-            desc_tag = soup.find(class_=lambda c: c and ('desc' in c.lower() or 'synopsis' in c.lower()))
-            if desc_tag:
-                description = desc_tag.get_text(separator=' ', strip=True)
-            else:
-                for p in soup.find_all('p'):
-                    text = p.get_text(strip=True)
-                    if len(text) > 80:
-                        description = text
-                        break
+            title_map = _title_map_from_html(html)
+            english_title = str(title_map.get("1") or title_map.get("10") or "")
+            romaji_title = str(title_map.get("5") or title_map.get("2") or "")
+            native_title = str(title_map.get("8") or "")
+            title = english_title or romaji_title or title
 
-            # Check title in x-data or meta tags
-            m_titles = re.search(r'anmTitles:\s*JSON\.parse\(([\'\"])(.*?)\1\)', html, re.DOTALL)
-            if m_titles:
-                try:
-                    t_data = json.loads(m_titles.group(2).encode('utf-8').decode('unicode_escape'))
-                    title = t_data.get("1") or t_data.get("5") or title
-                except Exception:
-                    pass
-
-            meta_img = soup.find('meta', property='og:image')
-            if meta_img and meta_img.get('content'):
-                cover = meta_img['content']
+            episode_items = _episode_items_from_html(html)
+            available_count = len({
+                str(item.get("slug"))
+                for item in episode_items
+                if isinstance(item, dict) and item.get("slug")
+            })
+            episode_count = _episode_count_from_html(html) or available_count
+            available_count = max(available_count, episode_count)
+            status = _status_from_html(html)
+            start_year = _start_year_from_html(html)
+            description = _clean_description(soup)
+            cover = _first_anizone_cover(html, soup)
 
         except Exception as e:
             _logger.debug("AniZone get_title error: %s", e)
 
-        return normalize_title(
-            {
-                "_id": provider_id,
-                "name": title,
-                "description": description,
-                "thumbnail": cover,
-            },
-            provider_id=self.id,
-            provider_name=self.name,
-            id_key="_id"
-        )
+        payload = {
+            "_id": provider_id,
+            "name": title,
+            "englishName": english_title,
+            "romajiName": romaji_title,
+            "nativeName": native_title,
+            "description": description,
+            "thumbnail": cover,
+            "episodeCount": episode_count,
+            "availableEpisodes": {"sub": available_count, "dub": available_count, "raw": 0},
+            "status": status,
+            "type": "TV",
+        }
+        if start_year:
+            payload["airedStart"] = {"year": start_year}
+        return normalize_title(payload, provider_id=self.id, provider_name=self.name, id_key="_id")
 
     def episode_catalog(self, provider_id: str, ttype: str = "sub") -> dict[str, Any]:
-        import re
         ep_url = f"{self.base_url}/anime/{provider_id}/1"
         req = urllib.request.Request(ep_url, headers=self.headers)
         try:
             html = urllib.request.urlopen(req, timeout=8).read().decode('utf-8', errors='ignore')
             soup = BeautifulSoup(html, 'html.parser')
             ids = []
+            labels = {}
             seen_ids = set()
+
+            episode_items = _episode_items_from_html(html)
+            for item in episode_items:
+                if not isinstance(item, dict):
+                    continue
+                ep_num = str(item.get("slug") or "")
+                if ep_num and ep_num not in seen_ids:
+                    ids.append(ep_num)
+                    labels[ep_num] = _episode_label(item)
+                    seen_ids.add(ep_num)
 
             for a in soup.find_all('a', href=True):
                 href = a['href']
@@ -196,10 +306,10 @@ class AniZoneProvider:
 
             detail = {
                 "sub": ids,
-                "dub": [],
+                "dub": ids,
                 "raw": [],
             }
-            return normalize_episode_catalog({"ids": ids, "detail": detail}, provider_id=self.id, provider_title_id=provider_id)
+            return normalize_episode_catalog({"ids": ids, "detail": detail, "labels": labels}, provider_id=self.id, provider_title_id=provider_id)
         except Exception as e:
             _logger.debug("AniZone episode catalog error: %s", e)
             return normalize_episode_catalog({"ids": ["1"]}, provider_id=self.id, provider_title_id=provider_id)
@@ -228,7 +338,7 @@ class AniZoneProvider:
             m = re.search(r'vidstackPlayer\(JSON\.parse\(([\'\"])(.*?)\1\)', html, re.DOTALL)
             if m:
                 try:
-                    data = json.loads(m.group(2).encode('utf-8').decode('unicode_escape'))
+                    data = json.loads(m.group(2).replace("\\/", "/").encode('utf-8').decode('unicode_escape'))
                     stream_url = data.get('src', '').replace('\\/', '/')
                     if stream_url:
                         subtitles = []
@@ -257,7 +367,20 @@ class AniZoneProvider:
                             src_dict["subtitles"] = subtitles
                             def_sub = next((s["url"] for s in subtitles if s.get("default")), subtitles[0]["url"])
                             src_dict["subtitle_url"] = def_sub
-                        source_urls.append(src_dict)
+                        try:
+                            from ..extractors.base import BaseExtractor
+                            expanded = BaseExtractor().extract_m3u8(
+                                stream_url,
+                                referer=f"{self.base_url}/",
+                                origin=self.base_url,
+                                name=src_dict["sourceName"],
+                                priority=src_dict["priority"],
+                                headers=src_dict["headers"],
+                                subtitles=subtitles,
+                            )
+                            source_urls.extend(resolved_hls_streams_to_sources(expanded))
+                        except Exception:
+                            source_urls.append(src_dict)
                 except Exception as e:
                     _logger.debug("AniZone vidstackPlayer JSON parse error: %s", e)
 
@@ -320,4 +443,3 @@ class AniZoneProvider:
         return f"{self.base_url}/anime/{provider_id}/{episode}"
 
 PROVIDER_CLASS = AniZoneProvider
-

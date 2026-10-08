@@ -25,6 +25,9 @@ def test_download_episode_multi_audio_ffmpeg_command():
         def mock_popen(cmd, *args, **kwargs):
             nonlocal captured_cmd
             captured_cmd = cmd
+            os.makedirs(os.path.dirname(cmd[-1]), exist_ok=True)
+            with open(cmd[-1], "wb") as fh:
+                fh.write(b"fake-video")
             mock_proc = MagicMock()
             mock_proc.wait.return_value = 0
             mock_proc.returncode = 0
@@ -85,6 +88,9 @@ def test_download_episode_filtered_audio_ffmpeg():
         def mock_popen(cmd, *args, **kwargs):
             nonlocal captured_cmd
             captured_cmd = cmd
+            os.makedirs(os.path.dirname(cmd[-1]), exist_ok=True)
+            with open(cmd[-1], "wb") as fh:
+                fh.write(b"fake-video")
             mock_proc = MagicMock()
             mock_proc.wait.return_value = 0
             mock_proc.returncode = 0
@@ -127,6 +133,9 @@ def test_download_episode_embedded_subs_mkv():
         def mock_popen(cmd, *args, **kwargs):
             nonlocal captured_cmd
             captured_cmd = cmd
+            os.makedirs(os.path.dirname(cmd[-1]), exist_ok=True)
+            with open(cmd[-1], "wb") as fh:
+                fh.write(b"fake-video")
             mock_proc = MagicMock()
             mock_proc.wait.return_value = 0
             mock_proc.returncode = 0
@@ -155,10 +164,47 @@ def test_download_episode_embedded_subs_mkv():
             # Output should be .mkv when embedding subtitles
             output_file = captured_cmd[-1]
             assert output_file.endswith(".mkv")
+            assert ".anyplay-partials" in output_file
             # Local subtitle input mapped (no remote URL to avoid 403 Forbidden)
             assert dummy_sub in captured_cmd
             assert "1:s:0" in captured_cmd
             assert "language=eng" in captured_cmd
+
+
+def test_download_episode_ffmpeg_commits_only_after_partial_success():
+    stream = {"link": "https://stream.example.com/master.m3u8"}
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        captured_cmd = []
+
+        def mock_popen(cmd, *args, **kwargs):
+            nonlocal captured_cmd
+            captured_cmd = cmd
+            os.makedirs(os.path.dirname(cmd[-1]), exist_ok=True)
+            with open(cmd[-1], "wb") as fh:
+                fh.write(b"complete-video")
+            mock_proc = MagicMock()
+            mock_proc.wait.return_value = 0
+            mock_proc.returncode = 0
+            return mock_proc
+
+        with patch("subprocess.Popen", side_effect=mock_popen), \
+             patch("shutil.which", return_value="/usr/bin/ffmpeg"):
+            ok = download_episode(
+                "Atomic Show",
+                7,
+                stream,
+                download_dir=tmpdir,
+                downloader="ffmpeg",
+                quiet=True,
+            )
+
+        final_path = os.path.join(tmpdir, "Atomic Show", "Atomic Show - Episode 7.mp4")
+        assert ok is True
+        assert captured_cmd[-1] != final_path
+        assert ".anyplay-partials" in captured_cmd[-1]
+        assert os.path.exists(final_path)
+        assert not os.path.exists(captured_cmd[-1])
 
 
 def test_download_episode_yt_dlp_with_embedded_subs_remux():
@@ -220,4 +266,3 @@ def test_download_episode_yt_dlp_with_embedded_subs_remux():
             assert call_args[0] == temp_file
             assert call_args[1] == [dummy_sub_file]
             assert call_args[2].endswith(".mkv")
-

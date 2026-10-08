@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import re
+import sys
+import threading
 import time
 from typing import Any
 
@@ -27,6 +29,66 @@ from ..playback.rules import marked_watched_osd
 from ..ui.help import picker_help
 from ..ui.picker import tui_pick
 from . import playback as playback_mod
+
+_torrent_mirror_augmenting: set[tuple] = set()
+_torrent_mirror_augment_lock = threading.RLock()
+
+
+def _load_provider_episode_data_for_mirrors(show_id, episode_id, ttype, provider_id):
+    return app_core.get_episode_data(
+        show_id,
+        episode_id,
+        ttype,
+        provider_id=provider_id,
+    )
+
+
+def _load_episode_data_for_mirrors(show_id, episode_id, ttype, provider_id, show_ctx):
+    ep_data = _load_provider_episode_data_for_mirrors(show_id, episode_id, ttype, provider_id)
+    if not app_core.is_termux():
+        ep_data = playback_mod._augment_episode_sources_with_torrents(
+            ep_data,
+            show_ctx,
+            episode_id,
+            ttype,
+        )
+    return ep_data
+
+
+def _start_torrent_mirror_augmentation(cur_key, ep_data, show_ctx, episode_id, ttype, target_pid, quality):
+    if app_core.is_termux() or not isinstance(ep_data, dict) or ep_data.get("_torrent_fallback_checked"):
+        return None
+    with _torrent_mirror_augment_lock:
+        if cur_key in _torrent_mirror_augmenting:
+            return None
+        _torrent_mirror_augmenting.add(cur_key)
+
+    def worker():
+        try:
+            augmented = playback_mod._augment_episode_sources_with_torrents(
+                ep_data,
+                show_ctx,
+                episode_id,
+                ttype,
+            )
+            if augmented and augmented is not ep_data:
+                app_core._set_cached_ep_data(augmented, cur_key)
+                streams.start_bg_resolve(
+                    augmented,
+                    set(),
+                    cur_key[0],
+                    cur_key[1],
+                    cur_key[2],
+                    target_pid,
+                    quality,
+                )
+        finally:
+            with _torrent_mirror_augment_lock:
+                _torrent_mirror_augmenting.discard(cur_key)
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    return thread
 
 
 def handle_action_menu_state(
@@ -465,20 +527,10 @@ def handle_action_menu_state(
             opts.append("Download")
             acts.append("DOWNLOAD_MENU")
             action_hints["Download"] = "download options & batching"
-        else:
-            dl_status = "ON" if getattr(ms, "auto_download_next", False) else "OFF"
-            del_status = "ON" if getattr(ms, "auto_delete_watched", False) else "OFF"
-            buf = getattr(ms, "auto_delete_buffer", 1)
 
-            dl_label = f"Auto-Download: {dl_status}"
-            opts.append(dl_label)
-            acts.append("TOGGLE_AUTO_DOWNLOAD")
-            action_hints[dl_label] = "fetch next missing episode while bingeing"
-
-            del_label = f"Auto-Delete: {del_status}"
-            opts.append(del_label)
-            acts.append("TOGGLE_AUTO_DELETE")
-            action_hints[del_label] = f"keep {buf}-ep buffer, delete older watched"
+        opts.append("Playback")
+        acts.append("PLAYBACK_SETTINGS")
+        action_hints["Playback"] = "session playback options"
 
     action_hints = {}
     _build_menu()
@@ -531,7 +583,7 @@ def handle_action_menu_state(
                 if action_show
                 else ""
             )
-            offline_badge = "\033[38;2;225;85;85m[Offline]\033[0m • " if not app_core.is_online() else ""
+            offline_badge = "\033[38;2;225;85;85m[Offline]\033[0m • " if app_core.is_confirmed_offline() else ""
             prefix = f"{offline_badge}{p_name} • " if p_name else offline_badge
             parts.append(
                 f"{C_K}{_t(prefix + 'Enter/Right=select • Tab=Sub/Dub • ?=Help • Left/Esc=back')}{R}"
@@ -662,6 +714,72 @@ def handle_action_menu_state(
             _build_menu()
 
         return (opts, _action_hdr(0), True)
+
+    def _playback_settings_menu():
+        selected_idx = 0
+
+        def _settings_options():
+            dl_status = "ON" if getattr(ms, "auto_download_next", False) else "OFF"
+            del_status = "ON" if getattr(ms, "auto_delete_watched", False) else "OFF"
+            buf = getattr(ms, "auto_delete_buffer", cfg.get("auto_delete_buffer", 1))
+            return (
+                [
+                    f"Auto-Download Next: {dl_status}",
+                    f"Auto-Delete Watched: {del_status}",
+                    f"Auto-Delete Buffer: {buf} ep" + ("" if buf == 1 else "s"),
+                ],
+                [
+                    "TOGGLE_AUTO_DOWNLOAD",
+                    "TOGGLE_AUTO_DELETE",
+                    "CYCLE_AUTO_DELETE_BUFFER",
+                ],
+                {
+                    f"Auto-Download Next: {dl_status}": "session only; fetch next episode after playback",
+                    f"Auto-Delete Watched: {del_status}": "session only; delete older watched downloads",
+                    f"Auto-Delete Buffer: {buf} ep" + ("" if buf == 1 else "s"): "session only; keep recent watched downloads",
+                },
+            )
+
+        hd = picker_help("Playback", "Back", "Back")
+        while True:
+            setting_opts, setting_acts, setting_hints = _settings_options()
+            sidx = tui_pick(
+                flags,
+                ui,
+                "Playback",
+                setting_opts,
+                header_fn=_action_hdr,
+                hints=setting_hints,
+                help_dict=hd,
+                info_fn=app_core.make_single_show_info_fn(action_show, ui),
+                initial_selected=selected_idx,
+            )
+            if sidx in (-2, -3) or sidx < 0:
+                return "DETAILS"
+
+            selected_idx = sidx
+            selected = setting_acts[sidx]
+            if selected == "TOGGLE_AUTO_DOWNLOAD":
+                ms.auto_download_next = not getattr(ms, "auto_download_next", False)
+                status = "ON" if ms.auto_download_next else "OFF"
+                app_core.set_action_feedback(action_show, f"Auto-Download: {status}")
+            elif selected == "TOGGLE_AUTO_DELETE":
+                ms.auto_delete_watched = not getattr(ms, "auto_delete_watched", False)
+                status = "ON" if ms.auto_delete_watched else "OFF"
+                app_core.set_action_feedback(action_show, f"Auto-Delete: {status}")
+            elif selected == "CYCLE_AUTO_DELETE_BUFFER":
+                current = getattr(ms, "auto_delete_buffer", cfg.get("auto_delete_buffer", 1))
+                try:
+                    current = int(current)
+                except (TypeError, ValueError):
+                    current = 1
+                choices = [0, 1, 2, 3, 5]
+                try:
+                    next_buf = choices[(choices.index(current) + 1) % len(choices)]
+                except ValueError:
+                    next_buf = 1
+                ms.auto_delete_buffer = next_buf
+                app_core.set_action_feedback(action_show, f"Auto-Delete Buffer: {next_buf}")
 
     hd7 = picker_help("Select action", "Go back", "Go back", tab_label="Toggle Sub/Dub")
     idx = tui_pick(
@@ -926,18 +1044,17 @@ def handle_action_menu_state(
     elif a == "DOWNLOAD_MENU":
         return handle_download_menu_state(flags, ui, ms, cfg, args, ttype)
 
+    elif a == "PLAYBACK_SETTINGS":
+        return _playback_settings_menu()
+
     elif a == "TOGGLE_AUTO_DOWNLOAD":
         ms.auto_download_next = not getattr(ms, "auto_download_next", False)
-        cfg["auto_download_next"] = ms.auto_download_next
-        app_core.save_config(cfg)
         status = "ON" if ms.auto_download_next else "OFF"
         app_core.set_action_feedback(action_show, f"Auto-Download: {status}")
         return "DETAILS"
 
     elif a == "TOGGLE_AUTO_DELETE":
         ms.auto_delete_watched = not getattr(ms, "auto_delete_watched", False)
-        cfg["auto_delete_watched"] = ms.auto_delete_watched
-        app_core.save_config(cfg)
         status = "ON" if ms.auto_delete_watched else "OFF"
         app_core.set_action_feedback(action_show, f"Auto-Delete: {status}")
         return "DETAILS"
@@ -1293,7 +1410,6 @@ def handle_download_menu_state(
 
 
 def _execute_batch_download(flags, ui, ms, cfg, args, ttype, action_show, queued_eps):
-    app_core.restore_terminal()
     args.download = False
     downloader_choice = getattr(args, "downloader", cfg.get("downloader", "auto"))
     extra_args = getattr(args, "extra_args", [])
@@ -1304,6 +1420,115 @@ def _execute_batch_download(flags, ui, ms, cfg, args, ttype, action_show, queued
 
     provider_id = title_provider_key(action_show)
 
+    if not getattr(args, "no_tui", False) and not getattr(flags, "plain_mode", False) and sys.stdin.isatty() and sys.stdout.isatty():
+        from media_cli.media.download_worker import DownloadItem, get_global_worker
+        from media_cli.ui.download_manager import run_download_manager
+        from media_cli.media.download import sanitize_filename
+
+        safe_title = sanitize_filename(ms.show_title) or ms.show_title
+        target_dir = os.path.join(download_dir, safe_title)
+        try:
+            os.makedirs(target_dir, exist_ok=True)
+        except Exception:
+            pass
+
+        worker = get_global_worker(download_dir)
+
+        def _make_resolver(show_id, ep_id, ttype, provider_id, quality):
+            def _res(item):
+                stream_res = app_core.fetch_episode_stream(
+                    show_id,
+                    ep_id,
+                    ttype,
+                    quality,
+                    provider_id=provider_id,
+                    exclude_sources=getattr(item, "failed_mirrors", set()),
+                )
+                if not stream_res or not stream_res[0]:
+                    raise RuntimeError(f"No stream found for episode {ep_id}")
+                stream, first_source_name = stream_res[0], stream_res[1]
+                raw_url = stream.get("link") or stream.get("streamUrl") or stream.get("sourceUrl") or ""
+                if not raw_url:
+                    raise RuntimeError("No stream URL in resolved stream")
+                item.current_mirror_name = first_source_name or stream.get("source_name") or stream.get("source_parent_name") or "selected mirror"
+                item.current_mirror_url = raw_url
+                item.logs.append(f"▶ Testing mirror: {item.current_mirror_name}")
+                headers = dict(stream.get("headers") or {})
+                referer = stream.get("referer", "")
+                if referer and "Referer" not in headers:
+                    headers["Referer"] = referer
+                proxy_srv = None
+                if (
+                    stream.get("requires_proxy")
+                    or "uwucdn.top" in raw_url
+                    or "owocdn.top" in raw_url
+                    or "kwik." in referer
+                    or "megap." in raw_url
+                    or "akirax.buzz" in raw_url
+                ):
+                    try:
+                        from media_cli.media.local_proxy import start_local_proxy
+                        raw_url, proxy_srv = start_local_proxy(raw_url, headers=headers, referer=referer)
+                    except Exception:
+                        pass
+                item.audio_tracks = list(stream.get("audio_tracks") or [])
+                item.audio_url = stream.get("audio_url", "")
+                item.subtitles = list(stream.get("subtitles") or stream.get("vtt") or [])
+                item.subtitle_url = stream.get("subtitle_url", "")
+                return raw_url, headers, proxy_srv
+            return _res
+
+        def _on_complete(item):
+            try:
+                from media_cli.core.storage import load_downloads_db, save_downloads_db
+                db = load_downloads_db()
+                f_key = sanitize_filename(item.title) or item.title
+                if f_key not in db["shows"]:
+                    db["shows"][f_key] = {"episodes": []}
+                if getattr(item, "show_metadata", None):
+                    db["shows"][f_key]["metadata"] = item.show_metadata
+                ep_str = str(getattr(item, "ep_id", item.episode))
+                if ep_str not in db["shows"][f_key]["episodes"]:
+                    db["shows"][f_key]["episodes"].append(ep_str)
+                save_downloads_db(db)
+            except Exception:
+                pass
+
+        quality = cfg.get("quality", "best")
+        effective_subtitle_mode = getattr(args, "subtitle_mode", None) or cfg.get("subtitle_mode", "embed")
+        embed_subs = effective_subtitle_mode == "embed"
+        ext = ".mkv" if embed_subs else ".mp4"
+
+        for ep_id in queued_eps:
+            ep_label = playback_mod._display_episode_label(action_show, ep_id, ttype)
+            item_id = f"{ms.show_id or safe_title}:{ep_id}"
+            dest_path = os.path.join(target_dir, f"{safe_title} - Episode {ep_label}{ext}")
+            item = DownloadItem(
+                id=item_id,
+                title=ms.show_title,
+                episode=f"Episode {ep_label}",
+                destination_path=dest_path,
+                engine=downloader_choice if downloader_choice in ("yt-dlp", "aria2c", "ffmpeg") else "auto",
+                resolve_fn=_make_resolver(ms.show_id, ep_id, ttype, provider_id, quality),
+                on_complete=_on_complete,
+                ep_id=ep_id,
+                show_metadata=action_show,
+                download_sub_langs=getattr(args, "download_sub_langs", None),
+                download_audio_langs=getattr(args, "download_audio_langs", None),
+                subtitle_mode=getattr(args, "subtitle_mode", None),
+            )
+            worker.add_item(item)
+
+        manager_result = run_download_manager(worker, standalone=False)
+        if manager_result == "QUIT":
+            return "QUIT"
+        app_core.set_action_feedback(
+            action_show, f"✔ Added {len(queued_eps)} episode(s) to downloader"
+        )
+        return
+
+    # Non-interactive / no-tui mode: sequential console downloader
+    app_core.restore_terminal()
     success_count = 0
     total_to_dl = len(queued_eps)
     print(
@@ -1384,12 +1609,35 @@ def handle_mirrors_state(
         args, "provider", None
     )
     quality = getattr(args, "quality", None) or cfg.get("quality", "best")
+    mirror_ep = ms.current_ep
     cur_key = streams.make_stream_key(
-        ms.show_id, ms.current_ep, ttype, target_pid, quality
+        ms.show_id, mirror_ep, ttype, target_pid, quality
     )
 
     # Check cached episode data first (non-blocking)
     cached_ep_data = app_core._get_cached_ep_data(cur_key)
+    if not cached_ep_data:
+        cached_ep_data = app_core.with_loading(
+            f"Loading {ttype.upper()} sources…",
+            _load_provider_episode_data_for_mirrors,
+            ms.show_id,
+            mirror_ep,
+            ttype,
+            provider_id=target_pid,
+        )
+    if not cached_ep_data:
+        cached_ep_data = {"episode": {"sourceUrls": []}}
+    if cached_ep_data:
+        app_core._set_cached_ep_data(cached_ep_data, cur_key)
+        _start_torrent_mirror_augmentation(
+            cur_key,
+            cached_ep_data,
+            ui.ui_show_ctx,
+            mirror_ep,
+            ttype,
+            target_pid,
+            quality,
+        )
     has_cached_sources = (
         cached_ep_data
         and cached_ep_data.get("episode", {}).get("sourceUrls")
@@ -1397,7 +1645,7 @@ def handle_mirrors_state(
 
     # Get cached streams with version check (non-blocking)
     cached_streams = app_core._stream_snapshot(
-        ms.show_id, ms.current_ep, ttype, target_pid, quality, cached_ep_data
+        ms.show_id, mirror_ep, ttype, target_pid, quality, cached_ep_data
     )
 
     exclude_names = set()
@@ -1424,7 +1672,7 @@ def handle_mirrors_state(
         is_same_active_key = streams._active_stream_key == cur_key
 
     cache_ready = streams.is_stream_cache_ready(
-        ms.show_id, ms.current_ep, ttype, target_pid, quality
+        ms.show_id, mirror_ep, ttype, target_pid, quality
     )
     total_sources = (
         len(cached_ep_data.get("episode", {}).get("sourceUrls", []))
@@ -1440,7 +1688,7 @@ def handle_mirrors_state(
             cached_ep_data,
             exclude_names,
             ms.show_id,
-            ms.current_ep,
+            mirror_ep,
             ttype,
             target_pid,
             quality,
@@ -1469,8 +1717,9 @@ def handle_mirrors_state(
 
     def _dedup():
         seen, out = set(), []
+        live_ep_data = app_core._get_cached_ep_data(cur_key) or cached_ep_data
         active_list = app_core._stream_snapshot(
-            ms.show_id, ms.current_ep, ttype, target_pid, quality, cached_ep_data
+            ms.show_id, mirror_ep, ttype, target_pid, quality, live_ep_data
         )
         target_quality = getattr(args, "quality", None) or cfg.get("quality", "best")
         from ..media.sources import quality_preference_key
@@ -1500,7 +1749,14 @@ def handle_mirrors_state(
             else:
                 sub_rank = 0 if is_soft else (2 if is_hard else 1)
             q_key = quality_preference_key(res, target_quality)
-            return (sub_rank, audio_penalty, q_key, prio)
+            return (
+                streams.torrent_fallback_sort_value(s),
+                sub_rank,
+                audio_penalty,
+                q_key,
+                prio,
+                streams.torrent_size_sort_value(s),
+            )
 
         for s in sorted(active_list, key=_mirror_sort_key):
             key = (s.get("source_name"), s.get("resolution"), s.get("link"))
@@ -1521,12 +1777,17 @@ def handle_mirrors_state(
         _bg_stats = streams._bg_stats
 
         with _bg_lock:
-            alive = bool(_bg_thread and _bg_thread.is_alive()) and (
+            resolver_alive = bool(_bg_thread and _bg_thread.is_alive()) and (
                 streams._active_stream_key == cur_key
             )
+            with _torrent_mirror_augment_lock:
+                torrent_alive = cur_key in _torrent_mirror_augmenting
+            alive = resolver_alive or torrent_alive
             r, f = _bg_stats["resolved"], _bg_stats["failed"]
             tot = _bg_stats.get("total", r + f)
             status_msg = _bg_stats.get("status_msg", "")
+            if torrent_alive and not resolver_alive:
+                status_msg = "searching torrent mirrors..."
 
         C_D = "\033[38;5;248m"
         R = "\033[0m"
@@ -1543,7 +1804,18 @@ def handle_mirrors_state(
             else f"{num_found} mirrors found"
         )
 
-        if alive and (r + f) < tot:
+        if torrent_alive:
+            from media_cli.ui.spinner import spinner_frame, spinner_from_config
+
+            spinner = spinner_frame(spinner_from_config(cfg))
+            if resolver_alive and (r + f) < tot:
+                left_part = f"{spinner} {found_str} • checking ({r+f}/{tot})"
+                right_part = status_msg or "searching torrent mirrors..."
+            else:
+                left_part = f"{spinner} {found_str}"
+                right_part = "searching torrent mirrors..."
+            plain_status = f"{left_part}  │  {right_part}"
+        elif alive and (r + f) < tot:
             from media_cli.ui.spinner import spinner_frame, spinner_from_config
 
             spinner = spinner_frame(spinner_from_config(cfg))
@@ -1572,7 +1844,7 @@ def handle_mirrors_state(
         parts = []
         if ui.ui_show_ctx:
             ep_str = playback_mod._display_episode_label(
-                ui.ui_show_ctx, ms.current_ep, ttype
+                ui.ui_show_ctx, mirror_ep, ttype
             )
             app_core.build_info_panel(
                 ui.ui_show_ctx,
@@ -1601,7 +1873,13 @@ def handle_mirrors_state(
     # Open mirror list immediately (even if empty) - live_fn will update as mirrors are resolved
     if not init_opts:
         with streams._bg_lock:
-            still_alive = streams._bg_thread and streams._bg_thread.is_alive()
+            still_alive = (
+                streams._bg_thread
+                and streams._bg_thread.is_alive()
+                and streams._active_stream_key == cur_key
+            )
+        with _torrent_mirror_augment_lock:
+            still_alive = still_alive or cur_key in _torrent_mirror_augmenting
         if not still_alive:
             # Background thread is dead, try one more time
             init_opts, init_hdr, _ = _mirror_refresh()
@@ -1613,7 +1891,7 @@ def handle_mirrors_state(
                         or ""
                     ).title() or "Provider"
                     ep_label = playback_mod._display_episode_label(
-                        ui.ui_show_ctx, ms.current_ep, ttype
+                        ui.ui_show_ctx, mirror_ep, ttype
                     )
                     app_core.set_action_feedback(
                         ui.ui_show_ctx,
@@ -1634,17 +1912,18 @@ def handle_mirrors_state(
     def _mirror_force_refresh(opt=None):
         app_core._clear_streams(cur_key)
         ep_data = app_core.with_loading(
-            f"Refreshing {ttype.upper()} sources…",
-            app_core.get_episode_data,
+            f"Refreshing {ttype.upper()} sources and torrents…",
+            _load_episode_data_for_mirrors,
             ms.show_id,
-            ms.current_ep,
+            mirror_ep,
             ttype,
             provider_id=target_pid,
+            show_ctx=ui.ui_show_ctx,
         )
         if ep_data:
             app_core._set_cached_ep_data(ep_data, cur_key)
             streams.start_bg_resolve(
-                ep_data, set(), ms.show_id, ms.current_ep, ttype, target_pid, quality
+                ep_data, set(), ms.show_id, mirror_ep, ttype, target_pid, quality
             )
         return _mirror_refresh()[:2]
 
@@ -1679,7 +1958,7 @@ def handle_mirrors_state(
                 or ""
             ).title() or "Provider"
             ep_label = playback_mod._display_episode_label(
-                ui.ui_show_ctx, ms.current_ep, ttype
+                ui.ui_show_ctx, mirror_ep, ttype
             )
             app_core.set_action_feedback(
                 ui.ui_show_ctx,

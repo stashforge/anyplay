@@ -47,12 +47,12 @@ def add_provider_subcommands(commands):
         provider_parser = commands.add_parser(
             provider_id,
             help="==SUPPRESS==",
-            usage=f"{APP_NAME} {provider_id} <query> [options]",
+            usage=f"{APP_NAME} {provider_id} search <query> [options]",
             description=f"Search and watch anime from {provider.name}.",
             epilog=(
                 "Examples:\n"
-                f"  {APP_NAME} {provider_id} renegade\n"
-                f"  {APP_NAME} {provider_id} renegade -e 3 --download"
+                f"  {APP_NAME} {provider_id} search renegade\n"
+                f"  {APP_NAME} {provider_id} search renegade -e 3 --download"
             ),
             add_help=False,
             formatter_class=MinimalHelpFormatter,
@@ -374,6 +374,39 @@ def add_config_subcommand(commands):
     return config
 
 
+def add_logs_subcommand(commands):
+    logs = commands.add_parser(
+        "logs",
+        help="Print diagnostic log lines",
+        usage=f"{APP_NAME} logs [--tail N]",
+        description="Print anyplay.log to stdout for piping, or print only recent lines.",
+        epilog=(
+            "Examples:\n"
+            f"  {APP_NAME} logs\n"
+            f"  {APP_NAME} logs --tail 80"
+        ),
+        add_help=False,
+        formatter_class=MinimalHelpFormatter,
+    )
+    _configure_help_parser(logs)
+    logs.set_defaults(logs=True)
+    logs.add_argument(
+        "--tail",
+        dest="logs_tail",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Print the last N lines from anyplay.log",
+    )
+    global_options = logs.add_argument_group("Global options")
+    _add_debug_option(global_options, suppress_default=True)
+    _add_plain_option(global_options, suppress_default=True)
+    global_options.add_argument(
+        "-h", "--help", action="help", help="Show this help message and exit"
+    )
+    return logs
+
+
 def register_all_subcommands(commands):
     add_search_subcommand(commands)
     add_provider_subcommands(commands)
@@ -385,3 +418,4 @@ def register_all_subcommands(commands):
     add_providers_subcommand(commands)
     add_completion_subcommand(commands)
     add_config_subcommand(commands)
+    add_logs_subcommand(commands)

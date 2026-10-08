@@ -126,8 +126,45 @@ def _pre_resolved_stream(source, name, priority, warn):
                     def_sub = subs[0].get("url") or subs[0].get("file")
                 if def_sub:
                     stream_dict["subtitle_url"] = def_sub
+    for key in (
+        "audio_url",
+        "audio_tracks",
+        "split_audio_url",
+        "split_video_url",
+        "split_width",
+        "split_height",
+        "split_bandwidth",
+        "dailymotion_audio",
+        "dailymotion_video",
+        "dailymotion_width",
+        "dailymotion_height",
+        "dailymotion_bandwidth",
+        "flixcloud_w_payload",
+        "flixcloud_xor_mask",
+    ):
+        if key in source:
+            stream_dict[key] = source[key]
 
     return [stream_dict]
+
+
+def _torrent_stream(source, name, priority):
+    if str(source.get("type") or "").strip().lower() != "torrent":
+        return None
+    magnet = str(source.get("sourceUrl") or source.get("link") or "").strip()
+    if not magnet.startswith("magnet:?"):
+        return []
+    return [{
+        "source_name": name,
+        "link": magnet,
+        "type": "torrent",
+        "resolution": str(source.get("resolution") or "Unknown"),
+        "referer": "",
+        "headers": {},
+        "source_priority": priority,
+        "android_safe": False,
+        "torrent": dict(source.get("torrent") or {}),
+    }]
 
 
 
@@ -195,6 +232,10 @@ def _resolve_source_impl(source, silent=False):
             _warn(message)
 
     result = []
+    torrent = _torrent_stream(source, name, priority)
+    if torrent is not None:
+        return torrent
+
     pre_resolved = _pre_resolved_stream(source, name, priority, warn)
     if pre_resolved is not None:
         return pre_resolved
@@ -351,4 +392,3 @@ def _resolve_source_impl(source, silent=False):
 
     info(f"[{name}] extracting via yt-dlp ...")
     return resolve_ytdlp_embed(url, name=name, priority=priority, ok=ok, warn=warn, subtitles=source.get("subtitles"))
-

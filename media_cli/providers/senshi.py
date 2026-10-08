@@ -6,6 +6,7 @@ import urllib.request
 from typing import Any
 
 from .shared.base import Provider
+from .shared.hls import parse_master_playlist_variants
 from .shared.models import normalize_episode_catalog, normalize_episode_sources, normalize_title
 
 HEADERS = {
@@ -205,6 +206,7 @@ class Senshi(Provider):
         all_sources = []
         for emb in matching_embeds:
             status = emb.get("status") or ("Dub" if is_dub else "Sub")
+            status_label = "Dub" if str(status).lower() == "dub" else "HardSub"
             remote_id = emb.get("remote_source_id") or emb.get("remoteSourceId")
 
             # 1. Direct Vidcloud source via remote_source_id
@@ -239,8 +241,7 @@ class Senshi(Provider):
                                 ]
                                 quality = src_info.get("quality") or "1080p"
 
-                                # Parse all stream resolutions from master playlist
-                                resolutions = []
+                                variants = []
                                 try:
                                     mreq = urllib.request.Request(src_url, headers=vheaders)
                                     with urllib.request.urlopen(mreq, timeout=5) as mresp:
@@ -250,25 +251,24 @@ class Senshi(Provider):
                                             dec = decrypt_em3u8(m_body)
                                             if dec:
                                                 m_body = dec
-                                        import re
-                                        for line in m_body.splitlines():
-                                            if line.startswith("#EXT-X-STREAM-INF:"):
-                                                m_res = re.search(r"RESOLUTION=\d+x(\d+)", line)
-                                                if m_res:
-                                                    r_str = f"{m_res.group(1)}p"
-                                                    if r_str not in resolutions:
-                                                        resolutions.append(r_str)
+                                        variants = parse_master_playlist_variants(src_url, m_body)
                                 except Exception:
                                     pass
 
-                                if not resolutions:
-                                    resolutions = [quality]
+                                if not variants:
+                                    variants = [{"url": src_url, "resolution": quality}]
 
-                                for res in resolutions:
+                                seen_variant_urls = set()
+                                for variant in variants:
+                                    variant_url = variant.get("url") or src_url
+                                    if variant_url in seen_variant_urls:
+                                        continue
+                                    seen_variant_urls.add(variant_url)
+                                    res = variant.get("resolution") or quality
                                     all_sources.append({
-                                        "sourceName": f"Senshi ({status} - {res})",
-                                        "link": f"{src_url}&hls_res={res}",
-                                        "sourceUrl": f"{src_url}&hls_res={res}",
+                                        "sourceName": f"[{status_label}] {res}",
+                                        "link": variant_url,
+                                        "sourceUrl": variant_url,
                                         "resolution": res,
                                         "type": "hls",
                                         "priority": 1 if res == "1080p" else 2,
@@ -284,11 +284,33 @@ class Senshi(Provider):
                 except Exception as exc:
                     logging.debug("Senshi vidcloud fetch error: %s", exc)
 
+            direct_url = emb.get("url") or emb.get("embed_url") or emb.get("embedUrl")
+            if direct_url and not any(
+                direct_url in {src.get("streamUrl"), src.get("link"), src.get("sourceUrl")}
+                for src in all_sources
+            ):
+                all_sources.append({
+                    "sourceName": f"[{status_label}] auto",
+                    "link": direct_url,
+                    "streamUrl": direct_url,
+                    "sourceUrl": direct_url,
+                    "resolution": "auto",
+                    "type": "hls" if ".m3u8" in str(direct_url) else "mp4",
+                    "priority": 2,
+                    "referer": f"{self.base_url}/",
+                    "headers": {
+                        "Referer": f"{self.base_url}/",
+                        "Origin": self.base_url,
+                        "User-Agent": HEADERS["User-Agent"],
+                    },
+                    "requires_proxy": True,
+                })
+
             # 2. Server 2 (StreamNin)
             server2 = emb.get("server2")
             if server2:
                 all_sources.append({
-                    "sourceName": f"StreamNin ({status})",
+                    "sourceName": f"StreamNin ({status_label})",
                     "link": server2,
                     "resolution": "auto",
                     "type": "embed",
@@ -300,7 +322,7 @@ class Senshi(Provider):
             serverFM = emb.get("serverFM")
             if serverFM:
                 all_sources.append({
-                    "sourceName": f"FileMoon ({status})",
+                    "sourceName": f"FileMoon ({status_label})",
                     "link": serverFM,
                     "resolution": "auto",
                     "type": "embed",

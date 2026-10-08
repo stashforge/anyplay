@@ -65,12 +65,12 @@
       "features": ["search"]
     },
     "anidb": {
-      "name": "AniDB.app",
-      "domains": ["https://anidb.app"],
+      "name": "AniDB",
+      "domains": ["https://anilab2.amdapi.click"],
       "type": "anime",
       "languages": ["sub", "dub"],
       "status": "active",
-      "engine": "hybrid",
+      "engine": "api",
       "features": ["anilist_sync", "search"]
     },
     "senshi": {
@@ -81,15 +81,6 @@
       "status": "active",
       "engine": "api",
       "features": ["search"]
-    },
-    "uniquestream": {
-      "name": "UniqueStream",
-      "domains": ["https://anime.uniquestream.net"],
-      "type": "anime",
-      "languages": ["sub", "dub"],
-      "status": "active",
-      "engine": "api",
-      "features": ["search", "fallback_servers"]
     },
     "animekhor": {
       "name": "AnimeKhor",
@@ -126,6 +117,15 @@
       "status": "active",
       "engine": "api",
       "features": ["search"]
+    },
+    "torrent": {
+      "name": "Torrents",
+      "domains": ["https://tsukihime.org", "https://nyaa.si", "https://torrents-csv.com"],
+      "type": "torrent",
+      "languages": ["sub", "dub", "raw"],
+      "status": "active",
+      "engine": "api",
+      "features": ["search", "torrent_streaming"]
     }
   }
 }

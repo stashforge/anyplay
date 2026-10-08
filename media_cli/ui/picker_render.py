@@ -52,7 +52,9 @@ def get_key(descriptor):
                 if rest == b"6~":
                     return "PAGE_DOWN"
                 return "UNKNOWN"
-            return "ESC"
+            if second in (b"d", b"D"):
+                return "ALT_D"
+            return "UNKNOWN"
         return "ESC"
 
     if char in (b"\r", b"\n"):
@@ -113,4 +115,3 @@ def render_item(raw, query, selected, max_w=0):
     _, indices = res
     highlight = MATCH if not selected else "\033[1;97m\033[4m"
     return fuzzy_highlight(plain, indices, base_style=base, match_style=highlight, reset_style=RESET)
-

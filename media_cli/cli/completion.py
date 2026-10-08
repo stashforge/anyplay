@@ -8,7 +8,7 @@ from ..providers import available_providers
 
 BASE_COMMANDS = (
     "search", "downloads", "anilist", "history", "continue",
-    "auth", "providers", "completion", "config",
+    "auth", "providers", "completion", "config", "logs",
 )
 ANILIST_LISTS = (
     "airing", "watching", "planning", "completed", "dropped", "paused", "rewatching",
@@ -74,12 +74,17 @@ COMPLETION_OPTIONS = ("install", "--debug", "--plain", "--no-tui", "-h", "--help
 
 CONFIG_ACTIONS = ("set", "get")
 CONFIG_OPTIONS = ("set", "get", "-e", "--editor", "--debug", "--plain", "--no-tui", "-h", "--help")
+LOGS_OPTIONS = ("--tail", "--debug", "--plain", "--no-tui", "-h", "--help")
 CONFIG_KEYS = (
     "quality", "translation_type", "player", "provider", "title_language",
+    "disabled_providers",
     "download_dir", "auto_download_next", "auto_delete_watched", "auto_delete_buffer",
     "binge", "sync", "anilist_token", "anilist_sort", "anilist_sort_reverse",
     "cover", "spinner", "aniskip", "auto_skip",
     "download_sub_langs", "download_audio_langs", "subtitle_mode",
+    "torrent_fallback", "torrent_search_limit", "torrent_min_seeders",
+    "torrent_hydrate_top", "torrent_prefer_size", "torrent_allow_unknown_seeders",
+    "log_max_bytes", "log_backup_count",
 )
 
 
@@ -246,6 +251,9 @@ def bash_completion():
         config)
             COMPREPLY=( $(compgen -W "{_words(CONFIG_OPTIONS)}" -- "$cur") )
             ;;
+        logs)
+            COMPREPLY=( $(compgen -W "{_words(LOGS_OPTIONS)}" -- "$cur") )
+            ;;
     esac
 }}
 complete -F {fn_name} {APP_NAME}
@@ -267,6 +275,7 @@ commands=(
   'providers:List available providers'
   'completion:Generate shell completion'
   'config:Manage or open configuration'
+  'logs:Show diagnostic logs'
     {"".join(f"  '{provider}:Search {provider}'{newline}" for provider in PROVIDERS)}
 )
 
@@ -292,6 +301,9 @@ case $words[2] in
     ;;
   config)
     _arguments '*:: :(({_words(CONFIG_OPTIONS)}))'
+    ;;
+  logs)
+    _arguments '*:: :(({_words(LOGS_OPTIONS)}))'
     ;;
   search)
     _arguments '*:: :(({_words(SEARCH_OPTIONS)}))'
@@ -358,6 +370,7 @@ def fish_completion():
         "providers": PROVIDERS_OPTIONS,
         "completion": COMPLETION_OPTIONS,
         "config": CONFIG_OPTIONS,
+        "logs": LOGS_OPTIONS,
     }
     for provider in PROVIDERS:
         lines.append(
