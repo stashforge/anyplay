@@ -70,6 +70,53 @@ def set_title_sync(preferences, show, enabled):
     return preferences
 
 
+def _custom_skip_keys(show, fallback_show_id=None):
+    try:
+        from ..media.custom_skips import stable_title_keys
+        return stable_title_keys(show, fallback_show_id)
+    except Exception:
+        keys = []
+        for raw in (fallback_show_id, (show or {}).get("_id"), (show or {}).get("id")):
+            if raw is not None and str(raw).strip():
+                keys.append(str(raw).strip())
+        return keys
+
+
+def custom_skips(preferences, show, fallback_show_id=None):
+    for key in _custom_skip_keys(show, fallback_show_id):
+        entries = preferences.get(str(key), {}).get("custom_skips")
+        if isinstance(entries, list):
+            return entries
+    return []
+
+
+def set_custom_skips(preferences, show, fallback_show_id, entry):
+    keys = _custom_skip_keys(show, fallback_show_id)
+    if not keys:
+        return preferences
+    clean_entry = {
+        "providers": list(entry.get("providers") or ["all"]),
+        "exclude_providers": list(entry.get("exclude_providers") or []),
+        "intervals": list(entry.get("intervals") or []),
+    }
+    for key in keys:
+        current = preferences.get(str(key), {})
+        current["custom_skips"] = [clean_entry] if clean_entry["intervals"] else []
+        preferences[str(key)] = current
+    return preferences
+
+
+def clear_custom_skips(preferences, show, fallback_show_id=None):
+    for key in _custom_skip_keys(show, fallback_show_id):
+        current = preferences.get(str(key), {})
+        current.pop("custom_skips", None)
+        if current:
+            preferences[str(key)] = current
+        else:
+            preferences.pop(str(key), None)
+    return preferences
+
+
 def resume_time(preferences, show_id, episode):
     show_resumes = preferences.get(str(show_id), {}).get("resumes", {})
     if not show_resumes:
@@ -246,4 +293,3 @@ def get_active_feedback(show, duration=ACTION_FEEDBACK_DURATION):
     if msg and (time.time() - t) < duration:
         return msg
     return ""
-

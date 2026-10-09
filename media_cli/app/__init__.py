@@ -1,5 +1,5 @@
 """
-State-machine handler subpackage for allmanga-cli.
+State-machine handler subpackage for Anyplay.
 
 Each module in this package contains handler functions for a logical group
 of application states.  Every handler receives the three shared state objects

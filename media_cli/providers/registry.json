@@ -84,7 +84,7 @@
     },
     "animekhor": {
       "name": "AnimeKhor",
-      "domains": ["https://animekhor.xyz", "https://animekhor.org"],
+      "domains": ["https://animekhor.org", "https://animekhor.xyz"],
       "type": "donghua",
       "languages": ["sub"],
       "status": "active",

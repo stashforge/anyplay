@@ -1,6 +1,7 @@
 """Tests for Android playback progress tracking via local HLS proxy and resume intent dispatch."""
 
 import unittest
+import urllib.error
 from unittest.mock import MagicMock, patch
 
 from media_cli.media.local_proxy import _build_proxy_server
@@ -85,6 +86,144 @@ class TestAndroidResume(unittest.TestCase):
                 mock_save.assert_not_called()
             finally:
                 server.server_close()
+
+    def test_local_proxy_curl_cffi_fallback_serves_media_without_content_type(self):
+        """Verify curl_cffi fallback still serves media when upstream omits Content-Type."""
+        from media_cli.media import local_proxy
+
+        class FakeCffiResponse:
+            status_code = 200
+            headers = {}
+
+            def iter_content(self, chunk_size):
+                yield b"video-bytes"
+
+        class FakeCffiRequests:
+            @staticmethod
+            def request(*args, **kwargs):
+                return FakeCffiResponse()
+
+        def fake_urlopen(request, *args, **kwargs):
+            raise urllib.error.HTTPError(
+                getattr(request, "full_url", "https://cdn.example.com/video.ts"),
+                403,
+                "Forbidden",
+                {},
+                None,
+            )
+
+        initial = {
+            "/video.ts": {
+                "kind": "fetch",
+                "url": "https://cdn.example.com/video.ts",
+                "ref": "https://provider.example/watch",
+                "hdrs": {},
+                "content_type": "",
+            }
+        }
+        port, registry, register, server = _build_proxy_server(initial, timeout=5)
+        try:
+            handler = server.RequestHandlerClass
+            mock_inst = handler.__new__(handler)
+            mock_inst.path = "/video.ts"
+            mock_inst.headers = {}
+            mock_inst.wfile = MagicMock()
+            mock_inst._reject_method = MagicMock()
+            sent_headers = {}
+
+            def capture_header(key, value):
+                sent_headers[key] = value
+
+            with patch.object(mock_inst, "send_response") as send_response, \
+                    patch.object(mock_inst, "send_header", side_effect=capture_header), \
+                    patch.object(mock_inst, "end_headers"), \
+                    patch.object(local_proxy.urllib.request, "urlopen", side_effect=fake_urlopen), \
+                    patch.object(local_proxy, "CURL_CFFI_AVAILABLE", True), \
+                    patch.object(local_proxy, "cffi_requests", FakeCffiRequests):
+                mock_inst._proxy("GET")
+
+            send_response.assert_called_once_with(200)
+            self.assertEqual(sent_headers["Content-Type"], "video/MP2T")
+            mock_inst.wfile.write.assert_called_once_with(b"video-bytes")
+        finally:
+            server.server_close()
+
+    def test_local_proxy_rewrites_hls_playlist_without_entry_scope_error(self):
+        """Verify Android HLS proxy playlist rewrite does not crash while registering segments."""
+        from media_cli.media import local_proxy
+
+        class FakeHeaders(dict):
+            def get(self, key, default=None):
+                return super().get(key, default)
+
+        class FakeResponse:
+            status = 200
+            headers = FakeHeaders({"Content-Type": "application/vnd.apple.mpegurl"})
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def geturl(self):
+                return "https://cdn.example.com/master.m3u8"
+
+            def read(self, size=-1):
+                return (
+                    b"#EXTM3U\n"
+                    b"#EXT-X-TARGETDURATION:10\n"
+                    b"#EXTINF:10.0,\n"
+                    b"seg0.ts\n"
+                    b"#EXT-X-ENDLIST\n"
+                )
+
+        initial = {
+            "/master.m3u8": {
+                "kind": "fetch",
+                "url": "https://cdn.example.com/master.m3u8",
+                "ref": "https://provider.example/watch",
+                "hdrs": {},
+            }
+        }
+        port, registry, register, server = _build_proxy_server(initial, timeout=5)
+        try:
+            handler = server.RequestHandlerClass
+            mock_inst = handler.__new__(handler)
+            mock_inst.path = "/master.m3u8"
+            mock_inst.headers = {}
+            mock_inst.wfile = MagicMock()
+            mock_inst._reject_method = MagicMock()
+
+            with patch.object(mock_inst, "send_response") as send_response, \
+                    patch.object(mock_inst, "send_header"), \
+                    patch.object(mock_inst, "end_headers"), \
+                    patch.object(local_proxy.urllib.request, "urlopen", return_value=FakeResponse()):
+                mock_inst._proxy("GET")
+
+            send_response.assert_called_once_with(200)
+            body = mock_inst.wfile.write.call_args[0][0].decode("utf-8")
+            self.assertRegex(body, r"/[0-9a-f]{32}/stream\.ts")
+            self.assertNotIn("seg0.ts", body)
+        finally:
+            server.server_close()
+
+    def test_start_local_dual_proxy_accepts_flixcloud_options(self):
+        """Verify split audio proxy accepts encrypted FlixCloud HLS options from Android playback."""
+        from media_cli.media.local_proxy import start_local_dual_proxy
+
+        url, server = start_local_dual_proxy(
+            "https://cdn.example.com/video.m3u8",
+            "https://cdn.example.com/audio.m3u8",
+            "https://provider.example/watch",
+            headers={"User-Agent": "UA"},
+            flixcloud_w_payload="payload",
+            flixcloud_xor_mask=[1, 2, 3],
+        )
+        try:
+            self.assertIn("127.0.0.1", url)
+        finally:
+            server.server_close()
 
     @patch("subprocess.run")
     @patch("media_cli.playback.android.start_local_proxy")
@@ -382,5 +521,3 @@ class TestAndroidResume(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-

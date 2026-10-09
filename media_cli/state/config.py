@@ -17,6 +17,7 @@ DEFAULT_CONFIG = {
     "anilist_sort": "recent",
     "anilist_sort_reverse": False,
     "spinner": "braille",
+    "editor": "",
     "provider": "miruro",
     "title_language": "romaji",
     "aniskip": True,
@@ -154,6 +155,7 @@ def serialize_conf(config: dict) -> str:
         "# UI & Player Enhancements",
         f"cover = {'true' if _is_truthy(config.get('cover'), False) else 'false'}",
         f"spinner = {config.get('spinner', 'braille')}",
+        f"editor = {config.get('editor', '')}",
         f"aniskip = {'true' if _is_truthy(config.get('aniskip'), True) else 'false'}",
         f"auto_skip = {'true' if _is_truthy(config.get('auto_skip'), True) else 'false'}",
         "",
@@ -169,7 +171,7 @@ def serialize_conf(config: dict) -> str:
         "torrent_hydrate_top", "torrent_prefer_size", "torrent_allow_unknown_seeders",
         "auto_download_next", "auto_delete_watched", "auto_delete_buffer",
         "binge", "sync", "anilist_token", "anilist_sort", "anilist_sort_reverse",
-        "cover", "spinner", "aniskip", "auto_skip",
+        "cover", "spinner", "editor", "aniskip", "auto_skip",
         "log_max_bytes", "log_backup_count",
     }
     extra_keys = [k for k in config.keys() if k not in known and not k.startswith("_")]

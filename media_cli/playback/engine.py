@@ -129,6 +129,7 @@ def play_desktop(
     mal_id: int | None = None,
     aniskip_enabled: bool = True,
     aniskip_auto: bool = True,
+    custom_skip_intervals: list[dict] | None = None,
     start_time_override: float | None = None,
     cancel_check: Callable[[], bool] | None = None,
 ):
@@ -158,6 +159,7 @@ def play_desktop(
         mal_id=mal_id,
         aniskip_enabled=aniskip_enabled,
         aniskip_auto=aniskip_auto,
+        custom_skip_intervals=custom_skip_intervals,
         start_time_override=start_time_override,
         torrent_progress_callback=_torrent_progress,
         cancel_check=cancel_check,

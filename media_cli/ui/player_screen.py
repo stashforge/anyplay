@@ -1,5 +1,5 @@
 """
-Player-screen renderer for allmanga-cli.
+Player-screen renderer for Anyplay.
 
 Renders the in-app overlay shown while an episode is loading or playing
 through ``mpv``.  Extracted from ``app.py`` so that playback UI logic lives

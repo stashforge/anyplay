@@ -59,6 +59,21 @@ def positive_int(value):
     return value if value > 0 else None
 
 
+def has_untrusted_releasing_total(anime, available_count=None):
+    provider = str((anime or {}).get("_provider") or (anime or {}).get("provider") or "").casefold()
+    anime_type = str((anime or {}).get("type") or "").casefold()
+    status = str((anime or {}).get("status") or "").upper()
+    if "RELEASING" not in status:
+        return False
+    if provider not in {"animexin", "lucifer", "animekhor"} and anime_type != "ona":
+        return False
+    total = positive_int((anime or {}).get("episodeCount"))
+    if not total:
+        return False
+    available = positive_int(available_count)
+    return bool(available and total <= available)
+
+
 def format_ep_progress(label, progress, total, local_only=False):
     import decimal as _dec
     from .episodes import parse_episode_dual_numbers
@@ -119,7 +134,7 @@ def format_progress(anime, local_only=False, ttype="sub"):
         avail_count = None
     if avail_count is None and anime.get("_episode_ids"):
         avail_count = len(anime["_episode_ids"])
-    if total and avail_count and total < avail_count:
+    if total and avail_count and (total < avail_count or has_untrusted_releasing_total(anime, avail_count)):
         total = None
 
     local_progress = anime.get("_local_progress")
@@ -180,7 +195,7 @@ def format_progress(anime, local_only=False, ttype="sub"):
 def format_available_episodes(anime, ttype="sub", local_only=False):
     from media_cli.domain.history import history_full_episode_count
 
-    from .episodes import clean_episode_identifier, parse_episode_dual_numbers
+    from .episodes import clean_episode_identifier, extract_episode_tags, parse_episode_dual_numbers
 
     if str(anime.get("status") or "").upper() != "RELEASING":
         return ""
@@ -188,6 +203,7 @@ def format_available_episodes(anime, ttype="sub", local_only=False):
     eids = anime.get("_episode_ids") or []
     labels = anime.get("_episode_labels") or {}
     sec_tag = None
+    latest_label = ""
 
     if eids:
         first_lbl = str(labels.get(eids[0], labels.get(str(eids[0]), eids[0])))
@@ -196,6 +212,13 @@ def format_available_episodes(anime, ttype="sub", local_only=False):
         prim_l, sec_l = parse_episode_dual_numbers(last_lbl)
 
         sec_tag = sec_l
+        latest_label, _latest_tags = extract_episode_tags(last_lbl)
+        latest_label = latest_label.strip()
+        if latest_label.lower().startswith("episode "):
+            latest_label = latest_label[8:].strip()
+        elif latest_label.lower().startswith("ep "):
+            latest_label = latest_label[3:].strip()
+        latest_label = latest_label.removesuffix(" END").strip()
         try:
             int(prim_f or clean_episode_identifier(first_lbl))
             int(sec_l or prim_l or clean_episode_identifier(last_lbl))
@@ -218,9 +241,11 @@ def format_available_episodes(anime, ttype="sub", local_only=False):
             full = history_full_episode_count(entry)
             if full and available == full:
                 return ""
+        if latest_label:
+            return f"Avail {latest_label}"
         if sec_tag:
             return f"Avail {available} [{sec_tag}]"
-        if total is not None and available == total:
+        if total is not None and available == total and not has_untrusted_releasing_total(anime, available):
             return ""
         return f"Avail {available}"
 
@@ -374,8 +399,7 @@ def format_info_metadata_line(
         if not progress:
             progress = format_total_episodes(anime, ttype=ttype)
 
-        # For downloads, if we show Watched X/Y where Y is downloaded count,
-        # also show the anime's actual total episodes if available.
+        # Preserve the source total when the local download count is smaller.
         if local_only and "originalEpisodeCount" in anime:
             original_total = positive_int(anime.get("originalEpisodeCount"))
             if original_total:
@@ -703,5 +727,3 @@ def apply_provider_metadata_to_history_show(show, provider_show):
 
 
 apply_allanime_metadata_to_history_show = apply_provider_metadata_to_history_show
-
-

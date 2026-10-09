@@ -1,5 +1,5 @@
 """
-AniList menu and browse handlers for allmanga-cli.
+AniList menu and browse handlers for Anyplay.
 """
 
 from __future__ import annotations

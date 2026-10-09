@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
-"""
-allmanga-cli — Terminal anime stream player (AllAnime / AllManga)
-"""
+"""Anyplay terminal app orchestration."""
 
 import atexit
 
@@ -225,6 +223,9 @@ toggle_episode_order = storage.toggle_episode_order
 get_title_sync_preference = storage.get_title_sync_preference
 get_title_sync = storage.get_title_sync
 set_title_sync = storage.set_title_sync
+get_custom_skips = storage.get_custom_skips
+set_custom_skips = storage.set_custom_skips
+clear_custom_skips = storage.clear_custom_skips
 get_local_progress = storage.get_local_progress
 get_local_episode_label = storage.get_local_episode_label
 get_history_entry = storage.get_history_entry

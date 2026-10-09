@@ -1,6 +1,6 @@
 [project]
 name = "anyplay"
-version = "0.8.7"
+version = "0.8.8"
 description = "Terminal media stream player"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -8,6 +8,7 @@ dependencies = [
     "requests",
     "curl-cffi",
     "beautifulsoup4",
+    "pycryptodome>=3.19.0",
 ]
 
 [project.scripts]

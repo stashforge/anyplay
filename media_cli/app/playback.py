@@ -1,4 +1,4 @@
-"""Playback state handlers for allmanga-cli."""
+"""Playback state handlers for Anyplay."""
 
 from __future__ import annotations
 

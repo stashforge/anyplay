@@ -1,5 +1,5 @@
 """
-Details and Update state handlers for allmanga-cli.
+Details and update state handlers for Anyplay.
 """
 
 from __future__ import annotations
@@ -67,12 +67,22 @@ def handle_details_state(
             )
 
     if has_provider_link or _is_dl:
-        episode_ids = app_core.ensure_episode_ids(s, ttype_local)
+        episode_ids = app_core.with_loading(
+            "Loading episodes…",
+            app_core.ensure_episode_ids,
+            s,
+            ttype_local,
+        )
         if not episode_ids and _is_dl:
             episode_ids = s.get("_episode_ids") or s.get("_downloaded_episodes") or []
         if not episode_ids and ttype_local in ("dub", "sub") and not _is_dl:
             alt_ttype = "sub" if ttype_local == "dub" else "dub"
-            alt_ids = app_core.ensure_episode_ids(s, alt_ttype)
+            alt_ids = app_core.with_loading(
+                f"Checking {alt_ttype.upper()} episodes…",
+                app_core.ensure_episode_ids,
+                s,
+                alt_ttype,
+            )
             if alt_ids:
                 missing_mode = ttype_local.upper()
                 ttype_local = alt_ttype
@@ -665,6 +675,4 @@ def handle_details_state(
             return "QUIT"
 
     return "DETAILS"
-
-
 

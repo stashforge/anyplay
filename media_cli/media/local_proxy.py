@@ -437,7 +437,8 @@ def _build_proxy_server(initial_entries, timeout, show_id=None, episode=None, du
     def local_url_for(path):
         return path
 
-    def rewrite_playlist(text, base_url, ref, hdrs):
+    def rewrite_playlist(text, base_url, ref, hdrs, entry_options=None):
+        entry_options = entry_options or {}
         if text.startswith("EM3U8v1:"):
             from .decryption import decrypt_em3u8
             dec = decrypt_em3u8(text)
@@ -473,11 +474,11 @@ def _build_proxy_server(initial_entries, timeout, show_id=None, episode=None, du
                 target = line[start:end]
                 real = urllib.parse.urljoin(base, target)
                 extra = {}
-                if entry.get("flixcloud_w_payload"):
+                if entry_options.get("flixcloud_w_payload"):
                     real = _flixcloud_ensure_token(real, base_url)
                     extra = {
-                        "flixcloud_w_payload": entry.get("flixcloud_w_payload"),
-                        "flixcloud_xor_mask": entry.get("flixcloud_xor_mask"),
+                        "flixcloud_w_payload": entry_options.get("flixcloud_w_payload"),
+                        "flixcloud_xor_mask": entry_options.get("flixcloud_xor_mask"),
                     }
                 path = register(real, ref, hdrs, extra=extra)
                 line = line[:start] + local_url_for(path) + line[end:]
@@ -490,11 +491,11 @@ def _build_proxy_server(initial_entries, timeout, show_id=None, episode=None, du
 
             real = urllib.parse.urljoin(base, stripped)
             extra = {}
-            if entry.get("flixcloud_w_payload"):
+            if entry_options.get("flixcloud_w_payload"):
                 real = _flixcloud_ensure_token(real, base_url)
                 extra = {
-                    "flixcloud_w_payload": entry.get("flixcloud_w_payload"),
-                    "flixcloud_xor_mask": entry.get("flixcloud_xor_mask"),
+                    "flixcloud_w_payload": entry_options.get("flixcloud_w_payload"),
+                    "flixcloud_xor_mask": entry_options.get("flixcloud_xor_mask"),
                 }
             if pending_duration is not None:
                 path = register(real, ref, hdrs, time_offset=running_time, extra=extra)
@@ -612,7 +613,7 @@ def _build_proxy_server(initial_entries, timeout, show_id=None, episode=None, du
                     if method == "GET" and _is_playlist(url, content_type):
                         body = response.read()
                         text = body.decode("utf-8", errors="replace")
-                        rewritten = rewrite_playlist(text, url, ref, hdrs)
+                        rewritten = rewrite_playlist(text, url, ref, hdrs, entry)
                         data = rewritten.encode("utf-8")
                         try:
                             self.send_response(200)
@@ -755,7 +756,7 @@ def _build_proxy_server(initial_entries, timeout, show_id=None, episode=None, du
                                 raw_chunks.append(chunk)
                             body = b"".join(raw_chunks)
                             text = body.decode("utf-8", errors="replace")
-                            rewritten = rewrite_playlist(text, url, ref, hdrs)
+                            rewritten = rewrite_playlist(text, url, ref, hdrs, entry)
                             data = rewritten.encode("utf-8")
                             try:
                                 self.send_response(200)
@@ -851,7 +852,10 @@ def _build_proxy_server(initial_entries, timeout, show_id=None, episode=None, du
                                     content_type_sent = True
                                 self.send_header(key, value)
                             if not content_type_sent:
-                                self.send_header("Content-Type", "video/MP2T" if is_png_ts else entry.get("content_type", "video/MP2T"))
+                                self.send_header(
+                                    "Content-Type",
+                                    "video/MP2T" if (fake_header_size or should_xor) else (entry.get("content_type") or "video/MP2T"),
+                                )
                             if not has_accept_ranges and resp.status_code == 200:
                                 self.send_header("Accept-Ranges", "bytes")
                             self.send_header("Access-Control-Allow-Origin", "*")
@@ -1132,7 +1136,8 @@ def start_local_dual_proxy(
         video_url, audio_url, referer, headers=None, timeout=15,
         width=1280, height=720, bandwidth=2_400_000, title="stream",
         subtitles=None, audio_tracks=None, target_player=None,
-        show_id=None, episode=None, duration=0.0, on_progress=None):
+        show_id=None, episode=None, duration=0.0, on_progress=None,
+        flixcloud_w_payload=None, flixcloud_xor_mask=None):
     """Like start_local_proxy, but for sources that split video and audio
     into two separate HLS manifests (Dailymotion does this) with no
     combined master. Builds the master ourselves; both sub-manifests go
@@ -1156,11 +1161,19 @@ def start_local_dual_proxy(
     if not has_default and tracks_to_use:
         tracks_to_use[0]["default"] = True
 
+    media_extra = {}
+    if flixcloud_w_payload:
+        media_extra = {
+            "flixcloud_w_payload": flixcloud_w_payload,
+            "flixcloud_xor_mask": flixcloud_xor_mask,
+        }
+
     initial = {
         master_secret: {"kind": "synthetic", "text": ""},  # filled in below
         video_secret: {
             "kind": "fetch", "url": video_url, "ref": referer,
             "hdrs": dict(forwarded_headers),
+            **media_extra,
         },
     }
 
@@ -1179,6 +1192,7 @@ def start_local_dual_proxy(
         initial[a_secret] = {
             "kind": "fetch", "url": t_url, "ref": referer,
             "hdrs": dict(forwarded_headers),
+            **media_extra,
         }
         t_name = track.get("label") or track.get("name") or f"Audio {idx+1}"
         t_lang = track.get("language") or ""

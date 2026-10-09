@@ -1,5 +1,5 @@
 """
-Search and History state handlers for allmanga-cli.
+Search and history state handlers for Anyplay.
 """
 
 from __future__ import annotations
@@ -328,6 +328,23 @@ def handle_history_state(
                 return "\033[38;2;166;227;161m◆\033[0m "
         return ""
 
+    selected_history_episode_ids = {}
+
+    def _hist_select_loading_message(selected):
+        return "Checking episode list…"
+
+    def _hist_select(selected):
+        if selected is None or not (0 <= selected < len(filtered_hist)):
+            return True
+        entry = filtered_hist[selected]
+        selected_show = entry.get("show", {})
+        selected_ttype = entry.get("translation_type", "sub")
+        selected_history_episode_ids[selected] = app_core.ensure_episode_ids(
+            selected_show,
+            selected_ttype,
+        )
+        return True
+
     def _hist_prompt():
         base = f"Watch History · {history_mode}"
         if flags.incognito_mode:
@@ -356,6 +373,8 @@ def handle_history_state(
         count_total=lambda: len(hist),
         tick_fn=_hist_tick,
         item_prefix_fn=_hist_item_prefix,
+        select_fn=_hist_select,
+        select_loading_message_fn=_hist_select_loading_message,
     )
     if hidx == -2:
         return "QUIT"
@@ -372,16 +391,8 @@ def handle_history_state(
         ms.total_eps = show.get("availableEpisodes", {}).get(ttype_hist, 1)
         ms.current_ep = app_core.playback_ep_from_history_entry(h, ttype_hist)
 
-        # Only fetch fresh if catalog is not already loaded/refreshed in this instance
-        is_fresh = (
-            show.get("_episode_catalog_state") == "loaded"
-            or str(show.get("_id") or "") in _refreshed_history_ids
-            or show.get("_anilist_airing_checked_at", 0) >= _history_open_time
-            or show.get("_allanime_checked_at", 0) >= _history_open_time
-        )
-        if not is_fresh:
-            episode_ids = app_core.load_episode_ids_for_selection(show, ttype_hist)
-        else:
+        episode_ids = selected_history_episode_ids.get(hidx)
+        if episode_ids is None:
             episode_ids = app_core.ensure_episode_ids(show, ttype_hist)
 
         ms.total_eps = len(episode_ids) or ms.total_eps

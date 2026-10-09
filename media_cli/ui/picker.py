@@ -1,5 +1,5 @@
 """
-Bottom-anchored TUI picker for allmanga-cli.
+Bottom-anchored TUI picker for Anyplay.
 
 Extracted from ``app.py`` so that the picker lives with the other ``ui/``
 modules.  The only structural change is that the four ``globals()`` reads
@@ -148,6 +148,7 @@ def tui_pick(
     tick_fn=None,
     multi_select: bool = False,
     select_fn=None,
+    select_loading_message_fn=None,
     initial_selected: int = 0,
     item_prefix_fn=None,
 ):
@@ -208,6 +209,7 @@ def tui_pick(
             tick_fn=tick_fn,
             keep_cursor_hidden_on_select=keep_cursor_hidden_on_select,
             select_fn=select_fn,
+            select_loading_message_fn=select_loading_message_fn,
             disabled_indices=disabled_indices,
             item_prefix_fn=item_prefix_fn,
         )
@@ -247,6 +249,7 @@ def tui_pick(
             tick_fn=tick_fn,
             keep_cursor_hidden_on_select=keep_cursor_hidden_on_select,
             select_fn=select_fn,
+            select_loading_message_fn=select_loading_message_fn,
             disabled_indices=disabled_indices,
             item_prefix_fn=item_prefix_fn,
         )
@@ -409,7 +412,6 @@ def tui_pick(
         actual_header = cur_header
         if header_fn is not None:
             sel_idx = filt[sel] if (filt and sel < len(filt)) else -1
-            # ← was: globals()["_active_picker_query"] = query
             ui.active_picker_query = query
             actual_header = header_fn(sel_idx)
         header_lines = actual_header.splitlines() if actual_header else []
@@ -435,7 +437,6 @@ def tui_pick(
             max(4, len(header_lines)) if header_fn is not None else len(header_lines)
         )
 
-        # ← was: show_img = globals().get("SHOW_IMAGE", False)
         show_img = flags.show_image
 
         is_tmx = os.environ.get("PREFIX", "").startswith(
@@ -486,7 +487,6 @@ def tui_pick(
             poster_lines = _poster_symbol_lines(poster_raw, top_header_n, cols)
             poster_row = len(out) + 1
             poster_key = (
-                # ← was: globals().get("_hovered_show_id")
                 ui.hovered_show_id,
                 hashlib.sha256(poster_raw.encode("utf-8", errors="ignore")).hexdigest(),
                 poster_row,
@@ -676,9 +676,64 @@ def tui_pick(
             sel = initial_selected
         result = -2
 
+        def _select_loading_message(target_idx):
+            if select_loading_message_fn is None:
+                return ""
+            try:
+                return str(select_loading_message_fn(target_idx) or "")
+            except TypeError:
+                return str(select_loading_message_fn() or "")
+
+        def _run_select_with_picker_loading(target_idx, message):
+            import threading
+            from .display import _loading_line, _spinner_style
+
+            result = {}
+
+            def _runner():
+                try:
+                    result["value"] = select_fn(target_idx)
+                except BaseException as exc:
+                    result["error"] = exc
+
+            thread = threading.Thread(target=_runner, daemon=True)
+            thread.start()
+            while thread.is_alive():
+                try:
+                    size = os.get_terminal_size(tty_fd)
+                    columns, rows = size.columns, size.lines
+                except OSError:
+                    columns, rows = 80, 24
+                tty_file.write(
+                    (
+                        f"\033[{rows};1H\033[2K"
+                        f"{_loading_line(message, columns, _spinner_style)}"
+                        "\033[?25l"
+                    ).encode()
+                )
+                tty_file.flush()
+                thread.join(0.1)
+            try:
+                termios.tcflush(tty_fd, termios.TCIFLUSH)
+            except Exception:
+                pass
+            try:
+                size = os.get_terminal_size(tty_fd)
+                tty_file.write(f"\033[{size.lines};1H\033[2K\033[?25l".encode())
+                tty_file.flush()
+                invalidate_screen_row(size.lines)
+            except Exception:
+                pass
+            if "error" in result:
+                raise result["error"]
+            return bool(result.get("value"))
+
         def _can_select(target_idx):
             if select_fn is None:
                 return True
+            message = _select_loading_message(target_idx)
+            if message:
+                return _run_select_with_picker_loading(target_idx, message)
             termios.tcsetattr(tty_fd, termios.TCSADRAIN, old_attrs)
             try:
                 ok = select_fn(target_idx)

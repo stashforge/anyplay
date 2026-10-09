@@ -1,10 +1,12 @@
-"""UI Presentation Header Cards and Panels.
+"""UI presentation header cards and panels.
 
-Enforces the standardized 4-line Header Section layout contract:
-  Line 1: Primary Title Line (title_line)
-  Line 2: Alternative / Subtitle Line (alt_title_line)
-  Line 3: Metadata Badge Line (metadata_line)
-  Line 4: Navigation / Footer Line (footer_line)
+Header section terms:
+  main title line
+  alt title line
+  metadata line
+  footer line
+
+Picker screens draw the divider below this header section.
 """
 
 from __future__ import annotations
@@ -21,7 +23,7 @@ from ..domain.titles import get_display_titles, get_show_display_title
 from ..state.preferences import get_active_feedback
 from .display import _poster_footer_line
 
-# Styling constants
+# Header section colors.
 C_TITLE = "[1;97m"         # Bold White
 C_ALT = "[38;5;248m"          # Dim / Light Grey
 C_META = "[38;5;248m"         # Muted Grey for metadata
@@ -58,11 +60,11 @@ def render_header_card(
         from ..domain.metadata import prepare_show_display_state
         prepare_show_display_state(show, ttype)
 
-    # Line 1: Primary Title
+    # Main title line.
     title = main_title if main_title else get_show_display_title(show)
     line1 = f"{C_TITLE}{_t(title, width)}{C_RESET}"
 
-    # Line 2: Alternative Title (or Genres fallback)
+    # Alt title line.
     alt = get_display_titles(show, title)
     if not alt:
         genres = show.get("genres") or show.get("_provider_genres")
@@ -72,7 +74,7 @@ def render_header_card(
             alt = genres.strip().replace(", ", " • ")
     line2 = f"{C_ALT}{_t(alt, width)}{C_RESET}" if alt else f"{C_ALT}No alternative title{C_RESET}"
 
-    # Line 3: Metadata Badges
+    # Metadata line.
     meta_str = format_info_metadata_line(
         show,
         ttype,
@@ -82,7 +84,7 @@ def render_header_card(
     )
     line3 = f"{C_META}{_t(meta_str, width)}{C_RESET}"
 
-    # Line 4: Navigation / Footer Line
+    # Footer line.
     if footer_text is not None:
         line4 = _poster_footer_line(show, footer_text, width)
     else:

@@ -1,5 +1,5 @@
 """
-Background stream resolver for allmanga-cli.
+Background stream resolver for Anyplay.
 
 Manages a thread-safe pool of resolved streams for the current episode and
 drives a background worker that resolves remaining mirrors while the user

@@ -1,5 +1,5 @@
 """
-Terminal banner and episode-header printers for allmanga-cli.
+Terminal banner and episode-header printers for Anyplay.
 
 Extracted from ``app.py`` to keep cosmetic / startup output separate from
 orchestration logic.

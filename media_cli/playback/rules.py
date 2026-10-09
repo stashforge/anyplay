@@ -94,37 +94,77 @@ def playback_updates_history(
 def marked_watched_osd(ep, synced=False):
     from ..domain.episodes import clean_episode_identifier
     clean_ep = clean_episode_identifier(str(ep)) or str(ep)
-    target = " • synced to AniList" if synced else " • local only"
-    return f"EP {clean_ep} marked as watched{target}"
+    target = "synced" if synced else "saved"
+    return f"Watched EP {clean_ep} {target}"
 
 
 def sync_queued_osd(ep):
     from ..domain.episodes import clean_episode_identifier
     clean_ep = clean_episode_identifier(str(ep)) or str(ep)
-    return f"EP {clean_ep} marked as watched • AniList sync queued"
+    return f"Watched EP {clean_ep} sync queued"
 
 
 def pending_completion_osd(ep, next_ep):
     from ..domain.episodes import clean_episode_identifier
     clean_ep = clean_episode_identifier(str(ep)) or str(ep)
     clean_next = clean_episode_identifier(str(next_ep)) or str(next_ep)
-    return f"EP {clean_ep} will be marked after EP {clean_next} plays 2 min"
+    return f"EP {clean_ep} completion pending\nAfter EP {clean_next} plays 2 min"
 
 
 def episode_transition_osd(action, state):
     direction = "previous" if str(action).upper() == "PREV" else "next"
     if state == "loading":
-        return f"Loading {direction} episode..."
+        return f"Loading {direction} episode"
     if state == "starting":
         return (
-            f"{direction.capitalize()} episode is ready\n"
-            f"Starting {direction} episode..."
+            f"{direction.capitalize()} episode ready\n"
+            f"Starting {direction} episode"
         )
     if state == "ready":
-        return f"{direction.capitalize()} episode is ready"
+        return f"{direction.capitalize()} episode ready"
     if state == "failed":
-        return f"{direction.capitalize()} episode is not available"
+        return f"{direction.capitalize()} episode unavailable"
     return ""
+
+
+def next_up_osd(title, seconds_remaining, shortcut="Shift+Right"):
+    seconds = max(0, int(seconds_remaining))
+    minutes, seconds = divmod(seconds, 60)
+    return f"Next up\n{title}\n{shortcut} now • {minutes}:{seconds:02d}"
+
+
+def skipped_interval_osd(label, start, end):
+    return f"{label} skipped {start} → {end}"
+
+
+def skip_prompt_osd(label, start, end):
+    return f"[Tab] Skip {label} {start} → {end}"
+
+
+def mirror_switch_osd():
+    return "Switching mirror"
+
+
+def mirror_failed_osd(name=None):
+    if name:
+        return f"{name} failed\nTrying another mirror"
+    return "Mirror failed\nTrying another mirror"
+
+
+def mirror_loading_osd(name=None):
+    if name:
+        return f"Loading {name}"
+    return "Loading mirror"
+
+
+def playback_failed_osd(reason):
+    if reason == "ended":
+        return "Stream ended early\nTrying another mirror"
+    if reason == "timeout":
+        return "Mirror timed out\nTrying another mirror"
+    if reason == "stalled":
+        return "Stream stalled\nSwitching mirror"
+    return "Playback failed\nTrying another mirror"
 
 
 def prefetch_matches_request(prefetched_ep, requested_ep):

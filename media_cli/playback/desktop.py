@@ -23,6 +23,7 @@ def play_desktop(
         mal_id=None,
         aniskip_enabled=True,
         aniskip_auto=True,
+        custom_skip_intervals=None,
         start_time_override=None,
         torrent_progress_callback=None,
         cancel_check=None):
@@ -50,7 +51,7 @@ def play_desktop(
             if torrent_progress_callback:
                 torrent_progress_callback(str(exc))
             return ("ERROR", 0, 0, 0, 0)
-        torrent_ready_message = "Torrent buffer ready"
+        torrent_ready_message = "Torrent ready"
         stream = dict(stream)
         stream["link"] = prepared_torrent.path
         stream["type"] = "mp4"
@@ -120,7 +121,7 @@ def play_desktop(
         if start_time > 0:
             start_time = max(0, start_time - 30)
     resume_message = (
-        f"Resuming at {int(start_time // 60):02d}:"
+        f"Resume {int(start_time // 60):02d}:"
         f"{int(start_time % 60):02d}"
     )
     osd_msg = (
@@ -131,7 +132,9 @@ def play_desktop(
 
 
     skip_intervals = []
-    if aniskip_enabled and mal_id:
+    if custom_skip_intervals is not None:
+        skip_intervals = list(custom_skip_intervals or [])
+    elif aniskip_enabled and mal_id:
         try:
             from ..media.aniskip import fetch_skip_times
             ep_num = episode_progress_number(episode)

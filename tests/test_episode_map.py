@@ -3,6 +3,7 @@ import unittest
 from media_cli.domain.episodes import (
     build_episode_map,
     create_episode_entry,
+    episode_label,
     extract_episode_tags,
 )
 from media_cli.providers.shared.schema import build_catalog
@@ -46,6 +47,58 @@ class TestEpisodeMap(unittest.TestCase):
         self.assertEqual(entry["tags"], [])
         self.assertIn("92 [156]", entry["label"])
 
+    def test_create_episode_entry_preserves_provider_visible_dual_label(self):
+        entry = create_episode_entry(
+            {
+                "id": "https://luciferdonghua.in/show-season-5-episode-18-194/",
+                "label": "18 [194] [4K]",
+                "title": "Show Season 5 Episode 18 [194] English Sub",
+                "url": "https://luciferdonghua.in/show-season-5-episode-18-194/",
+            }
+        )
+
+        self.assertEqual(entry["label"], "18 [194] [4K]")
+        self.assertEqual(entry["number"], 18.0)
+        self.assertEqual(entry["display_number"], "18")
+        self.assertEqual(entry["primary_number"], "18")
+        self.assertEqual(entry["franchise_number"], "194")
+        self.assertEqual(entry["absolute_number"], "194")
+        self.assertEqual(entry["tags"], ["4K"])
+        self.assertEqual(entry["kind"], "episode")
+
+    def test_create_episode_entry_preserves_absolute_only_provider_label(self):
+        entry = create_episode_entry(
+            {
+                "id": "https://animexin.dev/show-episode-194/",
+                "label": "194",
+                "title": "Show Episode 194 Subtitle",
+                "url": "https://animexin.dev/show-episode-194/",
+            }
+        )
+
+        self.assertEqual(entry["label"], "194")
+        self.assertEqual(entry["number"], 194.0)
+        self.assertEqual(entry["display_number"], "194")
+        self.assertEqual(entry["primary_number"], "194")
+        self.assertIsNone(entry["franchise_number"])
+        self.assertIsNone(entry["absolute_number"])
+        self.assertEqual(entry["tags"], [])
+
+    def test_episode_label_returns_explicit_provider_label_unchanged(self):
+        labels = {
+            "https://animexin.dev/show-episode-194/": "194",
+            "https://lucifer/show-season-5-episode-18-194/": "18 [194] [4K]",
+        }
+
+        self.assertEqual(
+            episode_label("https://animexin.dev/show-episode-194/", labels),
+            "194",
+        )
+        self.assertEqual(
+            episode_label("https://lucifer/show-season-5-episode-18-194/", labels),
+            "18 [194] [4K]",
+        )
+
     def test_create_episode_entry_collapses_duplicate_episode_label(self):
         entry = create_episode_entry(
             {
@@ -82,6 +135,31 @@ class TestEpisodeMap(unittest.TestCase):
         self.assertEqual(by_num["42"], "https://lucifer/ep-42")
         self.assertEqual(by_num["32"], "https://lucifer/ep-32")
 
+    def test_build_episode_map_keeps_duplicate_primary_numbers_with_distinct_ids(self):
+        raw = [
+            {
+                "id": "https://lucifer/show-season-4-episode-01-153/",
+                "label": "01 [153] [4K]",
+                "url": "https://lucifer/show-season-4-episode-01-153/",
+                "title": "Show Season 4 Episode 01 [153]",
+            },
+            {
+                "id": "https://lucifer/show-season-5-episode-01-177/",
+                "label": "01 [177] [4K]",
+                "url": "https://lucifer/show-season-5-episode-01-177/",
+                "title": "Show Season 5 Episode 01 [177]",
+            },
+        ]
+
+        ep_map, by_num = build_episode_map(raw)
+
+        self.assertEqual(list(ep_map), [
+            "https://lucifer/show-season-4-episode-01-153/",
+            "https://lucifer/show-season-5-episode-01-177/",
+        ])
+        self.assertEqual(by_num["153"], "https://lucifer/show-season-4-episode-01-153/")
+        self.assertEqual(by_num["177"], "https://lucifer/show-season-5-episode-01-177/")
+
     def test_build_catalog_backwards_compatibility(self):
         raw = [
             {"id": "https://lucifer/ep-1", "label": "1 [4K]"},
@@ -97,7 +175,7 @@ class TestEpisodeMap(unittest.TestCase):
         self.assertIn("ids", catalog)
         self.assertIn("labels", catalog)
         self.assertEqual(catalog["ids"], ["https://lucifer/ep-1", "https://lucifer/ep-2"])
-        self.assertEqual(catalog["labels"]["https://lucifer/ep-1"], "Episode 1 [4K]")
+        self.assertEqual(catalog["labels"]["https://lucifer/ep-1"], "1 [4K]")
 
         # New map structures
         self.assertIn("episodes_map", catalog)

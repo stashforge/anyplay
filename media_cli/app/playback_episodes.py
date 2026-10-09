@@ -17,6 +17,7 @@ from ..domain.episodes import (
     episode_label,
 )
 from ..ui.help import picker_help
+from ..ui import loading_messages
 from ..ui.picker import tui_pick
 
 _C_HINT = "\033[38;5;244m"
@@ -60,6 +61,21 @@ def _fmt_ep(label):
     return label_str.title()
 
 
+def _episode_picker_label(label) -> str:
+    raw = str(label or "").strip()
+    if not raw:
+        return "Episode ?"
+    if re.match(r"^(?:episode|ep)\s+", raw, flags=re.I):
+        return raw
+    if re.match(r"^(?:ova|movie|special)(?:\b|$)", raw, flags=re.I):
+        return raw
+    if re.match(r"^\d+(?:\.\d+)?[.)]\s+\S", raw):
+        return raw
+    if re.match(r"^\d+(?:\.\d+)?(?:\s*(?:\[[^\]]+\]|\([^)]+\)))*$", raw):
+        return f"Episode {raw}"
+    return raw
+
+
 def _prune_missing_download_files(ms: "MachineState") -> dict:
     dl_files = getattr(ms, "_download_files", {}) or {}
     if not isinstance(dl_files, dict):
@@ -79,6 +95,68 @@ def _clear_episode_source_state(ms: MachineState) -> None:
     ms.ep_cache_key = None
     ms.ep_cache_data = None
     ms.selected_stream = None
+
+
+def _build_offline_file_lookup(show_title: str, cfg: dict | None = None) -> dict[str, str]:
+    if not show_title:
+        return {}
+    try:
+        from media_cli.core.storage import get_default_download_dir, is_valid_download_video
+        from media_cli.media.download import sanitize_filename
+    except Exception:
+        return {}
+
+    cfg = cfg or {}
+    download_dir = cfg.get("download_dir") or get_default_download_dir()
+    if not os.path.exists(download_dir):
+        return {}
+
+    show_folder = sanitize_filename(show_title)
+    full_show_path = os.path.join(download_dir, show_folder)
+    if not os.path.isdir(full_show_path):
+        full_show_path = os.path.join(download_dir, show_title)
+        if not os.path.isdir(full_show_path):
+            return {}
+
+    from media_cli.domain.episodes import clean_episode_identifier, parse_episode_dual_numbers
+
+    lookup: dict[str, str] = {}
+    ep_explicit_re = re.compile(r'\b(?:episodes?|ep)\b[-_.\s]*([^\n]+)$', re.IGNORECASE)
+    ep_fallback_re = re.compile(r'(?:^|[^\d])0*(\d+(?:\.\d+)?)(?:[^\d]|$)')
+
+    def _add_key(value, path):
+        key = str(value or "").strip()
+        if key:
+            lookup.setdefault(key, path)
+            lookup.setdefault(key.lstrip("0") or "0", path)
+
+    try:
+        for fname in sorted(os.listdir(full_show_path)):
+            full_path = os.path.join(full_show_path, fname)
+            if not is_valid_download_video(full_path):
+                continue
+            _add_key(fname, full_path)
+            stem = os.path.splitext(fname)[0]
+            _add_key(stem, full_path)
+            m_exp = ep_explicit_re.search(stem)
+            if m_exp:
+                raw_label = m_exp.group(1).strip()
+                f_prim, f_sec = parse_episode_dual_numbers(raw_label)
+                f_clean = f_prim or clean_episode_identifier(raw_label) or raw_label
+                _add_key(raw_label, full_path)
+                _add_key(f_clean, full_path)
+                _add_key(f"Episode {f_clean}", full_path)
+                if f_sec:
+                    _add_key(f_sec, full_path)
+                continue
+            m_fallback = ep_fallback_re.search(fname)
+            if m_fallback:
+                found_num = m_fallback.group(1)
+                _add_key(found_num, full_path)
+                _add_key(f"Episode {found_num}", full_path)
+    except OSError:
+        return lookup
+    return lookup
 
 
 def _augment_episode_sources_with_torrents(
@@ -179,10 +257,27 @@ def handle_episode_state(
     resolve_tracking_fn,
 ) -> str:
     show = ui.ui_show_ctx
-    episode_ids = app_core.ensure_episode_ids(show, ttype)
+
+    def _load_episode_ids(target_ttype: str) -> list[str]:
+        show_id = str((show or {}).get("_id") or (show or {}).get("id") or "")
+        provider_hint = (show or {}).get("_provider") or (show or {}).get("_provider_id")
+        has_legacy_ids = bool((show or {}).get("_episode_ids")) and not (show or {}).get("_episode_ids_ttype")
+        if has_legacy_ids and (getattr(ms, "_is_downloads", False) or not provider_hint or show_id.startswith("local:")):
+            show["_episode_ids_ttype"] = target_ttype
+        return app_core.load_episode_ids_for_selection(show, target_ttype)
+
+    episode_ids = app_core.with_loading(
+        loading_messages.episode_indexing(),
+        _load_episode_ids,
+        ttype,
+    )
     if not episode_ids and ttype in ("dub", "sub"):
         alt_ttype = "sub" if ttype == "dub" else "dub"
-        alt_ids = app_core.ensure_episode_ids(show, alt_ttype)
+        alt_ids = app_core.with_loading(
+            f"Checking {alt_ttype.upper()} episodes…",
+            _load_episode_ids,
+            alt_ttype,
+        )
         if alt_ids:
             p_name = (show.get("_provider_name") or (show.get("_provider") or "").title() or "provider") if show else "provider"
             missing_mode = ttype.upper()
@@ -208,19 +303,16 @@ def handle_episode_state(
     if app_core.get_episode_order(ms.show_id, cfg.get("episode_order", "asc")) == "desc":
         display_order.reverse()
     deleted_download_keys: set[str] = set()
+    offline_files = _build_offline_file_lookup(
+        ms.show_title or (show.get("name", "") if show else ""),
+        cfg,
+    )
 
     def _has_any_downloaded_episode() -> bool:
         dl_files = _prune_missing_download_files(ms)
         if dl_files:
             return True
-        return any(
-            app_core.find_offline_file_for_episode(
-                ms.show_title or (show.get("name", "") if show else ""),
-                episode_label(eid, episode_labels),
-                cfg,
-            )
-            for eid in episode_ids
-        )
+        return bool(offline_files)
 
     def _download_identity_keys(eid, lbl) -> set[str]:
         from ..domain.episodes import clean_episode_identifier, parse_episode_dual_numbers
@@ -269,13 +361,15 @@ def handle_episode_state(
             kc = (kp or clean_episode_identifier(str(k)) or str(k)).lstrip("0") or "0"
             if kc == clean or (clean_eid_num and kc == clean_eid_num) or (sec and sec == ks):
                 return True
-        f = app_core.find_offline_file_for_episode(ms.show_title or (show.get("name", "") if show else ""), lbl, cfg)
-        if f:
-            return True
+        lookup_keys = {str(eid), str(lbl), clean}
+        if clean_eid_num:
+            lookup_keys.add(clean_eid_num)
         if prim:
-            f = app_core.find_offline_file_for_episode(ms.show_title or (show.get("name", "") if show else ""), prim, cfg)
-            if f:
-                return True
+            lookup_keys.add(str(prim))
+        if sec:
+            lookup_keys.add(str(sec))
+        if any(key in offline_files for key in lookup_keys):
+            return True
         return False
 
     def _is_ep_watched(eid, lbl, orig_idx=None):
@@ -356,16 +450,17 @@ def handle_episode_state(
 
         eid = episode_ids[orig_i]
         lbl = episode_label(eid, episode_labels)
+        display_lbl = _episode_picker_label(lbl)
         is_dl = _is_ep_downloaded(eid, lbl)
         is_w = _is_ep_watched(eid, lbl, orig_i)
         if is_w:
             if is_dl:
-                return f"\033[38;5;244m{lbl}  \033[38;2;166;227;161m✔\033[0m"
-            return f"\033[38;5;244m{lbl}\033[0m"
+                return f"\033[38;5;244m{display_lbl}  \033[38;2;166;227;161m✔\033[0m"
+            return f"\033[38;5;244m{display_lbl}\033[0m"
         else:
             if is_dl:
-                return f"{lbl}  \033[38;2;166;227;161m✔\033[0m"
-            return f"{lbl}"
+                return f"{display_lbl}  \033[38;2;166;227;161m✔\033[0m"
+            return f"{display_lbl}"
 
     def _compute_disabled_indices():
         return set()
@@ -397,7 +492,16 @@ def handle_episode_state(
                     return "ready to watch"
                 return ""
 
-    ep_opts = [_build_ep_option(i) for i in display_order]
+    def _build_ep_options():
+        return [_build_ep_option(i) for i in display_order]
+
+    if len(display_order) > 80:
+        ep_opts = app_core.with_loading(
+            loading_messages.episode_indexing(len(display_order)),
+            _build_ep_options,
+        )
+    else:
+        ep_opts = _build_ep_options()
     disabled_indices = _compute_disabled_indices()
 
     _hdr_cache: dict[tuple, str] = {}
@@ -545,7 +649,12 @@ def handle_episode_state(
             idx = 0
         else:
             direct_single = ui.ep_prev_state == "SEARCH" and len(ms.shows) <= 1 and ms.just_searched
-            has_delete_actions = _has_any_downloaded_episode()
+            if len(display_order) > 80:
+                has_delete_actions = app_core.with_loading(
+                    loading_messages.local_file_scan(), _has_any_downloaded_episode
+                )
+            else:
+                has_delete_actions = _has_any_downloaded_episode()
             hd6 = picker_help(
                 "Play episode",
                 "New search" if direct_single else "Go back",

@@ -1025,7 +1025,7 @@ def test_playback_episodes_allows_deleting_downloaded_episode_outside_downloads_
     assert "Del=Delete" in captured_header_fn(2)
 
 
-def test_playback_player_rolling_deletion():
+def test_playback_player_rolling_deletion(tmp_path):
     from media_cli.context import CliFlags, UiState, MachineState
     from media_cli.app.playback_player import handle_play_state
     import argparse
@@ -1041,11 +1041,12 @@ def test_playback_player_rolling_deletion():
     ms.total_eps = 3
     ms.auto_delete_watched = True
     ms.auto_delete_buffer = 1
-    ms._download_files = {
-        "1": "/path/to/ep1.mp4",
-        "2": "/path/to/ep2.mp4",
-        "3": "/path/to/ep3.mp4",
-    }
+    ep_files = {}
+    for ep in ("1", "2", "3"):
+        path = tmp_path / f"Slime S4 - Episode {ep}.mp4"
+        path.write_bytes(b"\0" * 2048)
+        ep_files[ep] = str(path)
+    ms._download_files = ep_files
 
     show = {
         "_id": "slime-s4",

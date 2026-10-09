@@ -22,6 +22,9 @@ from ..domain.titles import get_show_display_title
 from ..domain.tracking import tracking_status_for_progress
 from ..playback.rules import (
     marked_watched_osd,
+    mirror_failed_osd,
+    mirror_loading_osd,
+    mirror_switch_osd,
     pending_completion_osd,
     playback_looks_complete,
     playback_updates_history,
@@ -216,6 +219,63 @@ def _auto_delete_watched_downloads(show_ctx, episode_ids, ttype, cfg, ms) -> lis
             f"Auto-deleted watched EP {', '.join(deleted_labels)}"
         )
     return deleted_labels
+
+
+def _valid_local_download_path(path: str | None) -> str | None:
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        from ..core.storage import is_valid_download_video
+        if not is_valid_download_video(path):
+            return None
+    except Exception:
+        return None
+    return path
+
+
+def _local_stream_for_episode(show_ctx, show_title, episode, ttype, cfg, ms):
+    label = playback_mod._display_episode_label(show_ctx or {}, episode, ttype)
+    dl_files = getattr(ms, "_download_files", {}) or {}
+    lookup_keys = [str(episode), str(label)]
+    clean_label = clean_episode_identifier(str(label))
+    if clean_label:
+        lookup_keys.append(str(clean_label))
+
+    for key in lookup_keys:
+        filepath = _valid_local_download_path(dl_files.get(key))
+        if filepath:
+            return (
+                {"link": filepath, "resolution": "Offline (Local)", "is_local": True},
+                "Local File",
+                {"is_local": True, "filepath": filepath},
+                [],
+            )
+
+    title_candidates = [
+        (show_ctx or {}).get("_folder_name"),
+        show_title,
+        (show_ctx or {}).get("name"),
+    ]
+    seen_titles = set()
+    for title in title_candidates:
+        if not title or title in seen_titles:
+            continue
+        seen_titles.add(title)
+        for ep_key in lookup_keys:
+            filepath = app_core.find_offline_file_for_episode(str(title), ep_key, cfg)
+            filepath = _valid_local_download_path(filepath)
+            if filepath:
+                if isinstance(dl_files, dict):
+                    for key in lookup_keys:
+                        dl_files[str(key)] = filepath
+                    ms._download_files = dl_files
+                return (
+                    {"link": filepath, "resolution": "Offline (Local)", "is_local": True},
+                    "Local File",
+                    {"is_local": True, "filepath": filepath},
+                    [],
+                )
+    return None
 
 
 def handle_play_state(
@@ -415,18 +475,16 @@ def handle_play_state(
         if ms.selected_stream is None:
             _ipc_player = app_core._ipc_player
             target_quality = getattr(args, "quality", None) or cfg.get("quality", "best")
-            if getattr(ms, "_is_downloads", False) and not is_download_mode:
-                filepath = ms._download_files.get(str(ms.current_ep))
-                if filepath:
-                    res = ({"link": filepath, "resolution": "Local", "is_local": True}, "Local File", {"is_local": True, "filepath": filepath}, [])
+            res = None
+            if not getattr(args, 'download', False) and not getattr(args, 'sources', False):
+                res = _local_stream_for_episode(ui.ui_show_ctx, ms.show_title, ms.current_ep, ttype, cfg, ms)
+                if res:
                     ms.selected_stream = res[0]
                     first_source_name = "Local File"
-                else:
+
+            if not res:
+                if getattr(ms, "_is_downloads", False) and not is_download_mode:
                     res = None
-            else:
-                local_file = app_core.find_offline_file_for_episode(ms.show_title, ms.current_ep, cfg) if not getattr(args, 'download', False) and not getattr(args, 'sources', False) else None
-                if local_file and os.path.exists(local_file):
-                    res = ({"link": local_file, "resolution": "Offline (Local)", "is_local": True}, "Local File", {"is_local": True, "filepath": local_file}, [])
                 elif str(_ipc_player.prefetched_ep) == str(ms.current_ep) and _ipc_player.prefetched_res:
                     res = _ipc_player.prefetched_res
                     _ipc_player.prefetched_ep = None
@@ -602,7 +660,27 @@ def handle_play_state(
                 action_show = ui.ui_show_ctx or {}
                 mal_id = app_core.get_show_mal_id(action_show)
                 ep_num = episode_progress_number(ms.current_ep)
-                if mal_id:
+                from ..media import custom_skips as custom_skip_mod
+                custom_skip = None
+                title_keys = custom_skip_mod.stable_title_keys(action_show, ms.show_id)
+                disabled_custom = any(str(key) in getattr(ms, "custom_skip_disabled_titles", set()) for key in title_keys)
+                if not disabled_custom:
+                    custom_skip = custom_skip_mod.resolve_custom_skips(
+                        show=action_show,
+                        fallback_show_id=ms.show_id,
+                        provider_id=provider_id,
+                        session_store=getattr(ms, "custom_skip_sessions", {}),
+                        saved_entries=app_core.get_custom_skips(action_show, ms.show_id),
+                    )
+                if custom_skip:
+                    from ..ui.player_screen import _fmt_time
+                    skip_parts = []
+                    for s in custom_skip["intervals"]:
+                        end = "end" if s.get("end") is None else _fmt_time(s["end"])
+                        skip_parts.append(f"{s.get('label', 'Skip')} ({_fmt_time(s['start'])} → {end})")
+                    skip_summary = " · ".join(skip_parts)
+                    skip_msg = f"\033[38;5;120m✔ Custom Skips ({custom_skip['mode']}): {skip_summary}\033[0m"
+                elif mal_id:
                     if aniskip_future is not None:
                         try:
                             skips = aniskip_future.result(timeout=4.0)
@@ -1016,10 +1094,12 @@ def handle_play_state(
             app_core._ipc_player.prefetched_ep_id = str(target_ep)
         except Exception:
             pass
+
+        local_res = _local_stream_for_episode(ui.ui_show_ctx, ms.show_title, target_ep, ttype, cfg, ms)
+        if local_res:
+            return local_res
+
         if getattr(ms, "_is_downloads", False):
-            filepath = ms._download_files.get(str(target_ep))
-            if filepath:
-                return ({"link": filepath, "resolution": "Local", "is_local": True}, "Local File", {"is_local": True, "filepath": filepath}, [])
             return None
 
         if aniskip_enabled and mal_id:
@@ -1047,6 +1127,7 @@ def handle_play_state(
         )
 
     is_binge = args.binge or cfg.get("binge", False)
+    custom_skip_intervals = None
 
     if app_core.is_termux():
         player = args.player or cfg.get("player")
@@ -1072,6 +1153,19 @@ def handle_play_state(
 
         action_show = ui.ui_show_ctx or {}
         mal_id = app_core.get_show_mal_id(action_show)
+        from ..media import custom_skips as custom_skip_mod
+        custom_skip = None
+        title_keys = custom_skip_mod.stable_title_keys(action_show, ms.show_id)
+        disabled_custom = any(str(key) in getattr(ms, "custom_skip_disabled_titles", set()) for key in title_keys)
+        if not disabled_custom:
+            custom_skip = custom_skip_mod.resolve_custom_skips(
+                show=action_show,
+                fallback_show_id=ms.show_id,
+                provider_id=provider_id,
+                session_store=getattr(ms, "custom_skip_sessions", {}),
+                saved_entries=app_core.get_custom_skips(action_show, ms.show_id),
+            )
+        custom_skip_intervals = custom_skip["intervals"] if custom_skip else None
 
         trigger_background_auto_download(action_show, ms.current_ep_index, episode_ids, ttype, cfg, ms)
 
@@ -1137,6 +1231,15 @@ def handle_play_state(
 
         action_show = ui.ui_show_ctx or {}
         mal_id = app_core.get_show_mal_id(action_show)
+        from ..media import custom_skips as custom_skip_mod
+        custom_skip = custom_skip_mod.resolve_custom_skips(
+            show=action_show,
+            fallback_show_id=ms.show_id,
+            provider_id=provider_id,
+            session_store=getattr(ms, "custom_skip_sessions", {}),
+            saved_entries=app_core.get_custom_skips(action_show, ms.show_id),
+        )
+        custom_skip_intervals = custom_skip["intervals"] if custom_skip else None
 
         trigger_background_auto_download(action_show, ms.current_ep_index, episode_ids, ttype, cfg, ms)
 
@@ -1154,6 +1257,7 @@ def handle_play_state(
             ms.total_eps, is_binge, ms.show_id, ms.pending_osd_msg,
             ms.current_ep_index, next_episode,
             mal_id=mal_id, aniskip_enabled=aniskip_enabled, aniskip_auto=aniskip_auto,
+            custom_skip_intervals=custom_skip_intervals,
             start_time_override=start_time_override,
             cancel_check=cancel_check,
         )
@@ -1180,10 +1284,10 @@ def handle_play_state(
 
             if is_manual_switch:
                 app_core.info(f"Switching from '{failed_name}' to next mirror...")
-                app_core._ipc_player.send_cmd("show-text", "Switching to next mirror...", 3000)
+                app_core._ipc_player.send_cmd("show-text", mirror_switch_osd(), 3000)
             else:
                 app_core.warn(f"Playback failed on '{failed_name}'. Attempting fallback to next mirror...")
-                app_core._ipc_player.send_cmd("show-text", f"⚠ {failed_name} failed\nFinding alternate mirror...", 10000)
+                app_core._ipc_player.send_cmd("show-text", mirror_failed_osd(failed_name), 10000)
 
             # Preserve playback position so fallback mirror resumes right where the stream stalled/switched
             if time_pos > 2:
@@ -1267,12 +1371,12 @@ def handle_play_state(
                 next_name = next_stream.get("source_name", "alternate mirror")
                 if is_manual_switch:
                     switch_msg = f"Switched from {failed_name} • Loading mirror '{next_name}'..."
-                    ms.pending_osd_msg = f"Switched to {next_name}"
-                    app_core._ipc_player.send_cmd("show-text", f"Loading {next_name}...", 3000)
+                    ms.pending_osd_msg = mirror_loading_osd(next_name)
+                    app_core._ipc_player.send_cmd("show-text", mirror_loading_osd(next_name), 3000)
                 else:
                     switch_msg = f"Playback failed on {failed_name} • Trying fallback mirror '{next_name}'..."
-                    ms.pending_osd_msg = f"⚠ Switched to {next_name} ({failed_name} failed)"
-                    app_core._ipc_player.send_cmd("show-text", f"⚠ {failed_name} failed\nLoading {next_name}...", 5000)
+                    ms.pending_osd_msg = f"{failed_name} failed\n{mirror_loading_osd(next_name)}"
+                    app_core._ipc_player.send_cmd("show-text", ms.pending_osd_msg, 5000)
                 app_core.info(switch_msg)
                 ms.selected_stream = next_stream
                 app_core.set_action_feedback(ui.ui_show_ctx, switch_msg)

@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.9"
 resolution-markers = [
     "python_full_version >= '3.10'",
@@ -8,13 +8,14 @@ resolution-markers = [
 ]
 
 [[package]]
-name = "allmanga-cli"
-version = "0.8.7"
+name = "anyplay"
+version = "0.8.8"
 source = { editable = "." }
 dependencies = [
     { name = "beautifulsoup4" },
     { name = "curl-cffi", version = "0.13.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
     { name = "curl-cffi", version = "0.16.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
+    { name = "pycryptodome" },
     { name = "requests", version = "2.32.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
     { name = "requests", version = "2.34.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
 ]
@@ -41,6 +42,7 @@ requires-dist = [
     { name = "cryptography", marker = "extra == 'allanime'", specifier = ">=41.0.0" },
     { name = "curl-cffi" },
     { name = "curl-cffi", marker = "extra == 'miruro'", specifier = ">=0.7.4" },
+    { name = "pycryptodome", specifier = ">=3.19.0" },
     { name = "pycryptodome", marker = "extra == 'allanime-termux'", specifier = ">=3.19.0" },
     { name = "pycryptodome", marker = "extra == 'crypto-termux'", specifier = ">=3.19.0" },
     { name = "requests" },

@@ -60,7 +60,7 @@ def fetch_skip_times(
 
     req = urllib.request.Request(
         url,
-        headers={"User-Agent": "allmanga-cli/1.0", "Accept": "application/json"},
+        headers={"User-Agent": "anyplay/0.8.8", "Accept": "application/json"},
     )
 
     results = []
@@ -157,6 +157,8 @@ def generate_chapters_file(skip_intervals: list[dict], filepath: str) -> str:
     curr = 0.0
     for item in intervals:
         start = max(0.0, float(item["start"]))
+        if item.get("end") is None:
+            continue
         end = max(start, float(item["end"]))
         label = item.get("label", "Chapter")
         if start > curr:

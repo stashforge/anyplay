@@ -1,230 +1,297 @@
-# anyplay
+# Anyplay
 
-A modern, lightning-fast terminal media browser, player, and downloader with AniList sync, multi-track subtitle HLS proxying, and Android/Termux support.
+Anyplay is a terminal app for finding, watching, and downloading anime and other media from multiple providers.
 
----
+It is built for people who like a fast keyboard-first workflow. Search a title, pick an episode, choose a mirror if you want, and play it in your video player. It also keeps local history, resume time, downloads, custom skip data, AniSkip chapters, and provider preferences.
 
-## Features
+## What It Can Do
 
-- **Headless Stream Scraping**: Fetches video streams from multiple anime and media providers directly in the terminal without requiring a browser or webview.
-- **Multi-Track HLS Subtitle Streaming**: Built-in RFC 8216 HLS Master Manifest generator and multi-threaded proxy. Seamlessly injects multi-language WebVTT subtitle tracks (`#EXT-X-MEDIA:TYPE=SUBTITLES`) across desktop `mpv` and mobile players (Next Player, MPV Android, VLC).
-- **Unified Show Dashboard**: Modern, interactive terminal dashboard displaying AniList metadata, cover art, scores, episode counts, watched indicators, and resume playback timestamps.
-- **Resume & Timestamp Playback**: Automatically saves exact watch progress per episode. Resume seamlessly from your last timestamp with a single keystroke.
-- **Android & Termux Ready**: Natively launches external Android video players (`Next Player`, `MPV Android`, `MPV-Rex`, `VLC`) via `am start` intents with custom episode titles, header forwarding, and local proxying.
-- **Interactive Multi-Download System**:
-  - Download single episodes, custom ranges (e.g. `1-12`), selected episodes, or entire seasons.
-  - Supports `aria2c`, `yt-dlp`, `ffmpeg`, and native `hls-fetch`.
-- **Offline Library Management**: Browse and play downloaded episodes offline via `anyplay downloads`, with progress tracking and AniList metadata matching.
-- **AniList Sync & AniSkip**:
-  - Automatic watch history synchronization with AniList via OAuth (`--login`).
-  - Automatic opening and ending skip markers generation for `mpv` (`--aniskip`).
-- **Provider Mirror Fallbacks**: Smart stream ranker prioritizing fast, reliable CDN mirrors and falling back automatically if an embed fails.
+- Search across streaming providers from one CLI.
+- Play episodes with `mpv` on desktop.
+- Launch Android players from Termux, including Next Player, VLC, MPV Android, MPV-Rex, and related players.
+- Pick mirrors and qualities when a provider has more than one source.
+- Resume the last watched episode and timestamp.
+- Download episodes with `aria2c`, `yt-dlp`, `ffmpeg`, or the built-in HLS downloader.
+- Browse downloaded episodes offline.
+- Sync progress with AniList when you enable it.
+- Use AniSkip or your own custom opening and ending skips.
+- Fall back to torrents when normal mirrors are missing, if torrent fallback is enabled.
 
----
+## Install
 
-## Supported Providers
-
-| Provider Command | Description | Multi-Subtitles | Dub Support |
-| :--- | :--- | :---: | :---: |
-| `anyplay anikoto` | Anikoto (MegaPlay / fast 1080p CDN) | Yes | Yes |
-| `anyplay miruro` | Miruro (Multi-server anime scraper) | Yes | Yes |
-| `anyplay allanime` | AllAnime (Extensive anime catalog) | Yes | Yes |
-| `anyplay animexin` | AnimeXin (Asian anime & Donghua) | Yes | No |
-| `anyplay animegg` | AnimeGG (Multiple streaming mirrors) | Yes | Yes |
-| `anyplay anizone` | AniZone (Direct video streams) | Yes | Yes |
-| `anyplay movies` | Movies & TV Series provider | Yes | Yes |
-
-*Run `anyplay [query]` directly to search using your default provider.*
-
----
-
-## Installation
-
-### Option 1: pipx (Recommended for Linux / macOS)
-
-`pipx` installs `anyplay` in an isolated environment and exposes it globally:
+The recommended install method is `pipx`.
 
 ```bash
-# Clone the repository
-git clone https://github.com/stashforge/allmanga-cli.git
-cd allmanga-cli
-
-# Install globally with optional dependencies
-pipx install .[allanime,miruro]
+git clone https://github.com/stashforge/anyplay.git
+cd anyplay
+pipx install .
 ```
 
-### Option 2: Termux (Android)
+For development, install it editable:
 
 ```bash
-# Update packages and install python + mpv
-pkg update && pkg install python git mpv-android ffmpeg
-
-# Clone and install
-git clone https://github.com/stashforge/allmanga-cli.git
-cd allmanga-cli
-pip install .[allanime-termux]
+git clone https://github.com/stashforge/anyplay.git
+cd anyplay
+pipx install -e .
 ```
 
-### Option 3: Standard Virtual Environment (`venv`)
+On Termux:
 
 ```bash
-git clone https://github.com/stashforge/allmanga-cli.git
-cd allmanga-cli
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-pip install .[allanime,miruro]
+pkg update
+pkg install python git ffmpeg
+git clone https://github.com/stashforge/anyplay.git
+cd anyplay
+pipx install -e .
 ```
 
----
+You also need a player. On desktop, `mpv` is the main target. On Android, install one of the supported external players.
 
-## Usage Guide
+## Quick Start
 
-### Basic Search & Stream
+Search for a title:
 
 ```bash
-# Search using default provider
-anyplay "Frieren"
-
-# Search using a specific provider
-anyplay anikoto "Jujutsu Kaisen"
-anyplay miruro "Solo Leveling"
-anyplay allanime "One Piece"
+anyplay search "grand blue"
 ```
 
-### Direct Episode & Quality Selection
+Search with a specific provider:
 
 ```bash
-# Jump directly to Episode 5 in 1080p English Sub
-anyplay anikoto "Bleach" -e 5 -q 1080p -t sub
-
-# Binge watch continuously (auto-plays next episode)
-anyplay anikoto "Chainsaw Man" -e 1 --binge
-
-# Choose stream quality and mirrors interactively
-anyplay anikoto "Naruto" -e 1 --sources
+anyplay anikoto search "grand blue"
+anyplay anizone search "grand blue"
+anyplay animexin search "martial master"
 ```
 
-### Downloading Episodes
+Open your watch history:
 
 ```bash
-# Interactive download menu (Single, Range, Selection, All)
-anyplay anikoto "DanDaDan" -e 1 --download
-
-# Use a specific downloader (e.g. aria2c or yt-dlp)
-anyplay anikoto "Attack on Titan" -e 1 --download --downloader aria2c
+anyplay history
 ```
 
-### Managing Offline Downloads
+Continue where you left off:
 
 ```bash
-# Open the interactive offline library
+anyplay continue
+```
+
+Open downloaded episodes:
+
+```bash
 anyplay downloads
 ```
 
-### AniList Integration & Skipping
+## Useful Commands
+
+Play a specific episode:
 
 ```bash
-# Authenticate your AniList account
-anyplay --login
-
-# Enable AniSkip opening/ending markers
-anyplay anikoto "Death Note" -e 1 --aniskip
+anyplay search "frieren" -e 5
 ```
 
-### Extracting & Printing URLs
+Prefer dub:
 
 ```bash
-# Print stream master M3U8, referer headers, and all subtitle tracks
-anyplay anikoto search "Slime" -e 1 --print-url
+anyplay search "solo leveling" --dub
 ```
 
----
-
-## Shell Completions
-
-`anyplay` provides tab completion for Bash, Zsh, and Fish:
+Choose a quality:
 
 ```bash
-# Auto-detect shell and install completions
-anyplay completion --install
+anyplay search "one piece" -e 1000 -q 1080p
+```
 
-# Or generate completions manually:
+Show mirrors before playing:
+
+```bash
+anyplay search "dandadan" -e 1 --sources
+```
+
+Download an episode:
+
+```bash
+anyplay search "bleach" -e 1 --download
+```
+
+Use a custom download folder:
+
+```bash
+anyplay search "bleach" -e 1 --download --download-dir ~/Videos/anyplay
+```
+
+Show available providers:
+
+```bash
+anyplay providers
+```
+
+Print recent diagnostic logs:
+
+```bash
+anyplay logs --tail 80
+```
+
+## Providers
+
+Run this command to see the providers available in your build:
+
+```bash
+anyplay providers
+```
+
+Current provider IDs include:
+
+- `anikoto`
+- `animegg`
+- `animekhor`
+- `animepahe`
+- `anidb`
+- `anizone`
+- `animexin`
+- `lucifer`
+- `miruro`
+- `mkissa`
+- `reanime`
+- `senshi`
+- `torrent`
+- `movies`
+
+You can set your default provider in the config file, and you can disable providers you do not want to see.
+
+## Configuration
+
+Open the config file:
+
+```bash
+anyplay config
+```
+
+Use a specific editor:
+
+```bash
+anyplay config --editor micro
+```
+
+Read or change one value:
+
+```bash
+anyplay config get quality
+anyplay config set quality 1080p
+anyplay config set provider miruro
+anyplay config set player mpv
+```
+
+The config file lives here:
+
+```text
+~/.config/anyplay/config.conf
+```
+
+Common options:
+
+```ini
+quality = 1080p
+translation_type = sub
+player = mpv
+provider = miruro
+title_language = romaji
+disabled_providers =
+download_dir =
+auto_download_next = false
+auto_delete_watched = false
+torrent_fallback = true
+aniskip = true
+auto_skip = true
+editor =
+```
+
+Anyplay keeps old valid values when it adds new config keys. If a key is missing, it writes the default value back into the config file.
+
+## Downloads
+
+The downloads screen is a small download manager. It can queue episodes, show progress, retry failed items, and play finished files.
+
+Open it with:
+
+```bash
+anyplay downloads
+```
+
+Inside the downloads screen you can:
+
+- Pause or resume downloads.
+- Retry failed downloads.
+- Open logs for a selected item.
+- Play downloaded episodes.
+- Turn session auto-download and auto-delete options on or off.
+
+## AniList
+
+Log in:
+
+```bash
+anyplay auth login
+```
+
+Check login status:
+
+```bash
+anyplay auth status
+```
+
+Browse your AniList lists:
+
+```bash
+anyplay anilist
+anyplay anilist watching
+anyplay anilist completed
+```
+
+AniList sync is optional. You can keep Anyplay fully local if you prefer.
+
+## Skips
+
+Anyplay supports two kinds of skips:
+
+- AniSkip data, when the title has matching public skip data.
+- Custom skips, when you want to add your own opening or ending ranges.
+
+Custom skips can be session-only or saved per title. Provider filters are supported, so a skip can apply to all providers or only some providers.
+
+## Shell Completion
+
+Generate completion scripts:
+
+```bash
 anyplay completion bash
 anyplay completion zsh
 anyplay completion fish
 ```
 
----
+Install completion:
 
-## CLI Options Reference
-
-```text
-anyplay [provider] [search_query] [options]
-
-Positional Arguments:
-  provider              Optional provider: anikoto, miruro, allanime, animexin, animegg, anizone, movies
-  query                 Title of the anime or show to search
-
-Playback & Episode Options:
-  -e, --episode NUM     Episode identifier (e.g., 1, 12, "OVA 1")
-  -q, --quality QUALITY Video quality: best, 1080p, 720p, 480p, worst
-  -t, --translation TYPE Audio language type: sub, dub
-  -b, --binge           Enable continuous binge watching
-  -p, --player PLAYER   Video player: mpv, rex, mpvrx, next, vlc
-  --sources             Prompt interactively to choose stream mirror
-  --aniskip             Enable AniSkip opening & ending chapter markers
-  --print-url           Print stream links, subtitle tracks, and referer headers
-
-Download Options:
-  -d, --download        Download episode(s) instead of playing
-  --downloader TOOL     Downloader engine: auto, aria2c, yt-dlp, ffmpeg, hls-fetch
-
-Account & Library:
-  --login               Log in with AniList OAuth
-  downloads             Launch offline download library browser
-  config                Open config file in $EDITOR or manage key/values
-  completion            Generate or install shell completion scripts
-
-Diagnostics:
-  -v, --version         Show program version
-  --debug               Enable debug logs and stack trace capture
-```
-
----
-
-## Configuration (`config.conf`)
-
-Configuration is stored at `~/.config/anyplay/config.conf`:
-
-```ini
-provider = anikoto
-quality = 1080p
-translation_type = sub
-binge = false
-player = mpv
-download_dir = ~/Downloads/anyplay
-downloader = auto
-aniskip = true
-auto_track = true
-cover = true
-anilist_token =
-anilist_sort = recent
-spinner = braille
-```
-
-Manage configuration directly from the CLI:
 ```bash
-# Open configuration in your default editor ($EDITOR or nano/vim)
-anyplay config
-anyplay config -e micro
-
-# Get or set individual configuration values
-anyplay config get quality
-anyplay config set quality 1080p
+anyplay completion install bash
 ```
 
----
+## Troubleshooting
+
+If something fails, run with debug logging:
+
+```bash
+anyplay search "title" --debug
+```
+
+Then inspect recent logs:
+
+```bash
+anyplay logs --tail 120
+```
+
+For playback issues, check the selected mirror first. Some providers return mirrors that are slow, region-limited, or temporarily broken. Switching mirrors usually helps.
+
+For Termux, make sure your player app is installed and that Termux can launch Android intents. If a provider works on desktop but not on Android, run with `--debug` and check the logs.
 
 ## License
 
-Distributed under the MIT License. See `LICENSE` for more information.
+MIT License. See `LICENSE` for details.

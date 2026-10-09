@@ -140,7 +140,7 @@ def search_mal(query: str) -> dict:
     logger.debug("Attempting MAL search for '%s'", query)
     encoded_query = urllib.parse.quote(query)
     url = MAL_API_ENDPOINT.format(query=encoded_query)
-    req = urllib.request.Request(url, headers={"User-Agent": "allmanga-cli"})
+    req = urllib.request.Request(url, headers={"User-Agent": "anyplay"})
     with urllib.request.urlopen(req, timeout=10) as response:
         mal_data = json.loads(response.read().decode("utf-8"))
 
@@ -154,7 +154,7 @@ def search_mal(query: str) -> dict:
         try:
             ms_req = urllib.request.Request(
                 f"https://api.malsync.moe/mal/anime/{mal_id}",
-                headers={"User-Agent": "allmanga-cli"},
+                headers={"User-Agent": "anyplay"},
             )
             with urllib.request.urlopen(ms_req, timeout=5) as m_res:
                 ms_data = json.loads(m_res.read().decode("utf-8"))
@@ -258,5 +258,4 @@ def search_anilist_with_fallback(
     except Exception as e:
         logger.debug("MAL fallback failed: %s", e)
         raise SearchFailure("API Error: AniList and fallback search providers are currently unavailable.") from e
-
 

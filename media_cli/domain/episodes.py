@@ -150,8 +150,9 @@ def episode_label(episode_id, labels=None):
     label = ""
     if labels:
         label = str(labels.get(str(episode_id)) or "").strip()
-    if not label:
-        label = clean_episode_identifier(str(episode_id or ""))
+        if label:
+            return label
+    label = clean_episode_identifier(str(episode_id or ""))
     label = label or str(episode_id or "")
     lowered = label.casefold()
     if lowered.startswith(("episode ", "ep ", "part ", "ova", "movie", "special")):
@@ -456,6 +457,7 @@ def create_episode_entry(
         raw_title = str(title or item.get("title") or "").strip()
         ttype = str(translation_type or item.get("translationType") or "sub").strip().lower()
         season_val = int(item.get("season") or season or 1)
+        preserve_provider_label = bool(raw_label and (raw_url or raw_title))
     else:
         raw_id = str(episode_id or item or "").strip()
         raw_label = str(label or raw_id).strip()
@@ -463,6 +465,7 @@ def create_episode_entry(
         raw_title = str(title or "").strip()
         ttype = str(translation_type or "sub").strip().lower()
         season_val = int(season or 1)
+        preserve_provider_label = False
 
     # 1. Extract quality/audio tags from label and title
     clean_label, label_tags = extract_episode_tags(raw_label)
@@ -503,8 +506,10 @@ def create_episode_entry(
         num_val = float(index + 1)
         disp_num = str(index + 1)
 
-    # 5. Format display label
-    if clean_label and (clean_label.lower().startswith(("episode ", "ep ", "part ", "ova", "movie", "special")) or re.search(r"[a-zA-Z]", clean_label)):
+    # 5. Format the provider-visible label.
+    if preserve_provider_label and clean_label:
+        final_label = clean_label
+    elif clean_label and (clean_label.lower().startswith(("episode ", "ep ", "part ", "ova", "movie", "special")) or re.search(r"[a-zA-Z]", clean_label)):
         final_label = clean_label
     elif disp_num and disp_num.isdigit():
         final_label = f"Episode {disp_num}"
@@ -522,16 +527,31 @@ def create_episode_entry(
         if f"[{tag}]" not in final_label:
             final_label = f"{final_label} [{tag}]"
 
+    lower_identity = f"{raw_id} {clean_label} {clean_title}".casefold()
+    kind = "episode"
+    if re.search(r"\bepisodes?\s+\d+\s*(?:-|to)\s*\d+\b", lower_identity):
+        kind = "batch"
+    elif re.search(r"\bmovie\b", lower_identity):
+        kind = "movie"
+    elif re.search(r"\bspecial\b", lower_identity):
+        kind = "special"
+    elif re.search(r"\bova\b", lower_identity):
+        kind = "ova"
+
     return {
         "id": raw_id,
         "url": raw_url,
         "number": num_val,
+        "sort_number": num_val,
         "display_number": disp_num or "0",
+        "primary_number": disp_num or "0",
         "franchise_number": sec,
+        "absolute_number": sec,
         "season": season_val,
         "label": final_label.strip(),
         "title": clean_title,
         "tags": all_tags,
+        "kind": kind,
         "translation_type": ttype,
     }
 
@@ -547,7 +567,6 @@ def build_episode_map(
 
     entries: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
-    seen_numbers: set[tuple[int, float]] = set()
 
     for idx, item in enumerate(raw_episodes):
         entry = create_episode_entry(
@@ -560,19 +579,20 @@ def build_episode_map(
         if not eid or eid in seen_ids:
             continue
 
-        num_tuple = (entry["season"], entry["number"])
-        # If a valid nonzero episode number was already seen for this season, it is a duplicate
-        if entry["number"] > 0 and num_tuple in seen_numbers:
-            continue
-
         seen_ids.add(eid)
-        if entry["number"] > 0:
-            seen_numbers.add(num_tuple)
         entries.append(entry)
 
-    # Sort strictly by (season, number, display_number) ascending
+    # Sort by the provider's absolute/bracket number when available. Donghua
+    # catalogs can contain several "01" rows across seasons, so the first
+    # visible number is not unique enough for ordering or deduplication.
     def _sort_key(ep):
-        return (ep.get("season", 1), ep.get("number", 0.0), ep.get("display_number", ""))
+        absolute = ep.get("absolute_number") or ep.get("franchise_number")
+        try:
+            absolute_num = float(decimal.Decimal(str(absolute))) if absolute else None
+        except (decimal.InvalidOperation, ValueError, TypeError):
+            absolute_num = None
+        sort_number = absolute_num if absolute_num is not None else ep.get("number", 0.0)
+        return (ep.get("season", 1), sort_number, ep.get("number", 0.0), ep.get("display_number", ""))
 
     entries.sort(key=_sort_key)
 

@@ -81,6 +81,7 @@ def plain_pick(
     tick_fn: Callable[[], bool] | None = None,
     keep_cursor_hidden_on_select: bool = False,
     select_fn: Callable[[int], bool] | None = None,
+    select_loading_message_fn: Callable[..., str] | None = None,
     item_prefix_fn: Callable[[int], str] | None = None,
     input_fn: Callable[[str], str] = input,
     output_fn: Callable[..., None] = print,
@@ -153,11 +154,8 @@ def plain_pick(
         prompt_text = str(prompt() if callable(prompt) else prompt)
 
         hdr_to_show = current_header
-        # In multi-show list pickers (top_header_fn is provided), header_fn(0) renders
-        # hover details for the 1st anime in the list. In plain mode, no anime is selected
-        # yet, so we do not display premature item 0 details.
-        # Only in single-show screens (top_header_fn is None, e.g. details, episode list)
-        # do we evaluate header_fn to display the selected show's metadata card.
+        # Header section: only single-show screens render their metadata card
+        # before a row is selected.
         if not hdr_to_show and header_fn is not None and top_header_fn is None:
             try:
                 hdr_eval = header_fn(0)

@@ -809,11 +809,11 @@ def _restore_terminal_input_modes() -> None:
 
 
 def _init_download_color_pairs(curses_mod) -> None:
-    """Initialize downloader colors using htop-like Catppuccin accents."""
+    """Initialize downloader color pairs."""
     has_256 = (curses_mod.COLORS >= 256)
 
     if has_256:
-        # Soft Pastel Palette
+        # Meter and status accents.
         curses_mod.init_pair(1, 116, -1)   # Soft Pastel Cyan
         curses_mod.init_pair(2, 120, -1)   # Soft Pastel Green
         curses_mod.init_pair(3, 222, -1)   # Soft Pastel Yellow
@@ -821,7 +821,7 @@ def _init_download_color_pairs(curses_mod) -> None:
         curses_mod.init_pair(5, 141, -1)   # Soft Pastel Magenta / Purple
         curses_mod.init_pair(6, 117, -1)   # Soft Pastel Sky Blue
 
-        # htop-like table accents: use themed ANSI colors, not fixed xterm shades.
+        # Table header, tab, and selection accents.
         curses_mod.init_pair(10, curses_mod.COLOR_BLACK, curses_mod.COLOR_GREEN)
         curses_mod.init_pair(11, curses_mod.COLOR_BLACK, curses_mod.COLOR_GREEN)
         curses_mod.init_pair(12, curses_mod.COLOR_BLACK, curses_mod.COLOR_BLUE)
@@ -1062,7 +1062,7 @@ def show_download_exit_dialog(stdscr, active_count: int, queued_count: int) -> s
 def prompt_download_exit_cli(active_count: int, queued_count: int, tty_fd: int | None = None) -> str:
     """Prompt the user in terminal cooked/raw mode when exiting CLI with downloads in progress.
 
-    Format matches user specification:
+    Prompt layout:
     {active} active downloads · {queued} queued
 
     What would you like to do?
@@ -1326,10 +1326,7 @@ def _curses_download_manager(stdscr, worker, standalone: bool = False, resize_pe
             selected_idx = -1
 
 
-        # =========================================================
-        # 1. TOP SECTION (Layout A on narrow, Split columns on wide)
-        # =========================================================
-        # Option C: Adaptive CPU display
+        # Top meter section.
         if width < 65:
             cpu_fmt = f"{cli_cpu:.1f}%"
         else:

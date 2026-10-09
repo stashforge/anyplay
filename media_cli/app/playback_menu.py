@@ -727,16 +727,19 @@ def handle_action_menu_state(
                     f"Auto-Download Next: {dl_status}",
                     f"Auto-Delete Watched: {del_status}",
                     f"Auto-Delete Buffer: {buf} ep" + ("" if buf == 1 else "s"),
+                    "Skip Settings",
                 ],
                 [
                     "TOGGLE_AUTO_DOWNLOAD",
                     "TOGGLE_AUTO_DELETE",
                     "CYCLE_AUTO_DELETE_BUFFER",
+                    "SKIP_SETTINGS",
                 ],
                 {
                     f"Auto-Download Next: {dl_status}": "session only; fetch next episode after playback",
                     f"Auto-Delete Watched: {del_status}": "session only; delete older watched downloads",
                     f"Auto-Delete Buffer: {buf} ep" + ("" if buf == 1 else "s"): "session only; keep recent watched downloads",
+                    "Skip Settings": "AniSkip and custom opening/ending skips",
                 },
             )
 
@@ -780,6 +783,196 @@ def handle_action_menu_state(
                     next_buf = 1
                 ms.auto_delete_buffer = next_buf
                 app_core.set_action_feedback(action_show, f"Auto-Delete Buffer: {next_buf}")
+            elif selected == "SKIP_SETTINGS":
+                _skip_settings_menu()
+
+    def _title_keys_for_custom_skips():
+        from ..media.custom_skips import stable_title_keys
+        return stable_title_keys(action_show, ms.show_id)
+
+    def _session_entries_for_title():
+        store = getattr(ms, "custom_skip_sessions", None)
+        if store is None:
+            ms.custom_skip_sessions = {}
+            store = ms.custom_skip_sessions
+        for key in _title_keys_for_custom_skips():
+            entries = store.get(str(key))
+            if isinstance(entries, list):
+                return entries
+        return []
+
+    def _saved_entries_for_title():
+        return app_core.get_custom_skips(action_show, ms.show_id)
+
+    def _custom_skips_disabled():
+        disabled = getattr(ms, "custom_skip_disabled_titles", set())
+        return any(str(key) in disabled for key in _title_keys_for_custom_skips())
+
+    def _custom_skip_status():
+        if _custom_skips_disabled():
+            return "OFF"
+        if _session_entries_for_title():
+            return "Session"
+        if _saved_entries_for_title():
+            return "Title"
+        return "OFF"
+
+    def _skip_settings_menu():
+        selected_idx = 0
+
+        def _options():
+            aniskip_enabled = getattr(args, "aniskip", None)
+            if aniskip_enabled is None:
+                aniskip_enabled = cfg.get("aniskip", cfg.get("aniskip_enabled", True))
+            auto_skip = getattr(args, "auto_skip", None)
+            if auto_skip is None:
+                auto_skip = cfg.get("auto_skip", cfg.get("aniskip_auto", True))
+            status = _custom_skip_status()
+            opts2 = [
+                f"AniSkip: {'ON' if aniskip_enabled else 'OFF'}",
+                f"Auto-Skip: {'ON' if auto_skip else 'OFF'}",
+                f"Custom Skips: {status}",
+                "Edit Custom Skips",
+                "Clear Session Skips",
+                "Clear Saved Title Skips",
+            ]
+            acts2 = [
+                "TOGGLE_ANISKIP",
+                "TOGGLE_AUTO_SKIP",
+                "TOGGLE_CUSTOM_SKIPS",
+                "EDIT_CUSTOM_SKIPS",
+                "CLEAR_SESSION_SKIPS",
+                "CLEAR_SAVED_SKIPS",
+            ]
+            hints2 = {
+                opts2[0]: "global/configured AniSkip lookup",
+                opts2[1]: "auto-skip when skip intervals are available",
+                opts2[2]: "custom skips override AniSkip when present",
+                "Edit Custom Skips": "open editor for this title/provider skip form",
+                "Clear Session Skips": "remove custom skips for this title until exit",
+                "Clear Saved Title Skips": "remove persisted custom skips for this title",
+            }
+            return opts2, acts2, hints2
+
+        hd = picker_help("Skip Settings", "Back", "Back")
+        while True:
+            opts2, acts2, hints2 = _options()
+            sidx = tui_pick(
+                flags,
+                ui,
+                "Skip Settings",
+                opts2,
+                header_fn=_action_hdr,
+                hints=hints2,
+                help_dict=hd,
+                info_fn=app_core.make_single_show_info_fn(action_show, ui),
+                initial_selected=selected_idx,
+            )
+            if sidx in (-2, -3) or sidx < 0:
+                return
+            selected_idx = sidx
+            act = acts2[sidx]
+            if act == "TOGGLE_ANISKIP":
+                current = getattr(args, "aniskip", None)
+                if current is None:
+                    current = cfg.get("aniskip", cfg.get("aniskip_enabled", True))
+                args.aniskip = not bool(current)
+                app_core.set_action_feedback(action_show, f"AniSkip: {'ON' if args.aniskip else 'OFF'}")
+                continue
+            if act == "TOGGLE_AUTO_SKIP":
+                current = getattr(args, "auto_skip", None)
+                if current is None:
+                    current = cfg.get("auto_skip", cfg.get("aniskip_auto", True))
+                args.auto_skip = not bool(current)
+                app_core.set_action_feedback(action_show, f"Auto-Skip: {'ON' if args.auto_skip else 'OFF'}")
+                continue
+            if act == "TOGGLE_CUSTOM_SKIPS":
+                keys = [str(key) for key in _title_keys_for_custom_skips() if str(key)]
+                if not keys:
+                    keys = [str(ms.show_id or ms.show_title or "")]
+                disabled = getattr(ms, "custom_skip_disabled_titles", set())
+                has_custom = bool(_session_entries_for_title() or _saved_entries_for_title())
+                if _custom_skips_disabled():
+                    for key in keys:
+                        disabled.discard(key)
+                    app_core.set_action_feedback(action_show, "Custom skips enabled.")
+                elif has_custom:
+                    for key in keys:
+                        disabled.add(key)
+                    app_core.set_action_feedback(action_show, "Custom skips disabled for this session.")
+                else:
+                    app_core.set_action_feedback(action_show, "No custom skips yet. Use Edit Custom Skips.")
+                ms.custom_skip_disabled_titles = disabled
+                continue
+            if act == "CLEAR_SESSION_SKIPS":
+                for key in _title_keys_for_custom_skips():
+                    ms.custom_skip_sessions.pop(str(key), None)
+                    ms.custom_skip_disabled_titles.discard(str(key))
+                app_core.set_action_feedback(action_show, "Custom session skips cleared.")
+                continue
+            if act == "CLEAR_SAVED_SKIPS":
+                app_core.clear_custom_skips(action_show, ms.show_id)
+                for key in _title_keys_for_custom_skips():
+                    ms.custom_skip_disabled_titles.discard(str(key))
+                app_core.set_action_feedback(action_show, "Saved custom skips cleared.")
+                continue
+            if act == "EDIT_CUSTOM_SKIPS":
+                from ..media import custom_skips
+                from ..providers import get_provider_registry
+
+                provider_ids = list(get_provider_registry().keys())
+                current_entry = None
+                session_entries = _session_entries_for_title()
+                if session_entries:
+                    current_entry = dict(session_entries[-1], mode="session")
+                else:
+                    saved_entries = _saved_entries_for_title()
+                    if saved_entries:
+                        current_entry = dict(saved_entries[-1], mode="title")
+                if current_entry is None:
+                    current_entry = {
+                        "mode": "session",
+                        "providers": ["all"],
+                        "exclude_providers": ["torrents-csv"],
+                        "intervals": [],
+                    }
+                try:
+                    app_core.restore_terminal()
+                    spec = custom_skips.edit_skip_form(
+                        title=get_show_display_title(action_show) if action_show else ms.show_title,
+                        providers=provider_ids,
+                        entry=current_entry,
+                        config=cfg,
+                    )
+                except Exception as exc:
+                    app_core.set_action_feedback(action_show, f"Custom skips not saved: {exc}")
+                    continue
+                entry = {
+                    "providers": spec["providers"],
+                    "exclude_providers": spec["exclude_providers"],
+                    "intervals": custom_skips.compact_intervals(spec["intervals"]),
+                }
+                if not entry["intervals"]:
+                    for key in _title_keys_for_custom_skips():
+                        ms.custom_skip_sessions.pop(str(key), None)
+                        ms.custom_skip_disabled_titles.discard(str(key))
+                    app_core.clear_custom_skips(action_show, ms.show_id)
+                    app_core.set_action_feedback(action_show, "Custom skips cleared.")
+                elif spec["mode"] == "title":
+                    for key in _title_keys_for_custom_skips():
+                        ms.custom_skip_sessions.pop(str(key), None)
+                        ms.custom_skip_disabled_titles.discard(str(key))
+                    app_core.set_custom_skips(action_show, ms.show_id, entry)
+                    app_core.set_action_feedback(action_show, "Custom skips saved for this title.")
+                else:
+                    keys = _title_keys_for_custom_skips()
+                    if not keys:
+                        keys = [str(ms.show_id or ms.show_title or "")]
+                    for key in keys:
+                        if key:
+                            ms.custom_skip_sessions[str(key)] = [entry]
+                            ms.custom_skip_disabled_titles.discard(str(key))
+                    app_core.set_action_feedback(action_show, "Custom skips saved for this session.")
 
     hd7 = picker_help("Select action", "Go back", "Go back", tab_label="Toggle Sub/Dub")
     idx = tui_pick(

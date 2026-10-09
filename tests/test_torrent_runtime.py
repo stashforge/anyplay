@@ -661,6 +661,56 @@ def test_mpv_ipc_disables_autoload_files(monkeypatch, tmp_path):
     assert "--autoload-files=no" in commands[0]
 
 
+def test_mpv_ipc_enables_osd_shadow(monkeypatch, tmp_path):
+    commands = []
+
+    class FakeProcess:
+        def poll(self):
+            return None
+
+        def wait(self, timeout=None):
+            return 0
+
+    class FakeSocket:
+        def connect(self, path):
+            self.path = path
+
+        def setblocking(self, value):
+            self.blocking = value
+
+        def sendall(self, data):
+            pass
+
+        def close(self):
+            pass
+
+    def fake_popen(cmd, **kwargs):
+        commands.append(cmd)
+        return FakeProcess()
+
+    runtime_dir = tmp_path / "mpv-runtime"
+    runtime_dir.mkdir()
+    socket_path = runtime_dir / "mpv.sock"
+    conf_path = runtime_dir / "input.conf"
+    chapters_path = runtime_dir / "chapters.txt"
+    lua_path = runtime_dir / "aniskip.lua"
+
+    monkeypatch.setattr(
+        "media_cli.playback.mpv.create_mpv_runtime",
+        lambda: (str(runtime_dir), str(socket_path), str(conf_path), str(chapters_path), str(lua_path)),
+    )
+    monkeypatch.setattr("media_cli.playback.mpv.cleanup_mpv_runtime", lambda runtime_dir: None)
+    monkeypatch.setattr("media_cli.playback.mpv.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("media_cli.playback.mpv.os.path.exists", lambda path: True)
+    monkeypatch.setattr("media_cli.playback.mpv.socket.socket", lambda *args, **kwargs: FakeSocket())
+
+    ipc = MpvIpc()
+    ipc.start()
+
+    assert "--osd-shadow-offset=2" in commands[0]
+    assert "--osd-shadow-color=#B0000000" in commands[0]
+
+
 def test_mpv_ipc_can_suppress_embedded_chapters(monkeypatch, tmp_path):
     sent_commands = []
 
@@ -713,6 +763,61 @@ def test_mpv_ipc_can_suppress_embedded_chapters(monkeypatch, tmp_path):
     )
 
     assert ["script-message", "set_skip_intervals", "[]", "yes", "clear"] in sent_commands
+
+
+def test_mpv_runtime_reapplies_open_ended_chapters_when_duration_arrives():
+    from media_cli.playback import mpv_runtime
+
+    script = mpv_runtime.ANISKIP_LUA_SCRIPT
+
+    assert "mp.observe_property(\"duration\", \"number\", on_duration)" in script
+    assert "interval_end(item)" in script
+
+
+def test_mpv_runtime_input_config_combines_user_bindings(monkeypatch, tmp_path):
+    from media_cli.playback import mpv_runtime
+
+    user_conf = tmp_path / "user-input.conf"
+    user_conf.write_text(
+        "a cycle audio\n"
+        "n cycle video-unscaled\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(mpv_runtime, "_candidate_user_input_confs", lambda: [str(user_conf)])
+
+    runtime_dir, _, config_path, _, _ = mpv_runtime.create_mpv_runtime()
+    try:
+        text = Path(config_path).read_text(encoding="utf-8")
+    finally:
+        mpv_runtime.cleanup_mpv_runtime(runtime_dir)
+
+    assert "a cycle audio" in text
+    assert "n cycle video-unscaled" in text
+    assert "# ---- AnyPlay playback controls ----" in text
+    assert text.index("n cycle video-unscaled") < text.index("SHIFT+RIGHT script-message next_ep")
+    assert "SHIFT+RIGHT script-message next_ep" in text
+    assert "SHIFT+LEFT script-message prev_ep" in text
+    assert "TAB script-message skip_interval" in text
+    assert "s script-message skip_interval" not in text
+    assert "n script-message next_mirror" not in text
+
+
+def test_mpv_runtime_input_config_has_anyplay_defaults_without_user_config(monkeypatch):
+    from media_cli.playback import mpv_runtime
+
+    monkeypatch.setattr(mpv_runtime, "_candidate_user_input_confs", lambda: [])
+
+    runtime_dir, _, config_path, _, _ = mpv_runtime.create_mpv_runtime()
+    try:
+        text = Path(config_path).read_text(encoding="utf-8")
+    finally:
+        mpv_runtime.cleanup_mpv_runtime(runtime_dir)
+
+    assert "SHIFT+RIGHT script-message next_ep" in text
+    assert "SHIFT+LEFT script-message prev_ep" in text
+    assert "TAB script-message skip_interval" in text
+    assert "s script-message skip_interval" not in text
+    assert "n script-message next_mirror" not in text
 
 
 def test_loading_cancel_accepts_q_and_escape_keys():

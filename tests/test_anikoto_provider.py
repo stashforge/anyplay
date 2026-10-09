@@ -1,4 +1,6 @@
 import json
+import pathlib
+import tomllib
 from unittest.mock import MagicMock, patch
 from media_cli.providers.anikoto import AnikotoProvider, _vrf_encrypt
 
@@ -16,6 +18,16 @@ def test_anikoto_metadata():
     assert p.id == "anikoto"
     assert p.name == "Anikoto"
     assert "anikototv.to" in p.anikoto_url
+
+
+def test_default_install_includes_megaplay_crypto_backend():
+    root = pathlib.Path(__file__).resolve().parents[1]
+    project = tomllib.loads((root / "pyproject.toml").read_text())
+    deps = [dep.lower() for dep in project["project"]["dependencies"]]
+
+    assert any(
+        dep.startswith(("cryptography", "pycryptodome")) for dep in deps
+    ), "Anikoto MegaPlay sources need AES-CBC support in the default install."
 
 
 def test_anikoto_fetch_media_token_failure_fallback():

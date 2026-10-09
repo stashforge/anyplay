@@ -1,5 +1,5 @@
 """
-Shared state dataclasses for allmanga-cli.
+Shared state dataclasses for Anyplay.
 
 Replaces the scattered ``globals()`` dict pattern in ``app.py`` with three
 focused, typed objects, each with a clear responsibility boundary:
@@ -232,6 +232,10 @@ class MachineState:
     """Auto-delete watched episodes once beyond the rolling safety buffer."""
     auto_delete_buffer: int = 1
     """Number of watched episodes to retain before deleting older ones."""
+    custom_skip_sessions: dict = field(default_factory=dict)
+    """Session-only custom skip entries keyed by title identity."""
+    custom_skip_disabled_titles: set = field(default_factory=set)
+    """Title identities whose custom skips are temporarily disabled this session."""
 
     _is_downloads: bool = False
     """Whether the current session is in Downloads mode."""

@@ -69,6 +69,13 @@ def configure(*, episode_ids_fn=None, prepare_display_state_fn=None):
 
 
 def _episode_ids(show, ttype):
+    if show:
+        stored_type = show.get("_episode_ids_ttype")
+        if (not stored_type or stored_type == ttype) and show.get("_episode_ids"):
+            return show.get("_episode_ids") or []
+        by_ttype = show.get("_episode_ids_by_ttype") or {}
+        if isinstance(by_ttype, dict) and by_ttype.get(ttype):
+            return by_ttype.get(ttype) or []
     return _episode_ids_fn(show, ttype) if _episode_ids_fn else []
 
 
@@ -296,6 +303,20 @@ def set_title_sync(show, enabled: bool):
         pass
 
 
+def get_custom_skips(show, fallback_show_id=None):
+    return preference_state.custom_skips(load_prefs(), show or {}, fallback_show_id)
+
+
+def set_custom_skips(show, fallback_show_id, entry):
+    prefs = load_prefs()
+    save_prefs(preference_state.set_custom_skips(prefs, show or {}, fallback_show_id, entry))
+
+
+def clear_custom_skips(show, fallback_show_id=None):
+    prefs = load_prefs()
+    save_prefs(preference_state.clear_custom_skips(prefs, show or {}, fallback_show_id))
+
+
 # ---------------------------------------------------------------------------
 # Resume / pending completion / AniList match prefs
 # ---------------------------------------------------------------------------
@@ -392,6 +413,15 @@ HISTORY_SHOW_STRIP_KEYS = ANILIST_HISTORY_STRIP_KEYS | {
     "_poster_failed",
     "availableEpisodesDetail",
     "_episode_catalog_state",
+    "_episode_ids",
+    "_episode_ids_ttype",
+    "_episode_ids_by_ttype",
+    "_episode_labels",
+    "_episode_labels_ttype",
+    "_episodes_map",
+    "_episodes_map_by_ttype",
+    "_episodes_by_number",
+    "_episodes_by_number_by_ttype",
     "_allanime_checked_at",
     "_local_progress",
     "_local_episode_label",

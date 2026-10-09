@@ -7,6 +7,53 @@ import tempfile
 TRANSITION_OSD_MS = 60 * 60 * 1000
 
 
+def _candidate_user_input_confs():
+    candidates = []
+    xdg_config = os.environ.get("XDG_CONFIG_HOME")
+    if xdg_config:
+        candidates.append(os.path.join(xdg_config, "mpv", "input.conf"))
+    home = os.path.expanduser("~")
+    candidates.extend(
+        [
+            os.path.join(home, ".config", "mpv", "input.conf"),
+            os.path.join(home, ".mpv", "input.conf"),
+        ]
+    )
+    seen = set()
+    unique = []
+    for path in candidates:
+        if path and path not in seen:
+            seen.add(path)
+            unique.append(path)
+    return unique
+
+
+def _read_user_input_conf():
+    for path in _candidate_user_input_confs():
+        try:
+            if os.path.isfile(path):
+                with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                    return path, fh.read()
+        except OSError:
+            continue
+    return None, ""
+
+
+def _write_mpv_input_config(config):
+    user_path, user_text = _read_user_input_conf()
+    if user_text:
+        config.write("# ---- User mpv input.conf copied by AnyPlay ----\n")
+        config.write(f"# Source: {user_path}\n")
+        config.write(user_text)
+        if not user_text.endswith("\n"):
+            config.write("\n")
+        config.write("\n")
+    config.write("# ---- AnyPlay playback controls ----\n")
+    config.write("SHIFT+RIGHT script-message next_ep\n")
+    config.write("SHIFT+LEFT script-message prev_ep\n")
+    config.write("TAB script-message skip_interval\n")
+
+
 ANISKIP_LUA_SCRIPT = """
 local utils = require 'mp.utils'
 local intervals = {}
@@ -14,6 +61,7 @@ local auto_skip = true
 local clear_chapters = false
 local skipped = {}
 local active_prompt = nil
+local known_duration = 0
 
 local function format_time(sec)
     if not sec then return "00:00" end
@@ -32,18 +80,19 @@ local function on_time_pos(name, val)
     local curr_time = val
     for i, item in ipairs(intervals) do
         local s_start = item.start
-        local s_end = item["end"]
+        local s_end = item["end"] or mp.get_property_number("duration", 0)
         local s_label = item.label or "Opening"
+        if not s_end or s_end <= s_start then goto continue end
         if curr_time >= s_start and curr_time < (s_end - 0.5) then
             if not skipped[i] then
                 if auto_skip then
                     skipped[i] = true
                     mp.set_property_number("time-pos", s_end)
-                    mp.osd_message(string.format("Skipped %s (%s → %s)", s_label, format_time(s_start), format_time(s_end)), 3)
+                    mp.osd_message(string.format("%s skipped %s → %s", s_label, format_time(s_start), format_time(s_end)), 3)
                 else
                     if active_prompt ~= i then
                         active_prompt = i
-                        mp.osd_message(string.format("[Tab/s] Skip %s (%s → %s)", s_label, format_time(s_start), format_time(s_end)), math.max(1, math.floor(s_end - curr_time)))
+                        mp.osd_message(string.format("[Tab] Skip %s %s → %s", s_label, format_time(s_start), format_time(s_end)), math.max(1, math.floor(s_end - curr_time)))
                     end
                 end
             end
@@ -53,6 +102,7 @@ local function on_time_pos(name, val)
         elseif curr_time < s_start then
             if active_prompt == i then active_prompt = nil end
         end
+        ::continue::
     end
 end
 
@@ -60,16 +110,29 @@ local function manual_skip()
     local curr_time = mp.get_property_number("time-pos", 0)
     for i, item in ipairs(intervals) do
         local s_start = item.start
-        local s_end = item["end"]
+        local s_end = item["end"] or mp.get_property_number("duration", 0)
         local s_label = item.label or "Opening"
+        if not s_end or s_end <= s_start then goto continue end
         if curr_time >= s_start and curr_time < s_end then
             skipped[i] = true
             mp.set_property_number("time-pos", s_end)
-            mp.osd_message(string.format("Skipped %s (%s → %s)", s_label, format_time(s_start), format_time(s_end)), 3)
+            mp.osd_message(string.format("%s skipped %s → %s", s_label, format_time(s_start), format_time(s_end)), 3)
             active_prompt = nil
             break
         end
+        ::continue::
     end
+end
+
+local function interval_end(item)
+    local explicit_end = tonumber(item["end"])
+    if explicit_end and explicit_end > 0 then
+        return explicit_end
+    end
+    if known_duration and known_duration > 0 then
+        return known_duration
+    end
+    return mp.get_property_number("duration", 0)
 end
 
 local function apply_chapters()
@@ -83,7 +146,7 @@ local function apply_chapters()
     local curr = 0.0
     for _, item in ipairs(intervals) do
         local s_start = math.max(0.0, tonumber(item.start) or 0.0)
-        local s_end = math.max(s_start, tonumber(item["end"]) or 0.0)
+        local s_end = math.max(s_start, interval_end(item) or 0.0)
         local s_label = item.label or "Skip"
         if s_end > s_start then
             if s_start > curr then
@@ -101,9 +164,14 @@ local function apply_chapters()
     end
 end
 
+local function on_duration(name, val)
+    known_duration = tonumber(val) or 0
+    apply_chapters()
+end
+
 mp.observe_property("time-pos", "number", on_time_pos)
+mp.observe_property("duration", "number", on_duration)
 mp.add_key_binding("tab", "aniskip_tab", manual_skip)
-mp.add_key_binding("s", "aniskip_s", manual_skip)
 mp.register_script_message("skip_interval", manual_skip)
 mp.register_script_message("set_skip_intervals", function(json_str, auto_flag, chapter_mode)
     intervals = {}
@@ -120,13 +188,14 @@ mp.register_script_message("set_skip_intervals", function(json_str, auto_flag, c
     apply_chapters()
 end)
 mp.register_event("file-loaded", function()
+    known_duration = mp.get_property_number("duration", 0)
     apply_chapters()
 end)
 """
 
 
 def create_mpv_runtime():
-    runtime_dir = tempfile.mkdtemp(prefix="allmanga-cli-")
+    runtime_dir = tempfile.mkdtemp(prefix="anyplay-")
     os.chmod(runtime_dir, 0o700)
     socket_path = os.path.join(runtime_dir, "mpv.sock")
     config_path = os.path.join(runtime_dir, "input.conf")
@@ -136,11 +205,7 @@ def create_mpv_runtime():
         0o600,
     )
     with os.fdopen(descriptor, "w", encoding="utf-8") as config:
-        config.write("SHIFT+RIGHT script-message next_ep\n")
-        config.write("SHIFT+LEFT script-message prev_ep\n")
-        config.write("TAB script-message skip_interval\n")
-        config.write("s script-message skip_interval\n")
-        config.write("n script-message next_mirror\n")
+        _write_mpv_input_config(config)
     chapters_path = os.path.join(runtime_dir, "chapters.txt")
     with open(chapters_path, "w", encoding="utf-8") as chap:
         chap.write(";FFMETADATA1\n")
