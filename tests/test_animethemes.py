@@ -1,5 +1,6 @@
 from media_cli.cli.args import parse_cli_args
 from media_cli.app.animethemes import _search_header
+from media_cli.core.terminal import strip_ansi
 from urllib.parse import parse_qs, urlparse
 from media_cli.services.animethemes import (
     ANIMETHEMES_SEARCH_TABS,
@@ -97,15 +98,39 @@ def test_animethemes_command_parses_query():
 
 
 def test_animethemes_search_header_keeps_standard_four_line_shape():
+    rows = flatten_search_bucket(
+        "anime",
+        [{"name": "[Oshi no Ko]", "year": 2023, "media_format": "TV"}],
+    )
     header = _search_header(
         "oshi no ko",
         "anime",
         {"anime": 1, "songs": 2, "videos": 3, "artists": 4},
+        rows,
+        0,
     )
 
-    lines = header.splitlines()
+    lines = [strip_ansi(line) for line in header.splitlines()]
     assert len(lines) == 4
-    assert lines[0] == "AnimeThemes"
-    assert lines[1] == "oshi no ko"
-    assert "Anime 1" in lines[2]
+    assert lines[0] == "[Oshi no Ko]"
+    assert lines[1] == "No alternative title"
+    assert "TV" in lines[2]
+    assert "Anime 1" in lines[3]
     assert "AnimeThemes" in lines[3]
+
+
+def test_animethemes_loading_header_matches_search_shape():
+    header = _search_header(
+        "oshi no ko",
+        "anime",
+        {"anime": 0, "songs": 0, "videos": 0, "artists": 0},
+        [],
+        0,
+        loading_msg=":: Searching...",
+    )
+
+    lines = [strip_ansi(line) for line in header.splitlines()]
+    assert len(lines) == 4
+    assert lines[1] == "Use Up/Down to browse previous searches."
+    assert lines[2] == "Provider: AnimeThemes"
+    assert lines[3] == ":: Searching..."
