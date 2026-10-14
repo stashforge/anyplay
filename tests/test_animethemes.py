@@ -1,4 +1,5 @@
 from media_cli.cli.args import parse_cli_args
+from media_cli.app.animethemes import _search_header
 from urllib.parse import parse_qs, urlparse
 from media_cli.services.animethemes import (
     ANIMETHEMES_SEARCH_TABS,
@@ -93,3 +94,18 @@ def test_animethemes_command_parses_query():
     assert args.command == "animethemes"
     assert args.animethemes == "search"
     assert args.query == ["idol"]
+
+
+def test_animethemes_search_header_keeps_standard_four_line_shape():
+    header = _search_header(
+        "oshi no ko",
+        "anime",
+        {"anime": 1, "songs": 2, "videos": 3, "artists": 4},
+    )
+
+    lines = header.splitlines()
+    assert len(lines) == 4
+    assert lines[0] == "AnimeThemes"
+    assert lines[1] == "oshi no ko"
+    assert "Anime 1" in lines[2]
+    assert "AnimeThemes" in lines[3]

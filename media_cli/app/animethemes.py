@@ -6,18 +6,16 @@ import os
 from typing import Any
 
 from .. import app_core
+from ..core.terminal import truncate_display
 from ..domain.titles import get_show_display_title
 from ..services import animethemes as animethemes_service
 from ..ui.help import picker_help
 from ..ui.picker import tui_pick
 from .footer import context_footer
 
-_C_HINT = "\033[38;5;244m"
-_RST = "\033[0m"
-
 
 def _truncate(text: str, width: int) -> str:
-    return app_core._poster_footer_line({}, text, width).strip()
+    return truncate_display(str(text or ""), max(1, width - 1)).strip()
 
 
 def _theme_header(show, ui, ms, ttype="sub"):
@@ -44,10 +42,9 @@ def _search_header(query: str, tab: str, counts: dict[str, int]):
     )
     lines = [
         "AnimeThemes",
-        f"Search: {query}",
-        f"Tab: {tab_title}",
-        count_text or "No results",
-        f"{_C_HINT}AnimeThemes • Tab=switch • Enter=play/open • ?=Help • Esc=Back{_RST}",
+        query,
+        f"{tab_title} • {count_text or 'No results'}",
+        "AnimeThemes • Tab=switch • Enter=play/open • ?=Help • Esc=Back",
     ]
     return "\n".join(_truncate(line, w) for line in lines)
 
@@ -121,6 +118,7 @@ def handle_animethemes_search_state(flags, ui, ms, cfg, args, ttype: str) -> str
     if not query:
         app_core.err("AnimeThemes search needs a query.")
         return "QUIT"
+    app_core.enter_alt_screen()
     data = app_core.with_loading(
         "Searching AnimeThemes…",
         animethemes_service.search,

@@ -55,6 +55,7 @@ from ..domain.titles import get_show_display_title
 from ..providers import (
     _DEFAULT_PROVIDER_ID,
     available_providers,
+    disabled_providers_from_config,
     get_provider,
     get_provider_registry,
     provider_key,
@@ -547,9 +548,15 @@ def main() -> None:
 
         rows = []
         active_provider_ids = set(available_providers())
+        disabled_provider_ids = disabled_providers_from_config(cfg)
         for pid, meta in registry.items():
-            if pid not in active_provider_ids:
+            if pid in disabled_provider_ids:
                 continue
+            if pid not in active_provider_ids:
+                if not meta.get("source"):
+                    continue
+                if meta.get("status", "active") in ("broken", "disabled", "deprecated"):
+                    continue
             name = meta.get("name", pid.title())
             engine = meta.get("engine", "unknown")
             status = meta.get("status", "unknown")

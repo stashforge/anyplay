@@ -214,6 +214,27 @@ class TestProvidersDisplay(unittest.TestCase):
         self.assertIn("Type", output)
         self.assertIn("Languages", output)
         self.assertIn("AniDB", output)
+        self.assertIn("AnimeThemes", output)
+        self.assertIn("songs", output)
+
+    def test_source_registry_entry_is_listed_but_not_episode_provider(self):
+        from io import StringIO
+        from media_cli.app import orchestrator
+        from media_cli.cli.args import parse_cli_args
+        from media_cli.providers import available_providers
+
+        self.assertNotIn("animethemes", available_providers())
+
+        mock_args, mock_pa = parse_cli_args(["providers"])
+        out = StringIO()
+        with patch("sys.stdout", out), \
+             patch("shutil.get_terminal_size", return_value=os.terminal_size((100, 24))), \
+             patch("media_cli.app.orchestrator.parse_cli_args", return_value=(mock_args, mock_pa)):
+            orchestrator.main()
+
+        output = out.getvalue()
+        self.assertIn("animethemes", output)
+        self.assertIn("AnimeThemes", output)
 
     def test_inactive_provider_hidden_from_cli_choices(self):
         from media_cli.providers import available_providers, is_provider_active

@@ -82,6 +82,16 @@
       "engine": "api",
       "features": ["search"]
     },
+    "animethemes": {
+      "name": "AnimeThemes",
+      "domains": ["https://animethemes.moe", "https://api.animethemes.moe"],
+      "type": "songs",
+      "languages": ["video"],
+      "status": "active",
+      "engine": "api",
+      "source": true,
+      "features": ["search", "opening_ending_videos"]
+    },
     "animekhor": {
       "name": "AnimeKhor",
       "domains": ["https://animekhor.org", "https://animekhor.xyz"],
