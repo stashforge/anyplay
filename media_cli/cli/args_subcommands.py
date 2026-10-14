@@ -153,6 +153,45 @@ def add_anilist_subcommand(commands):
     return anilist
 
 
+def add_animethemes_subcommand(commands):
+    animethemes = commands.add_parser(
+        "animethemes",
+        help="Search and play anime opening/ending videos",
+        usage=f"{APP_NAME} animethemes search <query> [options]",
+        description="Search AnimeThemes and play anime opening/ending videos.",
+        epilog=(
+            "Examples:\n"
+            f"  {APP_NAME} animethemes search idol\n"
+            f'  {APP_NAME} animethemes search "oshi no ko"'
+        ),
+        add_help=False,
+        formatter_class=MinimalHelpFormatter,
+    )
+    _configure_help_parser(animethemes)
+    animethemes._positionals.title = "Arguments"
+    animethemes.add_argument(
+        "animethemes",
+        choices=["search"],
+        metavar="search",
+        help="Search AnimeThemes",
+    )
+    animethemes.add_argument("query", nargs="*", help="Anime, song, or artist to search")
+    playback = animethemes.add_argument_group("Playback options")
+    playback.add_argument(
+        "-p", "--player",
+        choices=["mpv", "rex", "mpvrx", "mpvrex", "vlc", "next"],
+        metavar="PLAYER",
+        help="Player: mpv, rex, mpvrx, vlc, next",
+    )
+    global_options = animethemes.add_argument_group("Global options")
+    _add_debug_option(global_options, suppress_default=True)
+    _add_plain_option(global_options, suppress_default=True)
+    global_options.add_argument(
+        "-h", "--help", action="help", help="Show this help message and exit"
+    )
+    return animethemes
+
+
 def add_history_subcommand(commands):
     history = commands.add_parser(
         "history",
@@ -412,6 +451,7 @@ def register_all_subcommands(commands):
     add_provider_subcommands(commands)
     add_downloads_subcommand(commands)
     add_anilist_subcommand(commands)
+    add_animethemes_subcommand(commands)
     add_history_subcommand(commands)
     add_continue_subcommand(commands)
     add_auth_subcommand(commands)

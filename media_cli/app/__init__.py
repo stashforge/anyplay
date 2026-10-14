@@ -27,6 +27,7 @@ from .anilist import (
     handle_anilist_menu_state,
     handle_anilist_search_state,
 )
+from .animethemes import handle_animethemes_search_state
 from .details import (
     handle_details_state,
 )
@@ -51,6 +52,7 @@ __all__ = [
     "handle_anilist_airing_state",
     "handle_anilist_browse_state",
     "handle_anilist_search_state",
+    "handle_animethemes_search_state",
     "handle_details_state",
     "handle_update_progress_state",
     "handle_update_status_state",

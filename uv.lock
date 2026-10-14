@@ -9,7 +9,7 @@ resolution-markers = [
 
 [[package]]
 name = "anyplay"
-version = "0.8.9"
+version = "0.9.0"
 source = { editable = "." }
 dependencies = [
     { name = "beautifulsoup4" },

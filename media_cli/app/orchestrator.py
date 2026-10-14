@@ -898,6 +898,8 @@ def main() -> None:
                 print(f"Run \033[1m{APP_NAME} auth login\033[0m to authenticate.")
                 sys.exit(1)
             state = "ANILIST_MENU"
+    elif getattr(args, "animethemes", None) == "search":
+        state = "ANIMETHEMES_SEARCH"
     elif args.cont:
         hist = load_history()
         if hist:
@@ -964,6 +966,10 @@ def main() -> None:
         elif state == "ANILIST_SEARCH":
             state = handlers.handle_anilist_search_state(
                 flags, ui, ms, cfg, args, cur_ttype, resolveTracking
+            )
+        elif state == "ANIMETHEMES_SEARCH":
+            state = handlers.handle_animethemes_search_state(
+                flags, ui, ms, cfg, args, cur_ttype
             )
         elif state in ("DETAILS", "ACTION_MENU"):
             state = handlers.handle_details_state(

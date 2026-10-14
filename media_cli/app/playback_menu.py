@@ -544,6 +544,10 @@ def handle_action_menu_state(
                 else f"browse (1–{ms.total_eps})"
             )
 
+        opts.append("Anime Songs")
+        acts.append("ANIME_SONGS")
+        action_hints["Anime Songs"] = "openings & endings from AnimeThemes"
+
         # Mirrors (if not downloads)
         if not getattr(ms, "_is_downloads", False):
             opts.append("Mirrors")
@@ -1223,6 +1227,10 @@ def handle_action_menu_state(
     elif a == "EPISODES":
         ui.ep_prev_state = "DETAILS"
         return "EPISODE"
+
+    elif a == "ANIME_SONGS":
+        from .animethemes import open_anime_songs
+        return open_anime_songs(flags, ui, ms, cfg, args, action_show, ttype)
 
     elif a == "REPLAY":
         if pending_ep is not None:

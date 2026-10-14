@@ -389,6 +389,8 @@ def handle_details_state(
     elif has_provider_link and not s.get("_action_feedback"):
         app_core.set_action_feedback(s, app_core.episode_catalog_error(s))
 
+    opts.append("Anime Songs")
+
     if not getattr(ms, "_is_downloads", False):
         if from_anilist_context:
             if has_provider_link:
@@ -446,6 +448,7 @@ def handle_details_state(
         "Binge from Start": f"from EP {play_label}",
         "Start Rewatch": f"replay from EP {play_label}",
         "Episodes": "browse all",
+        "Anime Songs": "openings & endings from AnimeThemes",
         "Change Match": ("link a different streaming title / provider" if from_anilist_context else "link a different tracking title"),
         "Link Provider": "link a streaming provider to watch",
         "Link AniList": "link a tracking title",
@@ -628,6 +631,10 @@ def handle_details_state(
         elif opt == "Episodes":
             ui.ep_prev_state = "DETAILS"
             return "EPISODE"
+
+        elif opt == "Anime Songs":
+            from .animethemes import open_anime_songs
+            return open_anime_songs(flags, ui, ms, cfg, args, s, ttype_local)
 
         elif opt in ("Change Match", "Change AllAnime Match", "Link Provider"):
             if not from_anilist_context:

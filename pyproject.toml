@@ -1,6 +1,6 @@
 [project]
 name = "anyplay"
-version = "0.8.9"
+version = "0.9.0"
 description = "Terminal media stream player"
 readme = "README.md"
 requires-python = ">=3.9"
