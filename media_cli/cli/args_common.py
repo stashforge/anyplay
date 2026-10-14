@@ -14,7 +14,7 @@ except Exception:
     try:
         __version__ = importlib.metadata.version(APP_NAME)
     except Exception:
-        __version__ = "0.8.8"
+        __version__ = "0.8.9"
 
 from ..providers import available_providers
 
@@ -289,22 +289,6 @@ def _add_search_options(parser):
         help="Audio languages to download (e.g. 'jpn,eng' or 'multi')",
     )
     download.add_argument(
-        "--embed-subs",
-        dest="subtitle_mode",
-        action="store_const",
-        const="embed",
-        default=argparse.SUPPRESS,
-        help="Embed subtitles directly into .mkv container",
-    )
-    download.add_argument(
-        "--sidecar-subs",
-        dest="subtitle_mode",
-        action="store_const",
-        const="sidecar",
-        default=argparse.SUPPRESS,
-        help="Save subtitles as sidecar files (.vtt/.srt) alongside video",
-    )
-    download.add_argument(
         "--no-subs",
         dest="download_sub_langs",
         action="store_const",
@@ -385,22 +369,6 @@ def _add_download_options(parser):
         type=str,
         default=argparse.SUPPRESS,
         help="Audio languages to download (e.g. 'jpn,eng' or 'multi')",
-    )
-    download.add_argument(
-        "--embed-subs",
-        dest="subtitle_mode",
-        action="store_const",
-        const="embed",
-        default=argparse.SUPPRESS,
-        help="Embed subtitles directly into .mkv container",
-    )
-    download.add_argument(
-        "--sidecar-subs",
-        dest="subtitle_mode",
-        action="store_const",
-        const="sidecar",
-        default=argparse.SUPPRESS,
-        help="Save subtitles as sidecar files (.vtt/.srt) alongside video",
     )
     download.add_argument(
         "--no-subs",

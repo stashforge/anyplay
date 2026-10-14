@@ -25,6 +25,7 @@ from ..domain.episodes import (
 from ..domain.titles import get_show_display_title
 from ..playback.rules import should_clear_query_on_child_left
 from ..ui.help import picker_help
+from .footer import context_footer
 
 # ---------------------------------------------------------------------------
 # Colors
@@ -152,7 +153,12 @@ def handle_details_state(
     elif not use_anilist:
         s.pop("_sync_conflict", None)
 
-    app_core.prepare_show_display_state(s, ttype_local, use_anilist)
+    app_core.prepare_show_display_state(
+        s,
+        ttype_local,
+        use_anilist,
+        prefer_watched_episodes=getattr(ms, "_is_downloads", False),
+    )
     ms.just_picked_anime = False
     ui.action_prev_state = ui.search_prev_state or "SEARCH"
 
@@ -196,10 +202,18 @@ def handle_details_state(
             if cur_idx is not None and cur_idx <= watched_idx:
                 cur_watched = True
 
+        resume_show_id = (
+            s.get("_id")
+            or s.get("id")
+            or getattr(ms, "show_id", None)
+            or s.get("_folder_name")
+            or getattr(ms, "show_title", "")
+        )
         cur_has_resume = (
             ms.current_ep is not None
             and not cur_watched
-            and (app_core.get_resume_time(s.get("_id"), ms.current_ep) or 0) > 0
+            and resume_show_id
+            and (app_core.get_resume_time(resume_show_id, ms.current_ep) or 0) > 0
         )
         if (
             getattr(ms, "_android_pending_watched_ep", None) is not None
@@ -226,7 +240,11 @@ def handle_details_state(
             ms.current_ep_index = 0
             ms.current_ep = episode_id_at(episode_ids, 0)
 
-        if getattr(ms, "_is_downloads", False) and getattr(ms, "_download_files", None):
+        if (
+            getattr(ms, "_is_downloads", False)
+            and getattr(ms, "_download_files", None)
+            and not is_completed
+        ):
             def _is_downloaded_idx(idx):
                 ep = episode_id_at(episode_ids, idx)
                 if str(ep) in ms._download_files:
@@ -466,7 +484,12 @@ def handle_details_state(
         if feedback:
             full_nav_text = f"\033[38;5;222m{feedback}\033[0m"
         else:
-            full_nav_text = f"Tab=Sub/Dub • Enter=select • ?=Help • {nav_text}"
+            full_nav_text = context_footer(
+                s,
+                ui,
+                ms,
+                f"Tab=Sub/Dub • Enter=select • ?=Help • {nav_text}",
+            )
             if has_gaps:
                 full_nav_text = f"{len(episode_ids)} listed • {full_nav_text}"
         parts.append(app_core._poster_footer_line(s, full_nav_text, w))
@@ -675,4 +698,3 @@ def handle_details_state(
             return "QUIT"
 
     return "DETAILS"
-

@@ -7,7 +7,7 @@ import re
 import sys
 import time
 import logging
-from typing import Any
+from typing import Any, Callable
 
 from .. import app_core
 from ..context import CliFlags, MachineState, UiState
@@ -40,11 +40,138 @@ RED = "\033[1;31m"
 RESET = "\033[0m"
 _logger = logging.getLogger(__name__)
 
+_AUTO_DOWNLOAD_OFF_VALUES = {"", "0", "false", "no", "off", "none", "disabled"}
+_AUTO_DOWNLOAD_ADAPTIVE_VALUES = {"1", "true", "yes", "on", "adaptive", "enabled"}
+_ADAPTIVE_PAUSE_CACHE_SECONDS = 30.0
+_ADAPTIVE_RESUME_CACHE_SECONDS = 90.0
+_ADAPTIVE_RESUME_GRACE_SECONDS = 5.0
+_ADAPTIVE_MONITOR_INTERVAL_SECONDS = 1.0
+
+
+def auto_download_mode(cfg: dict | None, session_value=None) -> str:
+    value = session_value
+    if value is None and cfg is not None:
+        value = cfg.get("auto_download_next", "adaptive")
+    if isinstance(value, bool):
+        return "adaptive" if value else "off"
+    norm = str(value if value is not None else "adaptive").strip().lower()
+    if norm in _AUTO_DOWNLOAD_OFF_VALUES:
+        return "off"
+    if norm in _AUTO_DOWNLOAD_ADAPTIVE_VALUES:
+        return "adaptive"
+    return "adaptive"
+
+
+def _stream_is_local(stream: dict | None) -> bool:
+    if not isinstance(stream, dict):
+        return False
+    if stream.get("is_local"):
+        return True
+    if str(stream.get("source_name") or "").lower() == "local file":
+        return True
+    link = str(stream.get("link") or stream.get("streamUrl") or stream.get("sourceUrl") or "")
+    return bool(link and "://" not in link)
+
+
+def should_start_adaptive_auto_download(stream: dict | None, mode: str) -> bool:
+    if mode != "adaptive":
+        return False
+    if _stream_is_local(stream):
+        return True
+    return not app_core.is_termux()
+
+
+def _numeric_prop(props: dict, *names: str) -> float | None:
+    for name in names:
+        try:
+            val = props.get(name)
+            if val is None:
+                continue
+            num = float(val)
+            if num >= 0:
+                return num
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+class AdaptiveAutoDownloadController:
+    """Hysteresis controller for background downloads during online playback."""
+
+    def __init__(
+        self,
+        *,
+        start: Callable[[], None],
+        pause: Callable[[], None],
+        resume: Callable[[], None],
+        log: Callable[[str], None] | None = None,
+    ):
+        self._start = start
+        self._pause = pause
+        self._resume = resume
+        self._log = log or (lambda _msg: None)
+        self.state = "waiting"
+        self._last_resume_at = 0.0
+
+    def _effective_resume_threshold(self, props: dict) -> float:
+        threshold = _ADAPTIVE_RESUME_CACHE_SECONDS
+        duration = _numeric_prop(props, "duration")
+        current = _numeric_prop(props, "playback-time", "time-pos")
+        if duration is not None and current is not None and duration > current:
+            threshold = min(threshold, max(5.0, duration - current))
+        return threshold
+
+    @staticmethod
+    def _effective_pause_threshold(resume_threshold: float) -> float:
+        return min(_ADAPTIVE_PAUSE_CACHE_SECONDS, max(5.0, resume_threshold / 3.0))
+
+    @staticmethod
+    def _fmt_cache(cache_seconds: float) -> str:
+        return f"{int(round(cache_seconds))}s"
+
+    def update(self, props: dict | None) -> None:
+        props = props or {}
+        cache_seconds = _numeric_prop(props, "demuxer-cache-duration", "cache-duration")
+        paused_for_cache = bool(props.get("paused-for-cache"))
+        now = time.monotonic()
+        resume_threshold = self._effective_resume_threshold(props)
+        pause_threshold = self._effective_pause_threshold(resume_threshold)
+
+        if self.state == "waiting":
+            if cache_seconds is not None and cache_seconds >= resume_threshold:
+                self._start()
+                self.state = "running"
+                self._last_resume_at = now
+                self._log(f"Auto-download resumed, cache {self._fmt_cache(cache_seconds)}")
+            return
+
+        if self.state == "running":
+            if paused_for_cache:
+                self._pause()
+                self.state = "paused"
+                self._log("Auto-download paused, player is buffering")
+                return
+            if now - self._last_resume_at < _ADAPTIVE_RESUME_GRACE_SECONDS:
+                return
+            if cache_seconds is not None and cache_seconds < pause_threshold:
+                self._pause()
+                self.state = "paused"
+                self._log(f"Auto-download paused, cache {self._fmt_cache(cache_seconds)}")
+            return
+
+        if self.state == "paused":
+            if cache_seconds is not None and cache_seconds >= resume_threshold:
+                self._resume()
+                self.state = "running"
+                self._last_resume_at = now
+                self._log(f"Auto-download resumed, cache {self._fmt_cache(cache_seconds)}")
 
 
 
-def trigger_background_auto_download(show_ctx, current_ep_index, episode_ids, ttype, cfg, ms):
-    if not (cfg.get("auto_download_next", False) or getattr(ms, "auto_download_next", False)):
+
+def trigger_background_auto_download(show_ctx, current_ep_index, episode_ids, ttype, cfg, ms, current_stream=None):
+    mode = auto_download_mode(cfg, getattr(ms, "auto_download_next", None))
+    if mode == "off":
         return
     if not app_core.is_online():
         return
@@ -76,92 +203,161 @@ def trigger_background_auto_download(show_ctx, current_ep_index, episode_ids, tt
     task_key = (show_title, str(next_ep))
     if task_key in bg_tasks:
         return
+    if not should_start_adaptive_auto_download(current_stream, mode):
+        return
+
+    from media_cli.media.download import sanitize_filename
+    from media_cli.media.download_worker import DownloadItem, DownloadStatus, get_global_worker
+
     bg_tasks.add(task_key)
+    provider_title_id = title_provider_id(show_ctx)
+    provider_id = title_provider_key(show_ctx)
+    quality = cfg.get("quality", "best")
+    downloader_choice = cfg.get("downloader", "auto")
+    download_dir = cfg.get("download_dir", "")
+    safe_title = sanitize_filename(show_title) or show_title
+    base_dir = download_dir or app_core.storage.get_default_download_dir()
+    target_dir = os.path.join(base_dir, safe_title)
+    dest_path = os.path.join(target_dir, f"{safe_title} - Episode {lbl_next}.mkv")
 
-    import threading
-    def _bg_worker():
+    def build_offline_metadata(s):
+        meta = {}
+        keys_to_keep = [
+            "id", "_id", "provider_id", "name", "englishName", "nativeName", "altNames",
+            "thumbnail", "description", "type", "format",
+            "status", "season", "airedStart", "airedEnd", "startDate",
+            "endDate", "score", "genres", "tags", "aniListId", "malId",
+            "_display_name", "_display_english_name", "_anilist_list",
+            "_anilist_progress", "_anilist_score", "anilistMatch",
+            "originalEpisodeCount", "episodeCount", "_provider", "provider",
+            "_provider_name", "_provider_data", "_episode_ids", "_episode_labels",
+            "_episode_ids_by_ttype", "availableEpisodes", "availableEpisodesDetail",
+            "_local_progress", "_local_episode_label", "watched_episodes"
+        ]
+        for k in keys_to_keep:
+            if k in s:
+                meta[k] = s[k]
+        if "originalEpisodeCount" not in meta and "episodeCount" in s:
+            meta["originalEpisodeCount"] = s["episodeCount"]
+        return meta
+
+    def _resolve(item):
+        ep_d = (show_ctx.get("_provider_data") or {}).get(str(next_ep))
+        res = app_core.fetch_episode_stream(
+            provider_title_id,
+            next_ep,
+            ttype,
+            quality,
+            provider_id=provider_id,
+            ep_data=ep_d,
+            exclude_sources=getattr(item, "failed_mirrors", set()),
+        )
+        if not res or not res[0]:
+            raise RuntimeError(f"No stream found for episode {next_ep}")
+        selected_stream, first_source_name = res[0], res[1]
+        raw_url = selected_stream.get("link") or selected_stream.get("streamUrl") or selected_stream.get("sourceUrl") or ""
+        if not raw_url:
+            raise RuntimeError("No stream URL in resolved stream")
+        item.current_mirror_name = first_source_name or selected_stream.get("source_name") or selected_stream.get("source_parent_name") or "selected mirror"
+        item.current_mirror_url = raw_url
+        headers = dict(selected_stream.get("headers") or {})
+        referer = selected_stream.get("referer", "")
+        if referer and "Referer" not in headers:
+            headers["Referer"] = referer
+        item.audio_tracks = list(selected_stream.get("audio_tracks") or [])
+        item.audio_url = selected_stream.get("audio_url", "")
+        item.subtitles = list(selected_stream.get("subtitles") or selected_stream.get("vtt") or [])
+        item.subtitle_url = selected_stream.get("subtitle_url", "")
+        return raw_url, headers, None
+
+    def _on_complete(item):
         try:
-            provider_title_id = title_provider_id(show_ctx)
-            provider_id = title_provider_key(show_ctx)
-            ep_d = (show_ctx.get("_provider_data") or {}).get(str(next_ep))
-            res = app_core.fetch_episode_stream(
-                provider_title_id,
-                next_ep,
-                ttype,
-                cfg.get("quality", "best"),
-                provider_id=provider_id,
-                ep_data=ep_d,
+            from media_cli.core.storage import collect_downloaded_episode_files, register_downloaded_episode_files
+            folder_key = sanitize_filename(item.title) or item.title
+            ep_str = str(getattr(item, "ep_id", item.episode))
+            files = list(getattr(item, "output_files", []) or collect_downloaded_episode_files(item.destination_path))
+            register_downloaded_episode_files(
+                folder_key,
+                ep_str,
+                files,
+                metadata=getattr(item, "show_metadata", None),
             )
-            if not res:
-                return
-            selected_stream, first_source_name, _, streams = res
-            if not selected_stream:
-                return
-
-            downloader_choice = cfg.get("downloader", "auto")
-            download_dir = cfg.get("download_dir", "")
-            download_ok = app_core.download_episode(
-                show_title,
-                lbl_next,
-                selected_stream,
-                download_dir=download_dir,
-                downloader=downloader_choice,
-                quiet=True,
-            )
-            if download_ok:
-                try:
-                    from media_cli.core.storage import load_downloads_db, save_downloads_db
-                    from media_cli.media.download import sanitize_filename
-                    db = load_downloads_db()
-                    folder_key = sanitize_filename(show_title) or show_title
-                    if folder_key not in db["shows"]:
-                        db["shows"][folder_key] = {"episodes": []}
-                    def build_offline_metadata(s):
-                        meta = {}
-                        keys_to_keep = [
-                            "id", "_id", "provider_id", "name", "englishName", "nativeName", "altNames",
-                            "thumbnail", "description", "type", "format",
-                            "status", "season", "airedStart", "airedEnd", "startDate",
-                            "endDate", "score", "genres", "tags", "aniListId", "malId",
-                            "_display_name", "_display_english_name", "_anilist_list",
-                            "_anilist_progress", "_anilist_score", "anilistMatch",
-                            "originalEpisodeCount", "episodeCount", "_provider", "provider",
-                            "_provider_name", "_provider_data", "_episode_ids", "_episode_labels",
-                            "_episode_ids_by_ttype", "availableEpisodes", "availableEpisodesDetail",
-                            "_local_progress", "_local_episode_label", "watched_episodes"
-                        ]
-                        for k in keys_to_keep:
-                            if k in s:
-                                meta[k] = s[k]
-                        if "originalEpisodeCount" not in meta and "episodeCount" in s:
-                            meta["originalEpisodeCount"] = s["episodeCount"]
-                        return meta
-                    db["shows"][folder_key]["metadata"] = build_offline_metadata(show_ctx)
-                    ep_str = str(next_ep)
-                    if ep_str not in db["shows"][folder_key]["episodes"]:
-                        db["shows"][folder_key]["episodes"].append(ep_str)
-                    save_downloads_db(db)
-
-                    new_f = app_core.find_offline_file_for_episode(show_title, lbl_next, cfg)
-                    if new_f:
-                        if hasattr(ms, "_download_files") and isinstance(ms._download_files, dict):
-                            ms._download_files[str(next_ep)] = new_f
-                            ms._download_files[str(lbl_next)] = new_f
-                    app_core.set_action_feedback(show_ctx, f"✔ Auto-downloaded EP {lbl_next}")
-                except Exception:
-                    pass
+            new_f = app_core.find_offline_file_for_episode(show_title, lbl_next, cfg)
+            if new_f and hasattr(ms, "_download_files") and isinstance(ms._download_files, dict):
+                ms._download_files[str(next_ep)] = new_f
+                ms._download_files[str(lbl_next)] = new_f
+            app_core.set_action_feedback(show_ctx, f"✔ Auto-downloaded EP {lbl_next}")
         except Exception:
-            _logger.exception(
-                "Background auto-download failed show=%r next_ep=%r ttype=%r",
-                show_title,
-                next_ep,
-                ttype,
-            )
+            pass
         finally:
             bg_tasks.discard(task_key)
 
-    th = threading.Thread(target=_bg_worker, daemon=True)
-    th.start()
+    item = DownloadItem(
+        id=f"{provider_title_id or ms.show_id or safe_title}:{next_ep}",
+        title=show_title,
+        episode=f"Episode {lbl_next}",
+        destination_path=dest_path,
+        engine=downloader_choice if downloader_choice in ("yt-dlp", "aria2c", "ffmpeg") else "auto",
+        resolve_fn=_resolve,
+        on_complete=_on_complete,
+        ep_id=next_ep,
+        show_metadata=build_offline_metadata(show_ctx),
+    )
+    worker = get_global_worker(download_dir)
+
+    def _log(message: str) -> None:
+        try:
+            item.logs.append(message)
+            app_core.info(message)
+        except Exception:
+            pass
+
+    if _stream_is_local(current_stream):
+        worker.add_item(item)
+        _log(f"Auto-download started for {playback_mod._fmt_ep(lbl_next)}")
+        return
+
+    item.status = DownloadStatus.PAUSED
+    worker.add_item(item)
+    controller = AdaptiveAutoDownloadController(
+        start=lambda: worker.resume_item(item.id, message=""),
+        pause=lambda: worker.pause_item(item.id, message=""),
+        resume=lambda: worker.resume_item(item.id, message=""),
+        log=_log,
+    )
+
+    def _monitor():
+        try:
+            player = app_core._ipc_player
+            missing_player_ticks = 0
+            while True:
+                proc = getattr(player, "process", None)
+                if proc is None:
+                    import threading as _threading
+                    if _threading.current_thread() is _threading.main_thread():
+                        break
+                    missing_player_ticks += 1
+                    if missing_player_ticks > 15:
+                        break
+                    time.sleep(_ADAPTIVE_MONITOR_INTERVAL_SECONDS)
+                    continue
+                if proc is not None and proc.poll() is not None:
+                    break
+                with worker.lock:
+                    if item.status in (
+                        DownloadStatus.COMPLETED,
+                        DownloadStatus.FAILED,
+                        DownloadStatus.CANCELLED,
+                        DownloadStatus.SKIPPED,
+                    ):
+                        break
+                controller.update(dict(getattr(player, "props", {}) or {}))
+                time.sleep(_ADAPTIVE_MONITOR_INTERVAL_SECONDS)
+        except Exception:
+            _logger.exception("Adaptive auto-download monitor failed")
+
+    import threading
+    threading.Thread(target=_monitor, daemon=True).start()
 
 
 def _mark_watched_in_show(show_ctx, episode) -> None:
@@ -182,12 +378,16 @@ def _auto_delete_watched_downloads(show_ctx, episode_ids, ttype, cfg, ms) -> lis
 
     folder_name = show_ctx.get("_folder_name", getattr(ms, "show_title", ""))
     watched_list = show_ctx.get("watched_episodes", [])
+    watched_keys = {str(ep) for ep in watched_list}
     dl_files = getattr(ms, "_download_files", {})
     watched_dl = []
+
+    def _episode_is_watched(eid, eid_lbl) -> bool:
+        return str(eid) in watched_keys or str(eid_lbl) in watched_keys
+
     for eid in episode_ids:
         eid_lbl = playback_mod._display_episode_label(show_ctx, eid, ttype)
-        is_watched = str(eid) in watched_list or str(eid_lbl) in watched_list
-        if not is_watched:
+        if not _episode_is_watched(eid, eid_lbl):
             continue
         is_downloaded = (
             str(eid) in dl_files
@@ -198,13 +398,21 @@ def _auto_delete_watched_downloads(show_ctx, episode_ids, ttype, cfg, ms) -> lis
         if is_downloaded:
             watched_dl.append((eid, eid_lbl))
 
-    if len(watched_dl) <= buf:
+    status_str = str(show_ctx.get("status") or "").upper()
+    is_finished = status_str in {"FINISHED", "COMPLETED", "ENDED"}
+    all_available_watched = bool(episode_ids) and all(
+        _episode_is_watched(eid, playback_mod._display_episode_label(show_ctx, eid, ttype))
+        for eid in episode_ids
+    )
+    effective_buf = 0 if is_finished and all_available_watched else buf
+
+    if len(watched_dl) <= effective_buf:
         return []
 
-    to_del = watched_dl[:-buf] if buf > 0 else watched_dl
+    to_del = watched_dl[:-effective_buf] if effective_buf > 0 else watched_dl
     deleted_labels = []
     for deid, dlbl in to_del:
-        if app_core.delete_offline_episode(folder_name, dlbl, cfg) or app_core.delete_offline_episode(folder_name, str(deid), cfg):
+        if app_core.delete_offline_episode(folder_name, dlbl, cfg, require_recorded=True) or app_core.delete_offline_episode(folder_name, str(deid), cfg, require_recorded=True):
             for key in (str(deid), str(dlbl), deid, dlbl):
                 dl_files.pop(key, None)
             dl_eps = show_ctx.get("_downloaded_episodes", [])
@@ -914,24 +1122,21 @@ def handle_play_state(
 
             def _on_complete(item):
                 try:
-                    from media_cli.core.storage import load_downloads_db, save_downloads_db
-                    db = load_downloads_db()
+                    from media_cli.core.storage import collect_downloaded_episode_files, register_downloaded_episode_files
                     f_key = sanitize_filename(item.title) or item.title
-                    if f_key not in db["shows"]:
-                        db["shows"][f_key] = {"episodes": []}
-                    if getattr(item, "show_metadata", None):
-                        db["shows"][f_key]["metadata"] = item.show_metadata
                     ep_str = str(getattr(item, "ep_id", item.episode))
-                    if ep_str not in db["shows"][f_key]["episodes"]:
-                        db["shows"][f_key]["episodes"].append(ep_str)
-                    save_downloads_db(db)
+                    files = list(getattr(item, "output_files", []) or collect_downloaded_episode_files(item.destination_path))
+                    register_downloaded_episode_files(
+                        f_key,
+                        ep_str,
+                        files,
+                        metadata=getattr(item, "show_metadata", None),
+                    )
                 except Exception:
                     pass
 
             quality = cfg.get("quality", "best")
-            effective_subtitle_mode = getattr(args, "subtitle_mode", None) or cfg.get("subtitle_mode", "embed")
-            embed_subs = effective_subtitle_mode == "embed"
-            ext = ".mkv" if embed_subs else ".mp4"
+            ext = ".mkv"
 
             for epid, eplbl in target_eps:
                 item_id = f"{ms.show_id or safe_title}:{epid}"
@@ -981,13 +1186,10 @@ def handle_play_state(
             )
             if download_ok:
                 try:
-                    from media_cli.core.storage import load_downloads_db, save_downloads_db
+                    from media_cli.core.storage import collect_downloaded_episode_files, register_downloaded_episode_files
                     from media_cli.media.download import sanitize_filename
-                    db = load_downloads_db()
                     title = ms.show_title
                     folder_key = sanitize_filename(title) or title
-                    if folder_key not in db["shows"]:
-                        db["shows"][folder_key] = {"episodes": []}
 
                     def build_offline_metadata(s):
                         meta = {}
@@ -1010,11 +1212,14 @@ def handle_play_state(
                             meta["originalEpisodeCount"] = s["episodeCount"]
                         return meta
 
-                    db["shows"][folder_key]["metadata"] = build_offline_metadata(s_ctx)
-                    ep_str = str(ms.current_ep)
-                    if ep_str not in db["shows"][folder_key]["episodes"]:
-                        db["shows"][folder_key]["episodes"].append(ep_str)
-                    save_downloads_db(db)
+                    offline_file = app_core.find_offline_file_for_episode(title, current_ep_label, cfg)
+                    if offline_file:
+                        register_downloaded_episode_files(
+                            folder_key,
+                            str(ms.current_ep),
+                            collect_downloaded_episode_files(offline_file),
+                            metadata=build_offline_metadata(s_ctx),
+                        )
                 except Exception:
                     pass
                 break
@@ -1167,7 +1372,7 @@ def handle_play_state(
             )
         custom_skip_intervals = custom_skip["intervals"] if custom_skip else None
 
-        trigger_background_auto_download(action_show, ms.current_ep_index, episode_ids, ttype, cfg, ms)
+        trigger_background_auto_download(action_show, ms.current_ep_index, episode_ids, ttype, cfg, ms, ms.selected_stream)
 
         result = app_core.play_android(
             ms.show_title,
@@ -1241,7 +1446,7 @@ def handle_play_state(
         )
         custom_skip_intervals = custom_skip["intervals"] if custom_skip else None
 
-        trigger_background_auto_download(action_show, ms.current_ep_index, episode_ids, ttype, cfg, ms)
+        trigger_background_auto_download(action_show, ms.current_ep_index, episode_ids, ttype, cfg, ms, ms.selected_stream)
 
         start_time_override = getattr(ms, "pending_resume_time", None)
         ms.pending_resume_time = None
@@ -1457,10 +1662,15 @@ def handle_play_state(
 
         if getattr(ms, "_is_downloads", False) and completed_for_history:
             try:
-                from media_cli.core.storage import update_offline_watch_status
                 folder_name = ui.ui_show_ctx.get("_folder_name", ms.show_title)
-                if update_offline_watch_status(folder_name, ms.current_ep):
-                    _mark_watched_in_show(ui.ui_show_ctx, ms.current_ep)
+                app_core.record_download_watch_progress(
+                    ui.ui_show_ctx,
+                    folder_name,
+                    ms.current_ep,
+                    ttype,
+                    sync_enabled=sync_enabled,
+                )
+                _mark_watched_in_show(ui.ui_show_ctx, ms.current_ep)
             except Exception:
                 pass
         if completed_for_history:
@@ -1502,7 +1712,7 @@ def handle_play_state(
                         dl_files = getattr(ms, "_download_files", {})
                         is_next_dl = str(next_ep) in dl_files or str(lbl_next) in dl_files or bool(app_core.find_offline_file_for_episode(ms.show_title, lbl_next, cfg))
                         if not is_next_dl:
-                            if getattr(ms, "auto_download_next", False):
+                            if auto_download_mode(cfg, getattr(ms, "auto_download_next", None)) == "adaptive":
                                 if app_core.is_online():
                                     ms.current_ep_index += 1
                                     ms.current_ep = next_ep

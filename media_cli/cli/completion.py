@@ -35,7 +35,7 @@ SEARCH_OPTIONS = (
     "--aniskip", "--no-aniskip", "--auto-skip", "--no-auto-skip",
     "--auto-download", "--no-auto-download", "--auto-delete", "--no-auto-delete",
     "--downloader", "--download-dir", "--dir",
-    "--sub-langs", "--audio-langs", "--embed-subs", "--sidecar-subs", "--no-subs",
+    "--sub-langs", "--audio-langs", "--no-subs",
     "-t", "--sync", "--no-sync",
     "--cover", "--no-cover", "--json", "--history", "--clear-history",
     "-P", "--provider", "--incognito", "--debug", "--plain", "--no-tui",
@@ -81,7 +81,7 @@ CONFIG_KEYS = (
     "download_dir", "auto_download_next", "auto_delete_watched", "auto_delete_buffer",
     "binge", "sync", "anilist_token", "anilist_sort", "anilist_sort_reverse",
     "cover", "spinner", "aniskip", "auto_skip",
-    "download_sub_langs", "download_audio_langs", "subtitle_mode",
+    "download_sub_langs", "download_audio_langs",
     "torrent_fallback", "torrent_search_limit", "torrent_min_seeders",
     "torrent_hydrate_top", "torrent_prefer_size", "torrent_allow_unknown_seeders",
     "log_max_bytes", "log_backup_count",
@@ -208,12 +208,6 @@ def bash_completion():
         title_language)
             if [[ "$cmd" == "config" ]]; then
                 COMPREPLY=( $(compgen -W "romaji english native" -- "$cur") )
-                return 0
-            fi
-            ;;
-        subtitle_mode)
-            if [[ "$cmd" == "config" ]]; then
-                COMPREPLY=( $(compgen -W "sidecar embed none" -- "$cur") )
                 return 0
             fi
             ;;

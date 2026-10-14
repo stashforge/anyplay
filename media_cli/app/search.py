@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import TYPE_CHECKING, Any
 
 from media_cli import app_core
@@ -22,6 +23,7 @@ from ..ui import picker as _picker_mod
 from ..ui.help import picker_help, search_input_help
 from ..ui.spinner import spinner_frame, spinner_from_config
 from . import playback as playback_mod
+from .footer import context_footer, context_prefix
 
 # ---------------------------------------------------------------------------
 # Colors
@@ -89,71 +91,115 @@ def handle_history_state(
         if _hover_index >= len(filtered_hist):
             _hover_index = max(0, len(filtered_hist) - 1) if filtered_hist else -1
 
+    def _persist_history_entry_state(entry):
+        try:
+            history_domain.history_entry_category(entry)
+            app_core.patch_history_entry_state(entry)
+        except Exception:
+            pass
 
     _history_open_time = time.time()
+    _hover_index = -1
+    _hover_start_time = time.time()
+    _refreshed_history_ids = set()
+    _in_flight_hover_refresh = set()
 
-    def _start_batch_refresh():
+    def _refresh_history_entries(entries, *, force=False, status_key="BATCH", message="Checking stale titles..."):
         nonlocal _history_open_time
         _history_open_time = time.time()
-        history_refresh_status["BATCH"] = "Checking for new episodes..."
+        entries = list(entries or [])
+        if not force:
+            entries = [
+                entry for entry in entries
+                if history_domain.history_entry_should_auto_refresh(entry, now=_history_open_time)
+            ]
+        if not entries:
+            return False
+
+        history_refresh_status[status_key] = message
         _picker_mod._needs_redraw = True
 
         def _worker():
             try:
-                if app_core.refresh_history_anilist_airing_batch(hist):
-                    _rebuild_history_view()
-                    _picker_mod._needs_redraw = True
-                for entry in hist:
+                provider_entries = []
+                for entry in list(entries):
                     s_obj = entry.get("show", {})
                     s_id = str(s_obj.get("_id") or "")
-                    if s_id and (
-                        app_core.get_show_anilist_id(s_obj)
-                        or s_obj.get("_anilist_airing_checked_at", 0) >= _history_open_time
-                    ):
+                    if not s_id:
+                        continue
+                    if app_core.get_show_anilist_id(s_obj):
+                        continue
+                    if not force and history_domain.history_can_skip_finished_provider_refresh(s_obj):
                         _refreshed_history_ids.add(s_id)
+                        continue
+                    provider_entries.append(entry)
 
-                # Background-check provider episode catalogs for active non-AniList titles
+                provider_entries.sort(
+                    key=lambda item: 0 if history_domain.history_entry_category(item) == "Up to date" else 1
+                )
+
                 batch_changed = False
-                for entry in list(hist):
-                    s_obj = entry.get("show", {})
-                    s_id = str(s_obj.get("_id") or "")
-                    if not s_id or s_id in _refreshed_history_ids:
-                        continue
-                    status = str(s_obj.get("status") or "").upper()
-                    if status in ("FINISHED", "COMPLETED", "ENDED") and s_obj.get("episodeCount") and s_obj.get("description"):
-                        _refreshed_history_ids.add(s_id)
-                        continue
+
+                def _refresh_provider_entry(entry):
                     try:
                         changed = app_core.refresh_history_entry_provider_catalog(entry)
-                        _refreshed_history_ids.add(s_id)
+                        s_obj = entry.get("show", {})
                         s_obj["_episode_catalog_state"] = "loaded"
-                        if changed:
-                            app_core.patch_history_entry_show(s_id, entry.get("translation_type", "sub"), s_obj)
-                            history_domain.history_entry_category(entry)
-                            batch_changed = True
+                        return entry, bool(changed)
                     except Exception:
-                        pass
+                        return entry, False
+
+                with ThreadPoolExecutor(max_workers=4) as executor:
+                    anilist_future = executor.submit(
+                        app_core.refresh_history_anilist_airing_batch,
+                        entries,
+                        force=force,
+                    )
+                    provider_futures = [
+                        executor.submit(_refresh_provider_entry, entry)
+                        for entry in provider_entries
+                    ]
+
+                    if anilist_future.result():
+                        batch_changed = True
+                        _rebuild_history_view()
+                        _picker_mod._needs_redraw = True
+
+                    for entry in entries:
+                        s_obj = entry.get("show", {})
+                        s_id = str(s_obj.get("_id") or "")
+                        if s_id and (
+                            app_core.get_show_anilist_id(s_obj)
+                            or s_obj.get("_anilist_airing_checked_at", 0) >= _history_open_time
+                        ):
+                            _refreshed_history_ids.add(s_id)
+
+                    for future in as_completed(provider_futures):
+                        entry, changed = future.result()
+                        s_obj = entry.get("show", {})
+                        s_id = str(s_obj.get("_id") or "")
+                        if s_id:
+                            _refreshed_history_ids.add(s_id)
+                        if changed and s_id:
+                            app_core.patch_history_entry_show(s_id, entry.get("translation_type", "sub"), s_obj)
+                            batch_changed = True
+                        _persist_history_entry_state(entry)
+
                 if batch_changed:
                     _rebuild_history_view()
                     _picker_mod._needs_redraw = True
             except Exception:
                 pass
             finally:
-                history_refresh_status.pop("BATCH", None)
+                history_refresh_status.pop(status_key, None)
                 _rebuild_history_view()
                 _picker_mod._needs_redraw = True
 
         threading.Thread(target=_worker, daemon=True).start()
+        return True
 
-    global _history_session_refreshed
-    if not _history_session_refreshed and not getattr(flags, "plain_mode", False) and not flags.incognito_mode:
-        _history_session_refreshed = True
-        _start_batch_refresh()
-
-    _hover_index = -1
-    _hover_start_time = time.time()
-    _refreshed_history_ids = set()
-    _in_flight_hover_refresh = set()
+    if not getattr(flags, "plain_mode", False) and not flags.incognito_mode:
+        _refresh_history_entries(hist)
 
     def _trigger_hover_refresh_if_needed():
         if not (0 <= _hover_index < len(filtered_hist)):
@@ -171,21 +217,12 @@ def handle_history_state(
 
         # Finished titles with known episode counts don't have new episodes to check
         status = str(show.get("status") or "").upper()
-        if status in ("FINISHED", "COMPLETED", "ENDED") and show.get("episodeCount") and show.get("description") and show.get("genres"):
-            _refreshed_history_ids.add(show_id)
-            return
-
-        if (
-            show.get("_episode_catalog_state") == "loaded"
-            or show.get("_provider_catalog_checked_at", 0) >= _history_open_time
-            or show.get("_anilist_airing_checked_at", 0) >= _history_open_time
-            or show.get("_allanime_checked_at", 0) >= _history_open_time
-        ):
+        if not history_domain.history_entry_should_auto_refresh(entry, now=time.time()):
             _refreshed_history_ids.add(show_id)
             return
 
         _in_flight_hover_refresh.add(show_id)
-        history_refresh_status["SINGLE"] = "Checking for new episodes..."
+        history_refresh_status["SINGLE"] = "Checking stale title..."
         _picker_mod._needs_redraw = True
 
         def _worker():
@@ -195,9 +232,9 @@ def handle_history_state(
                 show["_episode_catalog_state"] = "loaded"
                 if changed:
                     app_core.patch_history_entry_show(show_id, entry.get("translation_type", "sub"), show)
-                    history_domain.history_entry_category(entry)
                     _rebuild_history_view()
                     _picker_mod._needs_redraw = True
+                _persist_history_entry_state(entry)
             except Exception:
                 pass
             finally:
@@ -210,17 +247,23 @@ def handle_history_state(
     def _history_footer(entry, width):
         updated = app_core.format_history_updated_time(entry)
         incog_badge = "\033[38;2;155;125;185mINCOGNITO (READ-ONLY)\033[0m" if flags.incognito_mode else ""
-        default = _footer_parts(
+        show = entry.get("show", {}) if isinstance(entry, dict) else {}
+        default = context_footer(
+            show,
+            ui,
+            ms,
             incog_badge,
             f"Updated {updated}" if updated else "",
             "Enter/Right open",
             "Left search",
             "Tab/Ctrl+N next",
-            "Ctrl+R refresh",
+            "Ctrl+R refresh title",
+            "F5/Alt+R refresh view",
             "Del/Ctrl+D delete",
             "Esc quit",
+            mode="History",
         )
-        return app_core._poster_footer_line(entry.get("show", {}), default, width)
+        return app_core._poster_footer_line(show, default, width)
 
     def _hist_top_hdr(si):
         if filtered_hist:
@@ -269,7 +312,18 @@ def handle_history_state(
 
         if status_msg:
             spinner = spinner_frame(spinner_from_config(cfg))
-            parts.append(app_core._poster_footer_line(selected_show, f"\033[36m{spinner} {status_msg}\033[0m", w))
+            loading_footer = _footer_parts(
+                f"\033[36m{spinner} Updating\033[0m\033[38;5;244m",
+                context_prefix(selected_show, ui, ms, mode="History"),
+                "Enter/Right open",
+                "Left search",
+                "Tab/Ctrl+N next",
+                "Ctrl+R refresh title",
+                "F5/Alt+R refresh view",
+                "Del/Ctrl+D delete",
+                "Esc quit",
+            )
+            parts.append(app_core._poster_footer_line(selected_show, loading_footer, w))
         else:
             parts.append(_history_footer(selected_entry, w))
 
@@ -307,9 +361,30 @@ def handle_history_state(
         mode_index = history_modes.index(history_mode)
         return _set_history_mode(mode_index + direction)
 
-    def _hist_refresh(_selected=None):
+    def _hist_refresh(selected=None):
+        if selected is None or not (0 <= selected < len(filtered_hist)):
+            return hopts, _hist_hdr(0)
+        entry = filtered_hist[selected]
+        show_id = str((entry.get("show") or {}).get("_id") or "")
+        if show_id:
+            _refreshed_history_ids.discard(show_id)
+        _refresh_history_entries(
+            [entry],
+            force=True,
+            status_key="SINGLE",
+            message="Refreshing selected title...",
+        )
+        _rebuild_history_view()
+        return hopts, _hist_hdr(0)
+
+    def _hist_refresh_visible(_selected=None):
         _refreshed_history_ids.clear()
-        _start_batch_refresh()
+        _refresh_history_entries(
+            filtered_hist,
+            force=True,
+            status_key="BATCH",
+            message="Refreshing visible titles...",
+        )
         _rebuild_history_view()
         return hopts, _hist_hdr(0)
 
@@ -319,6 +394,7 @@ def handle_history_state(
             _trigger_hover_refresh_if_needed()
         return (
             history_refresh_status.get("BATCH") is not None
+            or history_refresh_status.get("SINGLE") is not None
             or bool(_in_flight_hover_refresh)
         )
 
@@ -339,10 +415,16 @@ def handle_history_state(
         entry = filtered_hist[selected]
         selected_show = entry.get("show", {})
         selected_ttype = entry.get("translation_type", "sub")
+        if history_domain.history_entry_refresh_is_stale(entry, now=time.time()):
+            try:
+                app_core.refresh_history_entry_provider_catalog(entry)
+            except Exception:
+                pass
         selected_history_episode_ids[selected] = app_core.ensure_episode_ids(
             selected_show,
             selected_ttype,
         )
+        _persist_history_entry_state(entry)
         return True
 
     def _hist_prompt():
@@ -351,6 +433,18 @@ def handle_history_state(
             return f"\033[38;2;155;125;185mINCOGNITO\033[0m · {base}"
         return base
 
+    hist_help = picker_help(
+        "Open details",
+        "Search",
+        "Quit",
+        "Next filter",
+        "Previous filter",
+        "Remove from history",
+        reverse_label="Refresh selected title",
+    )
+    hist_help["Alt+R"] = "Refresh visible titles"
+    hist_help["F5"] = "Refresh visible titles"
+
     hidx = tui_pick(
         flags, ui,
         _hist_prompt, hopts,
@@ -358,17 +452,11 @@ def handle_history_state(
         top_header_fn=_hist_top_hdr,
         tab_fn=_hist_tab,
         reverse_fn=_hist_refresh,
+        alt_reverse_fn=_hist_refresh_visible,
         delete_fn=_hist_delete,
         live_fn=lambda _query: (list(hopts), "", False),
         info_fn=app_core.make_info_fn(lambda: [e.get("show", {}) for e in filtered_hist], ui),
-        help_dict=picker_help(
-            "Open details",
-            "Search",
-            "Quit",
-            "Next filter",
-            "Previous filter",
-            "Remove from history",
-        ),
+        help_dict=hist_help,
         keep_cursor_hidden_on_select=True,
         count_total=lambda: len(hist),
         tick_fn=_hist_tick,

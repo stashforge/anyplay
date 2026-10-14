@@ -226,8 +226,8 @@ class MachineState:
     """Cached results of the last AniList search."""
 
     # Smart Downloads options
-    auto_download_next: bool = False
-    """Auto-download next episode in background/binge mode if missing locally."""
+    auto_download_next: str | bool = "adaptive"
+    """Auto-download next episode adaptively, or "off" to disable."""
     auto_delete_watched: bool = False
     """Auto-delete watched episodes once beyond the rolling safety buffer."""
     auto_delete_buffer: int = 1

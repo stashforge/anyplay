@@ -120,6 +120,7 @@ def remux_subtitles_into_mkv(
     video_path: str,
     subtitle_paths: list[str],
     output_mkv_path: str,
+    metadata_args: list[str] | None = None,
     quiet: bool = False,
 ) -> bool:
     """Losslessly remux a video file and subtitle files into an MKV container using ffmpeg -c copy.
@@ -146,6 +147,8 @@ def remux_subtitles_into_mkv(
         cmd.extend([f"-metadata:s:s:{idx-1}", f"language={lang_alpha3}"])
         cmd.extend([f"-metadata:s:s:{idx-1}", f"title={title}"])
 
+    if metadata_args:
+        cmd.extend(metadata_args)
     cmd.extend(["-c", "copy", output_mkv_path])
 
     try:

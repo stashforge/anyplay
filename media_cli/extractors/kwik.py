@@ -33,7 +33,7 @@ class KwikExtractor(BaseExtractor):
         try:
             from ..providers.animepahe import _detect_firefox_user_agent, _find_browser_cookies
             default_ua = _detect_firefox_user_agent()
-            browser_cookies = _find_browser_cookies()
+            browser_cookies = _find_browser_cookies(url)
         except Exception:
             default_ua = "Mozilla/5.0 (X11; Linux x86_64; rv:155.0) Gecko/20100101 Firefox/155.0"
             browser_cookies = {}

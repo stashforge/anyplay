@@ -27,6 +27,7 @@ from ..core.api import (
 )
 from ..services import anilist as anilist_service
 from ..services import normalize as anilist_normalize
+from ..domain.metadata import provider_status_is_authoritative
 from ..services.anilist_auth import (
     save_anilist_token,
     clear_anilist_token,
@@ -55,7 +56,6 @@ from ..services.anilist_queue import (
     flush_anilist_writes,
 )
 from ..services.http import anilist_urlopen
-from ..state import paths
 
 GREEN = "\033[1;32m"
 RED = "\033[1;31m"
@@ -567,11 +567,11 @@ def refresh_history_entry_from_anilist(entry, token):
     return changed
 
 
-def refresh_history_anilist_airing_batch(history_entries):
+def refresh_history_anilist_airing_batch(history_entries, *, force=False):
     now = int(_time.time())
 
-    # No cooldown, check every time user enters history
-    COOLDOWN = 0
+    from ..domain.history import HISTORY_REFRESH_COOLDOWN_SECONDS
+    COOLDOWN = HISTORY_REFRESH_COOLDOWN_SECONDS
 
     media_ids_to_fetch = []
     entry_map = {}
@@ -590,7 +590,9 @@ def refresh_history_anilist_airing_batch(history_entries):
         status = str(show.get("_anilist_status") or show.get("status") or "").upper()
 
         needs_refresh = False
-        if next_airing_at and next_airing_at <= now:
+        if force:
+            needs_refresh = True
+        elif next_airing_at and next_airing_at <= now:
             needs_refresh = True
         elif last_checked == 0:
             needs_refresh = True
@@ -671,7 +673,7 @@ def refresh_history_anilist_airing_batch(history_entries):
                 if new_status and old_al_status != new_status:
                     show["_anilist_status"] = new_status
                     changed = True
-                if new_status and show.get("status") != new_status:
+                if new_status and show.get("status") != new_status and not provider_status_is_authoritative(show):
                     show["status"] = new_status
                     changed = True
 
@@ -710,8 +712,8 @@ def refresh_history_anilist_airing_batch(history_entries):
                     debug_warn("Background title search fallback failed", e)
 
     if changed:
-        storage._atomic_write_json(paths.HISTORY_PATH, storage.sanitize_history_list(history_entries), indent=2)
-        storage._history_cache = history_entries
+        for entry in history_entries:
+            storage.patch_history_entry_state(entry)
         try:
             from ..ui.info_panel import invalidate_panel_cache
             invalidate_panel_cache()

@@ -24,12 +24,19 @@ def test_cli_search_with_download_and_sub_langs():
         "--download",
         "--sub-langs", "eng,jpn",
         "--audio-langs", "jpn",
-        "--sidecar-subs",
     ])
     assert args.download is True
     assert args.download_sub_langs == "eng,jpn"
     assert args.download_audio_langs == "jpn"
-    assert args.subtitle_mode == "sidecar"
+
+
+def test_cli_sidecar_subs_option_is_removed():
+    with pytest.raises(SystemExit):
+        parse_cli_args([
+            "search", "slime", "-e", "1",
+            "--download",
+            "--sidecar-subs",
+        ])
 
 
 def test_cli_provider_search_with_download_flag():

@@ -44,6 +44,8 @@ class MpvIpc:
             "duration": 0,
             "pause": False,
             "paused-for-cache": False,
+            "cache-buffering-state": 0,
+            "demuxer-cache-duration": None,
             "percent-pos": 0,
         }
         self.prefetched_ep = None
@@ -86,6 +88,8 @@ class MpvIpc:
         self.send_cmd("observe_property", 3, "pause")
         self.send_cmd("observe_property", 4, "percent-pos")
         self.send_cmd("observe_property", 5, "paused-for-cache")
+        self.send_cmd("observe_property", 6, "cache-buffering-state")
+        self.send_cmd("observe_property", 7, "demuxer-cache-duration")
 
     def send_cmd(self, *args):
         if not self.running and not (self.process and self.process.poll() is None and self.client):
@@ -114,6 +118,8 @@ class MpvIpc:
         self.props["duration"] = 0
         self.props["pause"] = False
         self.props["paused-for-cache"] = False
+        self.props["cache-buffering-state"] = 0
+        self.props["demuxer-cache-duration"] = None
         self.props["percent-pos"] = 0
         self.max_playback_time = float(start_time or 0.0)
         self.file_loaded = False
@@ -489,9 +495,6 @@ class MpvIpc:
                                         result = pending_action
                                         if pending_action == "QUIT":
                                             self.running = False
-                                    elif reason == "error" and process_exited():
-                                        result = "QUIT"
-                                        self.running = False
                                     elif reason == "error":
                                         if dur > 0 and curr_pos >= (dur - 30.0):
                                             result = "EOF"
@@ -506,6 +509,8 @@ class MpvIpc:
                                                 played_seconds,
                                             )
                                             self.send_cmd("show-text", playback_failed_osd("failed"), 10000)
+                                        if process_exited():
+                                            self.running = False
                                     elif reason in ("quit", "stop"):
                                         result = "QUIT"
                                         self.running = False
@@ -560,6 +565,10 @@ class MpvIpc:
                                             last_cache_flush = now
                                         elif name == "paused-for-cache" and val:
                                             last_cache_flush = now
+                                            last_time_pos_change = now
+                                        elif name == "cache-buffering-state" and float(val or 0) > 0:
+                                            last_cache_flush = now
+                                            last_time_pos_change = now
                                         elif name in ("duration", "percent-pos") and float(val or 0) > 0:
                                             file_loaded = True
                                             self.file_loaded = True

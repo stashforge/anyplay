@@ -110,6 +110,10 @@ def parse_cli_args(argv=None):
     parser = build_command_parser()
     args, extra = parser.parse_known_args(argv)
 
+    removed_flags = {"--sidecar-subs", "--embed-subs"}
+    if any(arg in removed_flags for arg in extra):
+        parser.error("subtitle sidecar/embed mode flags were removed; downloads now embed subtitles into MKV automatically")
+
     if extra:
         if getattr(args, "download", False):
             args.extra_args = extra

@@ -116,6 +116,474 @@ def test_history_watched_clears_indicator(monkeypatch):
         assert history_entry_category(entry2) == "Up to date"
 
 
+def test_record_download_watch_progress_updates_history_without_making_downloads_db_history(monkeypatch, tmp_path):
+    monkeypatch.setattr(paths, "STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(paths, "HISTORY_PATH", str(tmp_path / "history.json"))
+    monkeypatch.setattr(paths, "DOWNLOADS_DB_PATH", str(tmp_path / "downloads_db.json"))
+    monkeypatch.setattr(storage, "_history_cache", None)
+    monkeypatch.setattr(storage, "_downloads_cache", None, raising=False)
+
+    show = {
+        "_id": "shen-mu-3",
+        "name": "Shen Mu 3",
+        "_folder_name": "Shen Mu 3",
+        "status": "FINISHED",
+        "episodeCount": 52,
+        "availableEpisodes": {"sub": 52},
+    }
+    storage.write_history_progress(show, "36", "sub")
+    storage.save_downloads_db({
+        "shows": {
+            "Shen Mu 3": {
+                "metadata": dict(show),
+                "episodes": [str(ep) for ep in range(1, 53)],
+                "watched_episodes": [str(ep) for ep in range(1, 53) if ep != 52],
+            }
+        }
+    })
+
+    updated = storage.record_download_watch_progress(show, "Shen Mu 3", "52", "sub")
+
+    assert updated is True
+    db_show = storage.load_downloads_db()["shows"]["Shen Mu 3"]
+    assert "52" in db_show["watched_episodes"]
+    assert str(storage.get_local_progress(show, "sub")) == "52"
+    assert str(storage.get_local_episode_label(show, "sub")) == "52"
+    entry = storage.get_history_entry(show, "sub")
+    assert entry["episode"] == "52"
+    assert entry["was_caught_up"] is True
+    assert entry["has_new_release"] is False
+
+
+def test_record_download_unwatch_progress_lowers_history_to_latest_watched_download(monkeypatch, tmp_path):
+    monkeypatch.setattr(paths, "STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(paths, "HISTORY_PATH", str(tmp_path / "history.json"))
+    monkeypatch.setattr(paths, "DOWNLOADS_DB_PATH", str(tmp_path / "downloads_db.json"))
+    monkeypatch.setattr(storage, "_history_cache", None)
+    monkeypatch.setattr(storage, "_downloads_cache", None, raising=False)
+
+    show = {
+        "_id": "shen-mu-3",
+        "name": "Shen Mu 3",
+        "_folder_name": "Shen Mu 3",
+        "status": "FINISHED",
+        "episodeCount": 52,
+        "availableEpisodes": {"sub": 52},
+        "watched_episodes": ["50", "51", "52"],
+    }
+    storage.write_history_progress(show, "52", "sub")
+    storage.save_downloads_db({
+        "shows": {
+            "Shen Mu 3": {
+                "metadata": dict(show),
+                "episodes": [str(ep) for ep in range(1, 53)],
+                "watched_episodes": ["50", "51", "52"],
+            }
+        }
+    })
+
+    changed = storage.record_download_unwatch_progress(show, "Shen Mu 3", "52", "sub")
+
+    assert changed is True
+    db_show = storage.load_downloads_db()["shows"]["Shen Mu 3"]
+    assert db_show["watched_episodes"] == ["50", "51"]
+    assert show["watched_episodes"] == ["50", "51"]
+    assert str(storage.get_local_progress(show, "sub")) == "51"
+
+
+def test_download_watch_progress_with_sync_enabled_keeps_history_progress_isolated(monkeypatch, tmp_path):
+    monkeypatch.setattr(paths, "STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(paths, "HISTORY_PATH", str(tmp_path / "history.json"))
+    monkeypatch.setattr(paths, "DOWNLOADS_DB_PATH", str(tmp_path / "downloads_db.json"))
+    monkeypatch.setattr(storage, "_history_cache", None)
+    monkeypatch.setattr(storage, "_downloads_cache", None, raising=False)
+
+    show = {
+        "_id": "shen-mu-3",
+        "name": "Shen Mu 3",
+        "_folder_name": "Shen Mu 3",
+        "status": "FINISHED",
+        "episodeCount": 52,
+        "availableEpisodes": {"sub": 52},
+    }
+    storage.write_history_progress(show, "36", "sub")
+    storage.save_downloads_db({
+        "shows": {
+            "Shen Mu 3": {
+                "metadata": dict(show),
+                "episodes": [str(ep) for ep in range(1, 53)],
+                "watched_episodes": [],
+            }
+        }
+    })
+
+    storage.record_download_watch_progress(show, "Shen Mu 3", "52", "sub", sync_enabled=True)
+
+    assert "52" in storage.load_downloads_db()["shows"]["Shen Mu 3"]["watched_episodes"]
+    assert "52" in show["watched_episodes"]
+    assert str(storage.get_local_progress(show, "sub")) == "36"
+
+
+def test_download_unwatch_progress_with_sync_enabled_keeps_history_progress_isolated(monkeypatch, tmp_path):
+    monkeypatch.setattr(paths, "STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(paths, "HISTORY_PATH", str(tmp_path / "history.json"))
+    monkeypatch.setattr(paths, "DOWNLOADS_DB_PATH", str(tmp_path / "downloads_db.json"))
+    monkeypatch.setattr(storage, "_history_cache", None)
+    monkeypatch.setattr(storage, "_downloads_cache", None, raising=False)
+
+    show = {
+        "_id": "shen-mu-3",
+        "name": "Shen Mu 3",
+        "_folder_name": "Shen Mu 3",
+        "status": "FINISHED",
+        "episodeCount": 52,
+        "availableEpisodes": {"sub": 52},
+        "watched_episodes": ["51", "52"],
+    }
+    storage.write_history_progress(show, "36", "sub")
+    storage.save_downloads_db({
+        "shows": {
+            "Shen Mu 3": {
+                "metadata": dict(show),
+                "episodes": [str(ep) for ep in range(1, 53)],
+                "watched_episodes": ["51", "52"],
+            }
+        }
+    })
+
+    storage.record_download_unwatch_progress(show, "Shen Mu 3", "52", "sub", sync_enabled=True)
+
+    assert storage.load_downloads_db()["shows"]["Shen Mu 3"]["watched_episodes"] == ["51"]
+    assert show["watched_episodes"] == ["51"]
+    assert str(storage.get_local_progress(show, "sub")) == "36"
+
+
+def test_downloads_progress_modal_updates_download_watch_list(monkeypatch, tmp_path):
+    from media_cli.app.details_modals import handle_update_progress_state
+    from media_cli.context import CliFlags, MachineState, UiState
+
+    monkeypatch.setattr(paths, "STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(paths, "HISTORY_PATH", str(tmp_path / "history.json"))
+    monkeypatch.setattr(paths, "DOWNLOADS_DB_PATH", str(tmp_path / "downloads_db.json"))
+    monkeypatch.setattr(storage, "_history_cache", None)
+    monkeypatch.setattr(storage, "_downloads_cache", None, raising=False)
+
+    episode_ids = [str(ep) for ep in range(1, 53)]
+    show = {
+        "_id": "shen-mu-3",
+        "name": "Shen Mu 3",
+        "_folder_name": "Shen Mu 3",
+        "status": "FINISHED",
+        "episodeCount": 52,
+        "availableEpisodes": {"sub": 52},
+        "_episode_ids": episode_ids,
+        "_episode_labels": {ep: ep for ep in episode_ids},
+        "watched_episodes": [str(ep) for ep in range(1, 38)],
+    }
+    storage.save_downloads_db({
+        "shows": {
+            "Shen Mu 3": {
+                "metadata": dict(show),
+                "episodes": episode_ids,
+                "watched_episodes": [str(ep) for ep in range(1, 38)],
+            }
+        }
+    })
+
+    flags = CliFlags()
+    ui = UiState(ui_show_ctx=show, ui_ttype_ctx="sub", search_prev_state="DOWNLOADS", action_prev_state="DOWNLOADS")
+    ms = MachineState(show_title="Shen Mu 3", show_id="shen-mu-3")
+    ms._is_downloads = True
+    ms.auto_delete_watched = True
+    ms.auto_delete_buffer = 1
+    ms._download_files = {"52": "/tmp/Shen Mu 3/Shen Mu 3 - Episode 52.mkv"}
+    deleted = []
+
+    def choose_episode_52(flags, ui, title, opts, **kwargs):
+        return next(i for i, opt in enumerate(opts) if "Episode 52" in opt)
+
+    monkeypatch.setattr("media_cli.app.details_modals.tui_pick", choose_episode_52)
+    monkeypatch.setattr("media_cli.app.details_modals.app_core.ensure_episode_ids", lambda *a, **k: episode_ids)
+    monkeypatch.setattr("media_cli.app.details_modals.app_core.build_info_panel", lambda *a, **k: None)
+    monkeypatch.setattr("media_cli.app.details_modals.app_core.set_action_feedback", lambda *a, **k: None)
+    monkeypatch.setattr("media_cli.app.details_modals.app_core.save_resume_time", lambda *a, **k: None)
+    monkeypatch.setattr("media_cli.app.details_modals.app_core.get_show_anilist_id", lambda *a, **k: None)
+    monkeypatch.setattr("media_cli.app.playback_player.app_core.delete_offline_episode", lambda folder, ep, cfg=None, **kwargs: deleted.append(str(ep)) or True)
+
+    state = handle_update_progress_state(flags, ui, ms, {}, MagicMock(), "sub", lambda *a, **k: False)
+
+    assert state == "DETAILS"
+    db_show = storage.load_downloads_db()["shows"]["Shen Mu 3"]
+    assert db_show["watched_episodes"] == episode_ids
+    assert show["watched_episodes"] == episode_ids
+    assert str(storage.get_local_progress(show, "sub")) == "52"
+    assert show["_local_progress"] == 52
+    assert "52" in deleted
+    assert ms._download_files == {}
+
+
+def test_downloads_mark_watched_runs_completed_title_auto_delete(monkeypatch, tmp_path):
+    from media_cli.app.playback_menu import handle_action_menu_state
+    from media_cli.context import CliFlags, MachineState, UiState
+
+    monkeypatch.setattr(paths, "STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(paths, "HISTORY_PATH", str(tmp_path / "history.json"))
+    monkeypatch.setattr(paths, "DOWNLOADS_DB_PATH", str(tmp_path / "downloads_db.json"))
+    monkeypatch.setattr(storage, "_history_cache", None)
+    monkeypatch.setattr(storage, "_downloads_cache", None, raising=False)
+
+    episode_ids = [str(ep) for ep in range(1, 53)]
+    show = {
+        "_id": "shen-mu-3",
+        "name": "Shen Mu 3",
+        "_folder_name": "Shen Mu 3",
+        "status": "FINISHED",
+        "episodeCount": 52,
+        "availableEpisodes": {"sub": 52},
+        "_episode_ids": episode_ids,
+        "_episode_labels": {ep: ep for ep in episode_ids},
+        "watched_episodes": [str(ep) for ep in range(1, 52)],
+        "_downloaded_episodes": ["52"],
+    }
+    storage.save_downloads_db({
+        "shows": {
+            "Shen Mu 3": {
+                "metadata": dict(show),
+                "episodes": ["52"],
+                "watched_episodes": [str(ep) for ep in range(1, 52)],
+            }
+        }
+    })
+
+    flags = CliFlags()
+    ui = UiState(ui_show_ctx=show, ui_ttype_ctx="sub", search_prev_state="DOWNLOADS", action_prev_state="DOWNLOADS")
+    ms = MachineState(show_title="Shen Mu 3", show_id="shen-mu-3")
+    ms._is_downloads = True
+    ms.current_ep = "52"
+    ms.current_ep_index = 51
+    ms.total_eps = 52
+    ms.auto_delete_watched = True
+    ms.auto_delete_buffer = 1
+    ms._download_files = {"52": "/tmp/Shen Mu 3/Shen Mu 3 - Episode 52.mkv"}
+    deleted = []
+
+    def choose_mark_watched(flags, ui, title, opts, **kwargs):
+        return opts.index("Mark Watched")
+
+    monkeypatch.setattr("media_cli.app.playback_menu.tui_pick", choose_mark_watched)
+    monkeypatch.setattr("media_cli.app.playback_menu.app_core.ensure_episode_ids", lambda *a, **k: episode_ids)
+    monkeypatch.setattr("media_cli.app.playback_menu.app_core.get_show_anilist_id", lambda *a, **k: None)
+    monkeypatch.setattr("media_cli.app.playback_menu.app_core.get_resume_time", lambda *a, **k: 0)
+    monkeypatch.setattr("media_cli.app.playback_menu.app_core.get_local_progress", lambda *a, **k: 51)
+    monkeypatch.setattr("media_cli.app.playback_menu.app_core.get_local_episode_label", lambda *a, **k: "51")
+    monkeypatch.setattr("media_cli.app.playback_menu.app_core.build_info_panel", lambda *a, **k: None)
+    monkeypatch.setattr("media_cli.app.playback_menu.app_core.set_action_feedback", lambda *a, **k: None)
+    monkeypatch.setattr("media_cli.app.playback_menu.app_core.save_resume_time", lambda *a, **k: None)
+    monkeypatch.setattr("media_cli.app.playback_player.app_core.delete_offline_episode", lambda folder, ep, cfg=None, **kwargs: deleted.append(str(ep)) or True)
+
+    state = handle_action_menu_state(flags, ui, ms, {}, MagicMock(), "sub", lambda *a, **k: False)
+
+    assert state == "DETAILS"
+    assert storage.load_downloads_db()["shows"]["Shen Mu 3"]["watched_episodes"] == episode_ids
+    assert "52" in deleted
+    assert ms._download_files == {}
+
+
+def test_downloads_header_progress_handles_provider_id_watched_entries():
+    from media_cli.domain.metadata import prepare_show_display_state
+
+    episode_ids = [
+        f"https://animexin.dev/tomb-of-fallen-gods-season-3-episode-{ep}-indonesia-english-sub/"
+        for ep in range(1, 53)
+    ]
+    show = {
+        "_id": "shen-mu-3",
+        "name": "Shen Mu 3",
+        "status": "FINISHED",
+        "episodeCount": 52,
+        "availableEpisodes": {"sub": 52},
+        "_episode_ids": episode_ids,
+        "_episode_labels": {eid: ("52 END" if eid.endswith("episode-52-indonesia-english-sub/") else str(i + 1)) for i, eid in enumerate(episode_ids)},
+        "watched_episodes": episode_ids[36:],
+    }
+
+    prepare_show_display_state(show, "sub", False, prefer_watched_episodes=True)
+
+    assert show["_local_progress"] == 52
+    assert show["_local_episode_label"] == "52 END"
+
+
+def test_downloads_completed_provider_id_progress_does_not_show_play_next_ep4(monkeypatch):
+    from media_cli.app.details import handle_details_state
+    from media_cli.context import CliFlags, MachineState, UiState
+
+    episode_ids = [
+        f"https://animexin.dev/tomb-of-fallen-gods-season-3-episode-{ep}-indonesia-english-sub/"
+        for ep in range(1, 53)
+    ]
+    labels = {
+        eid: ("52 END" if idx == 51 else str(idx + 1))
+        for idx, eid in enumerate(episode_ids)
+    }
+    show = {
+        "_id": "shen-mu-3",
+        "name": "Shen Mu 3",
+        "_folder_name": "Shen Mu 3",
+        "_provider": "animexin",
+        "_has_provider_link": True,
+        "status": "FINISHED",
+        "episodeCount": 52,
+        "availableEpisodes": {"sub": 52},
+        "_episode_ids": episode_ids,
+        "_episode_labels": labels,
+        "watched_episodes": episode_ids[36:],
+    }
+    flags = CliFlags()
+    ui = UiState(ui_show_ctx=show, ui_ttype_ctx="sub", search_prev_state="DOWNLOADS")
+    ms = MachineState(show_title="Shen Mu 3", show_id="shen-mu-3")
+    ms._is_downloads = True
+    ms._download_files = {"3": "/tmp/Shen Mu 3/Shen Mu 3 - Episode 3.mkv"}
+
+    captured_opts = []
+
+    def capture_action(flags, ui, title, opts, **kwargs):
+        nonlocal captured_opts
+        captured_opts = list(opts)
+        return -2
+
+    monkeypatch.setattr("media_cli.app.details.app_core.ensure_episode_ids", lambda *a, **k: episode_ids)
+    monkeypatch.setattr("media_cli.app.details.app_core.with_loading", lambda _msg, fn, *a, **k: fn(*a, **k))
+    monkeypatch.setattr("media_cli.app.details.app_core.patch_history_entry_show", lambda *a, **k: None)
+    monkeypatch.setattr("media_cli.app.details.app_core.get_resume_time", lambda *a, **k: 0)
+    monkeypatch.setattr("media_cli.app.playback_menu.tui_pick", capture_action)
+    monkeypatch.setattr("media_cli.app.playback_menu.app_core.ensure_episode_ids", lambda *a, **k: episode_ids)
+    monkeypatch.setattr("media_cli.app.playback_menu.app_core.get_show_anilist_id", lambda *a, **k: None)
+    monkeypatch.setattr("media_cli.app.playback_menu.app_core.get_resume_time", lambda *a, **k: 0)
+    monkeypatch.setattr("media_cli.app.playback_menu.app_core.build_info_panel", lambda *a, **k: None)
+
+    state = handle_details_state(flags, ui, ms, {}, MagicMock(), "sub", lambda *a, **k: False)
+
+    assert state == "DOWNLOADS"
+    assert "Start Rewatch" in captured_opts
+    assert "Play Next" not in captured_opts
+    assert ms.current_ep == episode_ids[0]
+
+
+def test_downloads_action_menu_prefers_download_progress_over_stale_history(monkeypatch):
+    from media_cli.app.playback_menu import handle_action_menu_state
+    from media_cli.context import CliFlags, MachineState, UiState
+
+    episode_ids = [str(ep) for ep in range(1, 53)]
+    show = {
+        "_id": "shen-mu-3",
+        "name": "Shen Mu 3",
+        "_folder_name": "Shen Mu 3",
+        "status": "FINISHED",
+        "episodeCount": 52,
+        "availableEpisodes": {"sub": 52},
+        "_episode_ids": episode_ids,
+        "_episode_labels": {ep: ("52 END" if ep == "52" else ep) for ep in episode_ids},
+        "_local_progress": 51,
+        "_local_episode_label": "51",
+        "watched_episodes": episode_ids[:51],
+    }
+    flags = CliFlags()
+    ui = UiState(ui_show_ctx=show, ui_ttype_ctx="sub", search_prev_state="DOWNLOADS", action_prev_state="DOWNLOADS")
+    ms = MachineState(show_title="Shen Mu 3", show_id="shen-mu-3")
+    ms._is_downloads = True
+    ms.current_ep = "52"
+    ms.current_ep_index = 51
+    ms.total_eps = 52
+
+    captured_opts = []
+    captured_hints = {}
+
+    def capture_action(flags, ui, title, opts, hints=None, **kwargs):
+        nonlocal captured_opts, captured_hints
+        captured_opts = list(opts)
+        captured_hints = {opt: hints(i) for i, opt in enumerate(opts)} if callable(hints) else dict(hints or {})
+        return -2
+
+    monkeypatch.setattr("media_cli.app.playback_menu.tui_pick", capture_action)
+    monkeypatch.setattr("media_cli.app.playback_menu.app_core.ensure_episode_ids", lambda *a, **k: episode_ids)
+    monkeypatch.setattr("media_cli.app.playback_menu.app_core.get_show_anilist_id", lambda *a, **k: None)
+    monkeypatch.setattr("media_cli.app.playback_menu.app_core.get_resume_time", lambda *a, **k: 0)
+    monkeypatch.setattr("media_cli.app.playback_menu.app_core.get_local_progress", lambda *a, **k: 52)
+    monkeypatch.setattr("media_cli.app.playback_menu.app_core.build_info_panel", lambda *a, **k: None)
+
+    state = handle_action_menu_state(flags, ui, ms, {}, MagicMock(), "sub", lambda *a, **k: False)
+
+    assert state == "DOWNLOADS"
+    assert "Start Rewatch" not in captured_opts
+    assert "Play Next" in captured_opts
+    assert captured_hints["Play Next"] == "play EP 52"
+
+
+def test_downloads_scan_migrates_legacy_episode_files_for_strict_delete(monkeypatch, tmp_path):
+    from media_cli.app.downloads import handle_downloads_state
+    from media_cli.context import CliFlags, MachineState, UiState
+
+    monkeypatch.setattr(paths, "STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(paths, "DOWNLOADS_DB_PATH", str(tmp_path / "state" / "downloads_db.json"))
+    monkeypatch.setattr(paths, "HISTORY_PATH", str(tmp_path / "state" / "history.json"))
+    monkeypatch.setattr(storage, "_downloads_cache", None, raising=False)
+    monkeypatch.setattr(storage, "_history_cache", None)
+
+    download_dir = tmp_path / "downloads"
+    show_dir = download_dir / "Shen Mu 3"
+    show_dir.mkdir(parents=True)
+    video = show_dir / "Shen Mu 3 - Episode 52.mkv"
+    video.write_bytes(b"\0" * 2048)
+
+    episode_ids = [
+        f"https://animexin.dev/tomb-of-fallen-gods-season-3-episode-{ep}-indonesia-english-sub/"
+        for ep in range(1, 53)
+    ]
+    metadata = {
+        "_id": "https://animexin.dev/tomb-of-fallen-gods-season-3/",
+        "name": "Shen Mu 3",
+        "_folder_name": "Shen Mu 3",
+        "status": "FINISHED",
+        "episodeCount": 52,
+        "availableEpisodes": {"sub": 52},
+        "_episode_ids": episode_ids,
+        "_episode_labels": {eid: ("52 END" if idx == 51 else str(idx + 1)) for idx, eid in enumerate(episode_ids)},
+    }
+    storage.save_downloads_db({
+        "current_download_dir": str(download_dir),
+        "shows": {
+            "Shen Mu 3": {
+                "metadata": metadata,
+                "episodes": [episode_ids[-1]],
+                "watched_episodes": episode_ids,
+            }
+        },
+    })
+
+    monkeypatch.setattr("media_cli.app.downloads.app_core.is_confirmed_offline", lambda: True)
+    monkeypatch.setattr("media_cli.app.downloads.app_core.is_online", lambda: False)
+    monkeypatch.setattr("media_cli.app.downloads.app_core.get_history_entry", lambda *a, **k: None)
+    monkeypatch.setattr("media_cli.app.downloads._get_poster", lambda *a, **k: "")
+    monkeypatch.setattr("media_cli.app.downloads.build_info_panel", lambda *a, **k: None)
+    monkeypatch.setattr("media_cli.app.downloads.tui_pick", lambda *a, **k: 0)
+
+    state = handle_downloads_state(
+        CliFlags(),
+        UiState(),
+        MachineState(),
+        {"download_dir": str(download_dir)},
+        MagicMock(download_dir=None),
+        "sub",
+        lambda *a, **k: False,
+    )
+
+    assert state == "DETAILS"
+    show_data = storage.load_downloads_db()["shows"]["Shen Mu 3"]
+    assert show_data["episode_files"][episode_ids[-1]] == [str(video)]
+    assert storage.delete_offline_episode("Shen Mu 3", "52 END", {"download_dir": str(download_dir)}, require_recorded=True)
+    assert not video.exists()
+
+
 def test_format_next_airing_clears_when_episode_is_available():
     """format_next_airing returns empty string when availableEpisodes >= _next_airing_ep."""
     now = time.time()
@@ -576,6 +1044,8 @@ def test_download_mode_restores_terminal_and_returns_to_details(monkeypatch):
 
     flags = CliFlags()
     ui = UiState()
+    ui.action_prev_state = "DETAILS"
+    ui.search_prev_state = "DOWNLOADS"
     ui.ui_show_ctx = {
         "_id": "slime-id",
         "name": "Slime S4",
@@ -727,6 +1197,89 @@ def test_delete_offline_episode_disk_and_db():
             assert show_data["metadata"]["downloadedCount"] == 1
 
 
+def test_delete_offline_episode_strict_mode_only_removes_registered_files(tmp_path):
+    from media_cli.core.storage import (
+        delete_offline_episode,
+        load_downloads_db,
+        register_downloaded_episode_files,
+        save_downloads_db,
+    )
+
+    shows_dir = tmp_path / "downloads"
+    show_dir = shows_dir / "Test Show"
+    show_dir.mkdir(parents=True)
+    video = show_dir / "Test Show - Episode 1.mp4"
+    subtitle = show_dir / "Test Show - Episode 1.en.vtt"
+    user_file = show_dir / "Test Show - Episode 1.notes.txt"
+    copied_video = show_dir / "Test Show - Episode 1 copy.mp4"
+    for path in (video, subtitle, user_file, copied_video):
+        path.write_bytes(b"data")
+
+    save_downloads_db({
+        "shows": {
+            "Test Show": {
+                "episodes": ["1"],
+                "watched_episodes": ["1"],
+                "metadata": {"name": "Test Show", "downloadedCount": 1},
+            }
+        }
+    })
+    assert register_downloaded_episode_files("Test Show", "1", [str(video), str(subtitle)])
+
+    ok = delete_offline_episode("Test Show", "1", cfg={"download_dir": str(shows_dir)}, require_recorded=True)
+
+    assert ok is True
+    assert not video.exists()
+    assert not subtitle.exists()
+    assert user_file.exists()
+    assert copied_video.exists()
+    show_data = load_downloads_db()["shows"]["Test Show"]
+    assert show_data["episodes"] == []
+    assert show_data["watched_episodes"] == []
+    assert show_data["episode_files"] == {}
+    assert show_data["metadata"]["downloadedCount"] == 0
+
+
+def test_delete_offline_episode_strict_mode_refuses_unregistered_files(tmp_path):
+    from media_cli.core.storage import delete_offline_episode, save_downloads_db
+
+    shows_dir = tmp_path / "downloads"
+    show_dir = shows_dir / "Test Show"
+    show_dir.mkdir(parents=True)
+    video = show_dir / "Test Show - Episode 1.mp4"
+    video.write_bytes(b"data")
+    save_downloads_db({
+        "shows": {
+            "Test Show": {
+                "episodes": ["1"],
+                "watched_episodes": ["1"],
+                "metadata": {"name": "Test Show", "downloadedCount": 1},
+            }
+        }
+    })
+
+    ok = delete_offline_episode("Test Show", "1", cfg={"download_dir": str(shows_dir)}, require_recorded=True)
+
+    assert ok is False
+    assert video.exists()
+
+
+def test_register_downloaded_episode_files_records_only_final_video(tmp_path):
+    from media_cli.core.storage import load_downloads_db, register_downloaded_episode_files
+
+    video = tmp_path / "Show - Episode 1.mkv"
+    subtitle = tmp_path / "Show - Episode 1.en.vtt"
+    video.write_bytes(b"video")
+    subtitle.write_bytes(b"sub")
+
+    assert register_downloaded_episode_files("Show", "1", [str(video)])
+
+    show_data = load_downloads_db()["shows"]["Show"]
+    assert show_data["episodes"] == ["1"]
+    assert show_data["episode_files"]["1"] == [str(video)]
+    assert str(subtitle) not in show_data["episode_files"]["1"]
+
+
 def test_find_offline_file_ignores_playlist_text_disguised_as_mp4(tmp_path):
     from media_cli.core.storage import find_offline_file_for_episode, is_valid_download_video
 
@@ -825,11 +1378,59 @@ def test_playback_menu_session_toggles():
          patch("media_cli.app_core.build_info_panel"):
         next_state = handle_action_menu_state(flags, ui, ms, {}, MagicMock(), "sub", lambda *a: False)
         assert next_state == "DETAILS"
-        assert ms.auto_download_next is True
+        assert ms.auto_download_next == "adaptive"
         assert captured_opts[-1] == "Playback"
         assert not any("Auto-Download" in opt for opt in captured_opts)
         assert any("Auto-Download" in opt for opt in captured_playback_opts)
         assert any("Auto-Delete" in opt for opt in captured_playback_opts)
+
+
+def test_downloads_mode_action_menu_shows_continue_for_resume(monkeypatch):
+    from media_cli.context import CliFlags, UiState, MachineState
+    from media_cli.app.playback_menu import handle_action_menu_state
+
+    flags = CliFlags()
+    ui = UiState()
+    ms = MachineState()
+    ms._is_downloads = True
+    ms.show_id = "offline-show"
+    ms.show_title = "Offline Show"
+    ms.current_ep = "1"
+    ms.current_ep_index = 0
+    ms.total_eps = 2
+
+    show = {
+        "_id": "offline-show",
+        "name": "Offline Show",
+        "_folder_name": "Offline Show",
+        "_episode_ids": ["1", "2"],
+        "_episode_labels": {"1": "1", "2": "2"},
+        "availableEpisodes": {"sub": 2},
+        "_downloaded_episodes": ["1", "2"],
+        "watched_episodes": [],
+    }
+    ui.ui_show_ctx = show
+
+    captured_opts = []
+    captured_hints = {}
+
+    def mock_pick(flags, ui, title, opts, acts=None, hints=None, **kwargs):
+        nonlocal captured_opts, captured_hints
+        captured_opts = list(opts)
+        if callable(hints):
+            captured_hints = {opt: hints(i) for i, opt in enumerate(opts)}
+        else:
+            captured_hints = dict(hints or {})
+        return -2
+
+    monkeypatch.setattr("media_cli.app.playback_menu.tui_pick", mock_pick)
+    monkeypatch.setattr("media_cli.app.playback_menu.app_core.get_resume_time", lambda *a, **k: 95)
+    monkeypatch.setattr("media_cli.app.playback_menu.app_core.build_info_panel", lambda *a, **k: [])
+
+    handle_action_menu_state(flags, ui, ms, {}, MagicMock(), "sub", lambda *a, **k: False)
+
+    assert "Continue" in captured_opts
+    assert "resume EP 1" in captured_hints["Continue"]
 
 
 def test_playback_episodes_downloads_mode_options_and_hints(tmp_path):
@@ -1073,7 +1674,7 @@ def test_playback_player_rolling_deletion(tmp_path):
     mock_player.play.return_value = ("EOF", 100.0, 1400.0, 1400.0)
 
     deleted_eps = []
-    def mock_delete(folder, ep, cfg=None):
+    def mock_delete(folder, ep, cfg=None, **kwargs):
         deleted_eps.append(str(ep))
         return True
 
@@ -1092,6 +1693,52 @@ def test_playback_player_rolling_deletion(tmp_path):
         # EP 1 is older than buffer -> MUST be auto-deleted!
         assert "1" in deleted_eps
         assert "2" not in deleted_eps
+
+
+def test_auto_delete_completed_download_title_can_delete_final_buffer_episode(monkeypatch):
+    from media_cli.context import MachineState
+    from media_cli.app import playback_player
+
+    show = {
+        "_id": "finished-show",
+        "name": "Finished Show",
+        "_folder_name": "Finished Show",
+        "status": "FINISHED",
+        "_episode_ids": ["1", "2"],
+        "_episode_labels": {"1": "1", "2": "2"},
+        "availableEpisodes": {"sub": 2},
+        "watched_episodes": ["1", "2"],
+        "_downloaded_episodes": ["1", "2"],
+    }
+    ms = MachineState()
+    ms.show_title = "Finished Show"
+    ms.show_id = "finished-show"
+    ms.auto_delete_watched = True
+    ms.auto_delete_buffer = 1
+    ms._download_files = {
+        "1": "/tmp/Finished Show/Finished Show - Episode 1.mkv",
+        "2": "/tmp/Finished Show/Finished Show - Episode 2.mkv",
+    }
+    deleted = []
+
+    monkeypatch.setattr(
+        playback_player.app_core,
+        "delete_offline_episode",
+        lambda folder, ep, cfg=None, **kwargs: deleted.append(str(ep)) or True,
+    )
+    monkeypatch.setattr(playback_player.app_core, "set_action_feedback", lambda *a, **k: None)
+
+    deleted_labels = playback_player._auto_delete_watched_downloads(
+        show,
+        ["1", "2"],
+        "sub",
+        {"auto_delete_watched": True, "auto_delete_buffer": 1},
+        ms,
+    )
+
+    assert deleted_labels == ["1", "2"]
+    assert deleted == ["1", "2"]
+    assert ms._download_files == {}
 
 
 def test_handle_downloads_state_runs_without_error():

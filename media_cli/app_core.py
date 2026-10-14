@@ -278,6 +278,9 @@ refresh_history_anilist_airing_batch = anilist.refresh_history_anilist_airing_ba
 
 save_refreshed_history = storage.save_refreshed_history
 patch_history_entry_show = storage.patch_history_entry_show
+patch_history_entry_state = storage.patch_history_entry_state
+record_download_watch_progress = storage.record_download_watch_progress
+record_download_unwatch_progress = storage.record_download_unwatch_progress
 load_search_history = storage.load_search_history
 save_search_history = storage.save_search_history
 delete_search_history_entry = storage.delete_search_history_entry

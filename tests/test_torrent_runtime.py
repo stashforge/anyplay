@@ -820,6 +820,127 @@ def test_mpv_runtime_input_config_has_anyplay_defaults_without_user_config(monke
     assert "n script-message next_mirror" not in text
 
 
+def test_mpv_end_file_error_stays_stream_error_when_process_exited(monkeypatch):
+    from media_cli.playback import mpv as mpv_mod
+
+    class FakeClient:
+        def __init__(self):
+            self.sent = []
+            self._chunks = [
+                b'{"event":"end-file","reason":"error"}\n',
+            ]
+
+        def recv(self, _size):
+            if self._chunks:
+                return self._chunks.pop(0)
+            return b""
+
+        def sendall(self, data):
+            self.sent.append(data)
+
+    class FakeProcess:
+        def poll(self):
+            return 1
+
+    class FakeStdin:
+        def fileno(self):
+            return 0
+
+    player = MpvIpc()
+    player.running = True
+    player.client = FakeClient()
+    player.process = FakeProcess()
+
+    monkeypatch.setattr(mpv_mod.sys, "stdin", FakeStdin())
+    monkeypatch.setattr(mpv_mod.os, "isatty", lambda _fd: False)
+    monkeypatch.setattr(
+        mpv_mod.select,
+        "select",
+        lambda _r, _w, _x, _timeout: ([player.client], [], []),
+    )
+
+    result, played_seconds = player.wait_for_playback(
+        {"episode_index": 0},
+        "1",
+        1,
+        None,
+        False,
+    )
+
+    assert result == "ERROR"
+    assert played_seconds == 0
+
+
+def test_mpv_cache_buffering_state_prevents_false_stall(monkeypatch):
+    from media_cli.playback import mpv as mpv_mod
+
+    class FakeClient:
+        def __init__(self):
+            self.sent = []
+            self._chunks = [
+                b'{"event":"file-loaded"}\n',
+                b'{"event":"property-change","name":"playback-time","data":10}\n',
+                b'{"event":"property-change","name":"cache-buffering-state","data":40}\n',
+                b"",
+            ]
+
+        def recv(self, _size):
+            if self._chunks:
+                return self._chunks.pop(0)
+            return b""
+
+        def sendall(self, data):
+            self.sent.append(data)
+
+    class FakeProcess:
+        def poll(self):
+            return None
+
+    class FakeStdin:
+        def fileno(self):
+            return 0
+
+        def read(self, _size):
+            return "q"
+
+    player = MpvIpc()
+    player.running = True
+    player.client = FakeClient()
+    player.process = FakeProcess()
+    player.normal_stall_timeout = 1.0
+    player.seek_stall_timeout = 1.0
+    player.startup_timeout = 100.0
+
+    stdin = FakeStdin()
+    select_results = [
+        [player.client],
+        [player.client],
+        [player.client],
+        [stdin],
+        [player.client],
+    ]
+    times = iter([0.0, 0.0, 0.0, 0.0, 0.1, 0.2, 1.5, 1.6, 1.7])
+
+    monkeypatch.setattr(mpv_mod.sys, "stdin", stdin)
+    monkeypatch.setattr(mpv_mod.os, "isatty", lambda _fd: False)
+    monkeypatch.setattr(mpv_mod.time, "monotonic", lambda: next(times, 1.8))
+    monkeypatch.setattr(
+        mpv_mod.select,
+        "select",
+        lambda _r, _w, _x, _timeout: (select_results.pop(0), [], []),
+    )
+
+    result, _played_seconds = player.wait_for_playback(
+        {"episode_index": 0},
+        "1",
+        1,
+        None,
+        False,
+    )
+
+    assert result == "QUIT"
+
+
 def test_loading_cancel_accepts_q_and_escape_keys():
     from media_cli.ui import player_screen
 

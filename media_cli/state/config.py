@@ -22,12 +22,11 @@ DEFAULT_CONFIG = {
     "title_language": "romaji",
     "aniskip": True,
     "auto_skip": True,
-    "auto_download_next": False,
+    "auto_download_next": "adaptive",
     "auto_delete_watched": False,
     "auto_delete_buffer": 1,
     "download_sub_langs": "multi",
     "download_audio_langs": "multi",
-    "subtitle_mode": "embed",
     "disabled_providers": "",
     "torrent_fallback": True,
     "torrent_search_limit": 50,
@@ -109,6 +108,15 @@ def _is_truthy(val, default=False) -> bool:
     return str(val).strip().lower() in ("true", "1", "yes", "on")
 
 
+def _auto_download_config_value(val) -> str:
+    if isinstance(val, bool):
+        return "adaptive" if val else "off"
+    norm = str(val if val is not None else "adaptive").strip().lower()
+    if norm in ("", "0", "false", "no", "off", "none", "disabled"):
+        return "off"
+    return "adaptive"
+
+
 def serialize_conf(config: dict) -> str:
     """Serialize configuration dict into clean .conf INI-style text with comments."""
     lines = [
@@ -130,7 +138,6 @@ def serialize_conf(config: dict) -> str:
         f"download_dir = {config.get('download_dir', '')}",
         f"download_sub_langs = {config.get('download_sub_langs', 'multi')}",
         f"download_audio_langs = {config.get('download_audio_langs', 'multi')}",
-        f"subtitle_mode = {config.get('subtitle_mode', 'embed')}",
         "",
         "# Torrent Search & Fallback",
         f"torrent_fallback = {'true' if _is_truthy(config.get('torrent_fallback'), True) else 'false'}",
@@ -141,7 +148,7 @@ def serialize_conf(config: dict) -> str:
         f"torrent_allow_unknown_seeders = {'true' if _is_truthy(config.get('torrent_allow_unknown_seeders'), True) else 'false'}",
         "",
         "# Automation & Binge",
-        f"auto_download_next = {'true' if _is_truthy(config.get('auto_download_next'), False) else 'false'}",
+        f"auto_download_next = {_auto_download_config_value(config.get('auto_download_next', 'adaptive'))}",
         f"auto_delete_watched = {'true' if _is_truthy(config.get('auto_delete_watched'), False) else 'false'}",
         f"auto_delete_buffer = {config.get('auto_delete_buffer', 1)}",
         f"binge = {'true' if _is_truthy(config.get('binge'), False) else 'false'}",

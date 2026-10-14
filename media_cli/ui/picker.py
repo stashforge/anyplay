@@ -129,6 +129,7 @@ def tui_pick(
     top_header_fn=None,
     tab_fn=None,
     reverse_fn=None,
+    alt_reverse_fn=None,
     delete_fn=None,
     delete_prompt=None,
     can_delete_fn=None,
@@ -192,6 +193,7 @@ def tui_pick(
             top_header_fn=top_header_fn,
             tab_fn=tab_fn,
             reverse_fn=reverse_fn,
+            alt_reverse_fn=alt_reverse_fn,
             delete_fn=delete_fn,
             delete_prompt=delete_prompt,
             can_delete_fn=can_delete_fn,
@@ -232,6 +234,7 @@ def tui_pick(
             top_header_fn=top_header_fn,
             tab_fn=tab_fn,
             reverse_fn=reverse_fn,
+            alt_reverse_fn=alt_reverse_fn,
             delete_fn=delete_fn,
             delete_prompt=delete_prompt,
             can_delete_fn=can_delete_fn,
@@ -1232,6 +1235,24 @@ def tui_pick(
                 if reverse_fn:
                     selected = filt[sel] if filt and sel < len(filt) else None
                     res = reverse_fn(selected)
+                    if res:
+                        options, cur_header = list(res[0] or []), res[1]
+                        if len(res) > 2:
+                            disabled_indices.clear()
+                            disabled_indices.update(res[2] or ())
+                        filt = filt_list()
+                        sel = first_selectable(filt)
+                        _persistent_rendered_lines.clear()
+                        last_poster_key = None
+                        _needs_redraw = True
+            elif key in ("ALT_R", "F5"):
+                boundary_hint = ""
+
+                boundary_action = ""
+                fn = alt_reverse_fn or reverse_fn
+                if fn:
+                    selected = filt[sel] if filt and sel < len(filt) else None
+                    res = fn(selected)
                     if res:
                         options, cur_header = list(res[0] or []), res[1]
                         if len(res) > 2:

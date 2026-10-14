@@ -136,6 +136,10 @@ def _home_shortened_path(path: str) -> str:
 
 def build_download_table_layout(table_w: int, rows: list[Any] | None = None) -> dict[str, Any]:
     """Calculate stable, content-aware download table columns."""
+    stable_status_w = len("✖ STOPPED")
+    stable_progress_w = len("100.0%")
+    stable_speed_w = len("999.9MiB/s")
+    stable_eta_w = len("99:59:59")
     rows = rows or []
     if table_w < 54:
         layout = {
@@ -224,9 +228,16 @@ def build_download_table_layout(table_w: int, rows: list[Any] | None = None) -> 
         for row in rows
         if _row_text(row, "status") == "DOWNLOADING"
     ]
+    progress_values = [
+        f"{float(getattr(row, 'progress', 0.0)):5.1f}%"
+        for row in rows
+    ]
+    if layout["mode"] != "compact":
+        layout["stat_w"] = max(layout["stat_w"], stable_status_w, len("STATUS"))
+        layout["prog_hdr_w"] = max(layout["prog_hdr_w"], stable_progress_w, len(layout["prog_hdr_text"]), *[len(v) for v in progress_values], 2)
     if layout["spd_hdr_w"]:
-        layout["spd_hdr_w"] = max(layout["spd_hdr_w"], len(layout["spd_hdr_text"]), *[len(v) for v in speed_values], 2)
-        layout["eta_w"] = max(layout["eta_w"], len("ETA"), *[len(v) for v in eta_values], 2)
+        layout["spd_hdr_w"] = max(layout["spd_hdr_w"], stable_speed_w, len(layout["spd_hdr_text"]), *[len(v) for v in speed_values], 2)
+        layout["eta_w"] = max(layout["eta_w"], stable_eta_w, len("ETA"), *[len(v) for v in eta_values], 2)
 
     gaps = ["title_gap", "status_gap"]
     if layout["spd_hdr_w"]:
@@ -485,6 +496,13 @@ def build_log_panel_rows(
     end = min(len(wrapped_logs), start + row_count)
     marker = f"{start + 1}-{end}/{len(wrapped_logs)}" if len(wrapped_logs) > row_count else ""
     return wrapped_logs[start:end], marker
+
+
+def format_log_cell(text: str, width: int) -> str:
+    cell_w = max(0, int(width or 0))
+    if cell_w <= 0:
+        return ""
+    return str(text or "")[:cell_w].ljust(cell_w)
 
 
 def _count_unfinished_download_rows(rows: list[dict]) -> tuple[int, int]:
@@ -1549,12 +1567,13 @@ def _curses_download_manager(stdscr, worker, standalone: bool = False, resize_pe
                     log_scroll = max(0, int(start_text) - 1)
                 except (ValueError, IndexError):
                     pass
-            for l_idx, l_line in enumerate(visible_logs):
+            for l_idx in range(max_rows):
                 row_y = table_hdr_row + 1 + l_idx
                 if row_y >= height - 1:
                     break
+                l_line = visible_logs[l_idx] if l_idx < len(visible_logs) else ""
                 attr = C_CYAN if "download" in l_line.lower() else (C_GREEN if "resolved" in l_line.lower() or "resumed" in l_line.lower() else curses.A_NORMAL)
-                safe_addstr(stdscr, row_y, 1, l_line[:width - 2], attr)
+                safe_addstr(stdscr, row_y, 1, format_log_cell(l_line, width - 2), attr)
 
             # Position indicator if logs exceed max_rows
             if range_text:
@@ -1733,9 +1752,10 @@ def _curses_download_manager(stdscr, worker, standalone: bool = False, resize_pe
                         pos_str = f" {range_text} "
                         safe_addstr(stdscr, table_hdr_row, max(insp_x, insp_x + insp_w - len(pos_str)), pos_str, C_HDR)
 
-                    for r_i, l_txt in enumerate(insp_rows):
+                    for r_i in range(log_space):
                         if table_hdr_row + 1 + r_i < height - 1:
-                            safe_addstr(stdscr, table_hdr_row + 1 + r_i, insp_x, l_txt[:insp_w - 1])
+                            l_txt = insp_rows[r_i] if r_i < len(insp_rows) else ""
+                            safe_addstr(stdscr, table_hdr_row + 1 + r_i, insp_x, format_log_cell(l_txt, insp_w - 1))
 
         # =========================================================
         # 4. BOTTOM BAR: FOOTER

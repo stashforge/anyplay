@@ -29,6 +29,7 @@ import urllib.request
 from media_cli.core.storage import is_valid_download_video
 from media_cli.media.languages import filter_tracks_by_language, normalize_lang_code
 from media_cli.media.subtitles import download_sidecar_subtitles
+from media_cli.media.download import anyplay_metadata_args
 from media_cli.media.urls import validate_stream_url
 
 TEST_URL = "https://raw.githubusercontent.com/bower-media-samples/big-buck-bunny-1080p-30s/master/video.mp4"
@@ -193,6 +194,16 @@ class DownloadItem:
     download_sub_langs: str | None = None
     download_audio_langs: str | None = None
     subtitle_mode: str | None = None
+    output_files: list[str] = field(default_factory=list)
+
+
+def _set_item_output_files(item: DownloadItem, files: list[str] | tuple[str, ...]) -> None:
+    seen: list[str] = []
+    for file_path in files or []:
+        path = os.path.abspath(os.path.expanduser(str(file_path or "")))
+        if path and os.path.isfile(path) and path not in seen:
+            seen.append(path)
+    item.output_files = seen
 
 
 # Helper regex for aria2c
@@ -300,8 +311,7 @@ def _item_download_preferences(item: DownloadItem) -> tuple[str, str, str]:
         cfg = {}
     sub_langs = item.download_sub_langs if item.download_sub_langs is not None else cfg.get("download_sub_langs", "multi")
     audio_langs = item.download_audio_langs if item.download_audio_langs is not None else cfg.get("download_audio_langs", "multi")
-    subtitle_mode = item.subtitle_mode if item.subtitle_mode is not None else cfg.get("subtitle_mode", "embed")
-    return str(sub_langs or "multi"), str(audio_langs or "multi"), str(subtitle_mode or "embed")
+    return str(sub_langs or "multi"), str(audio_langs or "multi"), "embed"
 
 
 def _base_output_path(path: str) -> str:
@@ -394,7 +404,7 @@ class DownloadWorker:
         with self.lock:
             return list(self.items)
 
-    def pause_item(self, item_id: str) -> bool:
+    def pause_item(self, item_id: str, message: str = "⏸ Download paused by user.") -> bool:
         with self.lock:
             for item in self.items:
                 if item.id == item_id:
@@ -412,12 +422,13 @@ class DownloadWorker:
                     item.status = DownloadStatus.PAUSED
                     item.speed_str = ""
                     item.eta_str = ""
-                    item.logs.append("⏸ Download paused by user.")
+                    if message:
+                        item.logs.append(message)
                     self._wake_event.set()
                     return True
         return False
 
-    def resume_item(self, item_id: str) -> bool:
+    def resume_item(self, item_id: str, message: str = "▶ Download resumed by user.") -> bool:
         with self.lock:
             for item in self.items:
                 if item.id == item_id:
@@ -431,7 +442,8 @@ class DownloadWorker:
                         item.status = DownloadStatus.QUEUED
                         item.speed_str = ""
                         item.eta_str = ""
-                        item.logs.append("▶ Download resumed by user.")
+                        if message:
+                            item.logs.append(message)
                         self._wake_event.set()
                         return True
         return False
@@ -582,6 +594,7 @@ class DownloadWorker:
                         file_sz = format_bytes(item.downloaded_bytes)
                         item.logs.append(f"✔ Episode already downloaded ({file_sz}).")
                         item.logs.append(f"File: {os.path.basename(dest)}")
+                        _set_item_output_files(item, [dest])
                     _notify_complete(item)
                     return
             os.makedirs(os.path.dirname(os.path.abspath(dest)), exist_ok=True)
@@ -652,10 +665,13 @@ class DownloadWorker:
 
             # 3. Determine engine
             engine = _select_download_engine(item.engine, item.url)
-            _, _, subtitle_mode = _item_download_preferences(item)
+            sub_langs, _, _ = _item_download_preferences(item)
             has_separate_audio = bool(item.audio_tracks) or bool(item.audio_url and item.audio_url != item.url)
-            if item.engine == "auto" and shutil.which("ffmpeg") and (has_separate_audio or (subtitle_mode == "embed" and item.subtitles)):
+            wants_subs = bool(item.subtitles) and sub_langs not in ("none", "no", "false", "0")
+            if item.engine == "auto" and shutil.which("ffmpeg"):
                 engine = "ffmpeg"
+            if engine != "ffmpeg" and (has_separate_audio or wants_subs):
+                raise RuntimeError("ffmpeg is required to create a single MKV with audio/subtitles")
             with self.lock:
                 item.logs.append(f"Using {engine} download engine.")
 
@@ -731,22 +747,14 @@ class DownloadWorker:
             ])
         cmd.append(item.url)
 
-        sub_langs, _, subtitle_mode = _item_download_preferences(item)
+        sub_langs, _, _ = _item_download_preferences(item)
         if item.subtitles and sub_langs not in ("none", "no", "false", "0"):
-            try:
-                saved = download_sidecar_subtitles(
-                    item.subtitles,
-                    _base_output_path(item.destination_path),
-                    headers=item.headers,
-                    requested_langs=sub_langs,
-                    quiet=True,
-                )
-                if saved:
-                    item.logs.append(f"Saved {len(saved)} subtitle sidecar(s).")
-                    if subtitle_mode == "embed":
-                        item.logs.append("Subtitle embedding requires ffmpeg; saved sidecars with yt-dlp.")
-            except Exception as exc:
-                item.logs.append(f"⚠ Could not download subtitles: {exc}")
+            with self.lock:
+                item.status = DownloadStatus.FAILED
+                item.error = "ffmpeg is required to embed subtitles into the final MKV"
+                item.completed_at = time.time()
+                item.logs.append("✖ ffmpeg is required to embed subtitles into the final MKV.")
+            return
 
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
         with self.lock:
@@ -792,6 +800,7 @@ class DownloadWorker:
                         item.eta_str = ""
                         item.logs.append("✔ Episode complete.")
                         item.completed_at = time.time()
+                        _set_item_output_files(item, [item.destination_path])
                         _notify_complete(item)
                     else:
                         item.status = DownloadStatus.FAILED
@@ -856,6 +865,7 @@ class DownloadWorker:
                         item.eta_str = ""
                         item.logs.append("✔ Episode complete. Embedded MKV remux verified.")
                         item.completed_at = time.time()
+                        _set_item_output_files(item, [item.destination_path])
                         _notify_complete(item)
                     else:
                         item.status = DownloadStatus.FAILED
@@ -868,7 +878,7 @@ class DownloadWorker:
     def _download_ffmpeg(self, item: DownloadItem):
         partial_path = _partial_output_path(item.destination_path)
         os.makedirs(os.path.dirname(partial_path), exist_ok=True)
-        sub_langs, audio_langs, subtitle_mode = _item_download_preferences(item)
+        sub_langs, audio_langs, _ = _item_download_preferences(item)
         audio_tracks = list(item.audio_tracks or [])
         if not audio_tracks and item.audio_url:
             audio_tracks = [{"url": item.audio_url, "label": "Audio", "language": "und", "default": True}]
@@ -878,7 +888,7 @@ class DownloadWorker:
         subtitles = list(item.subtitles or [])
         if not subtitles and item.subtitle_url:
             subtitles = [{"url": item.subtitle_url, "label": "Subtitles", "language": "und", "default": True}]
-        embed_subs = subtitle_mode == "embed" and bool(subtitles) and sub_langs not in ("none", "no", "false", "0")
+        embed_subs = bool(subtitles) and sub_langs not in ("none", "no", "false", "0")
         downloaded_sidecars: list[str] = []
         if subtitles and sub_langs not in ("none", "no", "false", "0"):
             try:
@@ -893,8 +903,7 @@ class DownloadWorker:
                     item.logs.append(f"Saved {len(downloaded_sidecars)} subtitle sidecar(s).")
             except Exception as exc:
                 item.logs.append(f"⚠ Could not download subtitles: {exc}")
-                if embed_subs:
-                    embed_subs = False
+                embed_subs = False
 
         cmd = [
             "ffmpeg",
@@ -970,6 +979,13 @@ class DownloadWorker:
                 cmd.extend([f"-metadata:s:s:{out_idx}", f"title={title}"])
         elif embed_subs:
             cmd.extend(["-map", "0:s?"])
+        title_id = str((item.show_metadata or {}).get("_id") or (item.show_metadata or {}).get("id") or "")
+        cmd.extend(anyplay_metadata_args(
+            title=item.title,
+            episode=str(item.episode).removeprefix("Episode ").strip(),
+            title_id=title_id,
+            episode_id=str(getattr(item, "ep_id", "") or ""),
+        ))
         cmd.extend(["-c", "copy", partial_path])
 
         # Probe duration dynamically for accurate progress & ETA calculation
@@ -1078,6 +1094,7 @@ class DownloadWorker:
                         item.eta_str = ""
                         item.logs.append("✔ Episode complete. Stream download verified.")
                         item.completed_at = time.time()
+                        _set_item_output_files(item, [item.destination_path])
                         _notify_complete(item)
                     else:
                         _discard_partial_output(partial_path)

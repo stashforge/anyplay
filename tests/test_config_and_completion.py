@@ -127,6 +127,16 @@ class TestConfigCommand(unittest.TestCase):
         self.assertIn("disabled_providers =", text)
         self.assertIn("# Torrent Search & Fallback", text)
         self.assertIn("torrent_min_seeders = 2", text)
+        self.assertIn("auto_download_next = adaptive", text)
+        self.assertNotIn("subtitle_mode", text)
+
+        legacy_false = serialize_conf({"auto_download_next": False})
+        legacy_true = serialize_conf({"auto_download_next": True})
+        self.assertIn("auto_download_next = off", legacy_false)
+        self.assertIn("auto_download_next = adaptive", legacy_true)
+
+    def test_completion_no_longer_exposes_sidecar_subtitle_option(self):
+        self.assertNotIn("--sidecar-subs", SEARCH_OPTIONS)
 
 
 class TestShellCompletion(unittest.TestCase):

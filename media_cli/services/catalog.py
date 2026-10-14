@@ -147,6 +147,90 @@ def update_available_count_from_episode_ids(
     return changed
 
 
+def _download_catalog_for_show(
+    show: dict,
+    ttype: str,
+) -> tuple[list[str], dict, dict | None, dict | None]:
+    """Return a fuller saved download catalog for this provider title, if one exists."""
+    if not show:
+        return [], {}, None, None
+    show_id = str(title_provider_id(show) or "")
+    provider = title_provider_key(show, default="")
+    try:
+        from ..core.storage import load_downloads_db
+        from ..domain.matching import is_same_show
+    except Exception:
+        return [], {}, None, None
+
+    best: tuple[list[str], dict, dict | None, dict | None] = ([], {}, None, None)
+    db = load_downloads_db() or {}
+    for item in (db.get("shows") or {}).values():
+        if not isinstance(item, dict):
+            continue
+        meta = item.get("metadata") or {}
+        if not isinstance(meta, dict):
+            continue
+
+        meta_id = str(title_provider_id(meta) or "")
+        meta_provider = title_provider_key(meta, default="")
+        same_provider_id = bool(
+            show_id
+            and meta_id
+            and show_id == meta_id
+            and (not provider or not meta_provider or provider == meta_provider)
+        )
+        if not same_provider_id and not is_same_show(show, meta):
+            continue
+
+        by_ttype = meta.get("_episode_ids_by_ttype") or {}
+        ids = by_ttype.get(ttype) or (
+            meta.get("_episode_ids")
+            if meta.get("_episode_ids_ttype") in (None, ttype)
+            else []
+        )
+        ids = _normalize_episode_ids(ids)
+        if len(ids) <= len(best[0]):
+            continue
+
+        labels = dict(meta.get("_episode_labels") or {})
+        episodes_map = (meta.get("_episodes_map_by_ttype") or {}).get(ttype) or meta.get(
+            "_episodes_map"
+        )
+        by_number = (meta.get("_episodes_by_number_by_ttype") or {}).get(ttype) or meta.get(
+            "_episodes_by_number"
+        )
+        best = (ids, labels, episodes_map, by_number)
+    return best
+
+
+def _use_download_catalog_if_better(
+    show: dict,
+    ttype: str,
+    episode_ids: list,
+    catalog: dict | None = None,
+) -> list[str]:
+    saved_ids, labels, episodes_map, by_number = _download_catalog_for_show(show, ttype)
+    if len(saved_ids) <= len(episode_ids or []):
+        return list(episode_ids or [])
+    detail = None
+    if catalog:
+        detail = catalog.get("detail")
+    if not detail:
+        detail = {ttype: saved_ids}
+    update_available_count_from_episode_ids(
+        show,
+        ttype,
+        saved_ids,
+        detail,
+        labels,
+        episodes_map=episodes_map,
+        by_number=by_number,
+    )
+    show["_episode_catalog_state"] = "loaded"
+    show.pop("_episode_catalog_error", None)
+    return saved_ids
+
+
 import concurrent.futures
 import threading
 
@@ -193,7 +277,7 @@ def _perform_catalog_fetch(show: dict, ttype: str, status_cb: Callable[[str], No
                 episodes_map=ep_map,
                 by_number=num_map,
             )
-            return catalog["ids"]
+            return _use_download_catalog_if_better(show, ttype, catalog["ids"], catalog)
 
 
         show["_episode_ids_ttype"] = ttype
@@ -233,7 +317,7 @@ def ensure_episode_ids(show: dict, ttype: str, status_cb: Callable[[str], None] 
     if cached_ids:
         show["_episode_catalog_state"] = "loaded"
         update_available_count_from_episode_ids(show, ttype, cached_ids)
-        return cached_ids
+        return _use_download_catalog_if_better(show, ttype, cached_ids)
 
     show_id = title_provider_id(show)
     if show_id and str(show_id).startswith("local:"):

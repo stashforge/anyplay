@@ -74,6 +74,15 @@ def has_untrusted_releasing_total(anime, available_count=None):
     return bool(available and total <= available)
 
 
+def provider_status_is_authoritative(anime):
+    provider = str((anime or {}).get("_provider") or (anime or {}).get("provider") or "").casefold()
+    media_type = str((anime or {}).get("type") or "").casefold()
+    media_format = str((anime or {}).get("format") or "").casefold()
+    return provider in {"animexin", "lucifer", "animekhor"} and (
+        media_type in {"ona", "donghua"} or media_format == "donghua"
+    )
+
+
 def format_ep_progress(label, progress, total, local_only=False):
     import decimal as _dec
     from .episodes import parse_episode_dual_numbers
@@ -350,10 +359,14 @@ def anilist_list_status_label(anime, local_only=False, hide_status=None):
 
 
 def anime_status_label(anime):
-    status = str(anime.get("_anilist_status") or anime.get("status") or "").upper()
-    raw_status = str(anime.get("status") or "").upper()
+    provider_authority = provider_status_is_authoritative(anime)
+    status = str(
+        anime.get("status")
+        if provider_authority
+        else anime.get("_anilist_status") or anime.get("status") or ""
+    ).upper()
     color = "\033[38;5;250m"
-    if any(term in status for term in ("FINISHED", "COMPLETED", "ENDED")) or any(term in raw_status for term in ("FINISHED", "COMPLETED", "ENDED")):
+    if any(term in status for term in ("FINISHED", "COMPLETED", "ENDED")):
         return f"{color}FINISHED{DIM}"
     if "RELEASING" in status or status == "AIRING":
         return f"{color}AIRING{DIM}"
@@ -422,7 +435,7 @@ def format_info_metadata_line(
 
     aired_start = anime.get("airedStart")
     aired_end = anime.get("airedEnd")
-    years_status = anime.get("_anilist_status") or anime.get("status")
+    years_status = anime.get("status") if provider_status_is_authoritative(anime) else anime.get("_anilist_status") or anime.get("status")
     if any(term in str(anime.get("status") or "").upper() for term in ("FINISHED", "COMPLETED", "ENDED")):
         years_status = "FINISHED"
     years = format_years(
@@ -459,7 +472,7 @@ def format_info_metadata_line(
     return " • ".join(details)
 
 
-def prepare_show_display_state(show, ttype="sub", sync_enabled=None):
+def prepare_show_display_state(show, ttype="sub", sync_enabled=None, prefer_watched_episodes=False):
     if not show:
         return show
     from media_cli.context import FLAGS as runtime_flags
@@ -491,18 +504,51 @@ def prepare_show_display_state(show, ttype="sub", sync_enabled=None):
         sync_enabled = get_title_sync(show)
     show["_sync_enabled"] = bool(sync_enabled)
 
-    hist_progress = get_local_progress(show, ttype)
-    hist_label = get_local_episode_label(show, ttype)
-    if hist_progress is not None or hist_label is not None:
-        show["_local_progress"] = hist_progress
-        show["_local_episode_label"] = hist_label
-    elif "watched_episodes" in show and show["watched_episodes"]:
-        watched_count = len(show["watched_episodes"])
+    def apply_watched_episodes():
+        from media_cli.domain.episodes import (
+            clean_episode_identifier,
+            episode_id_at,
+            episode_index_for_id,
+            parse_episode_dual_numbers,
+        )
+
+        watched = [str(ep) for ep in show.get("watched_episodes", [])]
+        episode_ids = [str(ep) for ep in (show.get("_episode_ids") or [])]
+        labels = show.get("_episode_labels") or {}
+        best_idx = None
+        for watched_ep in watched:
+            idx = episode_index_for_id(episode_ids, watched_ep, labels=labels)
+            if idx is not None and (best_idx is None or idx > best_idx):
+                best_idx = idx
+        if best_idx is not None:
+            best_eid = episode_id_at(episode_ids, best_idx)
+            best_label = labels.get(best_eid) or labels.get(str(best_eid)) or best_eid
+            primary, _secondary = parse_episode_dual_numbers(str(best_label))
+            clean = primary or clean_episode_identifier(str(best_label)) or str(best_idx + 1)
+            try:
+                show["_local_progress"] = int(float(clean))
+            except (TypeError, ValueError):
+                show["_local_progress"] = best_idx + 1
+            show["_local_episode_label"] = best_label
+            return
+
+        watched_count = len(watched)
         show["_local_progress"] = watched_count
         def safe_num(x):
-            try: return float(x)
-            except ValueError: return -1
-        show["_local_episode_label"] = max(show["watched_episodes"], key=safe_num)
+            try:
+                return float(clean_episode_identifier(str(x)) or x)
+            except (TypeError, ValueError):
+                return -1
+        show["_local_episode_label"] = max(watched, key=safe_num)
+    hist_progress = get_local_progress(show, ttype)
+    hist_label = get_local_episode_label(show, ttype)
+    if prefer_watched_episodes and show.get("watched_episodes"):
+        apply_watched_episodes()
+    elif hist_progress is not None or hist_label is not None:
+        show["_local_progress"] = hist_progress if hist_progress is not None else hist_label
+        show["_local_episode_label"] = hist_label
+    elif "watched_episodes" in show and show["watched_episodes"]:
+        apply_watched_episodes()
     else:
         show["_local_progress"] = hist_progress
         show["_local_episode_label"] = hist_label

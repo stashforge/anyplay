@@ -8,6 +8,7 @@ from ..core.storage import get_default_download_dir, is_valid_download_video, lo
 from ..core.terminal import truncate_display as _truncate_display
 from ..ui.help import picker_help
 from ..ui.picker import tui_pick
+from .footer import context_footer
 
 _C_HINT = "\033[38;5;244m"
 _RST = "\033[0m"
@@ -229,8 +230,18 @@ def handle_downloads_state(flags, ui, ms, cfg, args, ttype, resolveTracking):
             build_info_panel(show, "sub", w, parts, local_only=True)
 
 
-        online_badge = "\033[38;2;225;85;85m[Offline]\033[0m │ " if app_core.is_confirmed_offline() else ""
-        line = f"{online_badge}Downloaded anime  │  {download_dir}  │  Enter=episodes  Del=delete title  Esc=quit"
+        show_for_footer = {}
+        if 0 <= si < len(valid_titles):
+            _, data = valid_titles[si]
+            show_for_footer = data.get("metadata", {})
+        line = context_footer(
+            show_for_footer,
+            ui,
+            ms,
+            f"{download_dir}  │  Enter=episodes  Del=delete title  Esc=quit",
+            offline=app_core.is_confirmed_offline(),
+            mode="Downloads",
+        )
         if 0 <= si < len(valid_titles):
             title, data = valid_titles[si]
             show = data.get("metadata", {})
@@ -464,12 +475,33 @@ def handle_downloads_state(flags, ui, ms, cfg, args, ttype, resolveTracking):
                     ms._download_files[str(eid)] = fp
                     break
 
+    episode_files = data.setdefault("episode_files", {})
+    files_dirty = False
+    for eid in show["_episode_ids"]:
+        lbl = show["_episode_labels"].get(eid, show["_episode_labels"].get(str(eid), eid))
+        fp = (
+            ms._download_files.get(eid)
+            or ms._download_files.get(str(eid))
+            or ms._download_files.get(str(lbl))
+        )
+        if not fp:
+            continue
+        abs_fp = os.path.abspath(os.path.expanduser(str(fp)))
+        if not os.path.isfile(abs_fp):
+            continue
+        key = str(eid)
+        if episode_files.get(key) != [abs_fp]:
+            episode_files[key] = [abs_fp]
+            files_dirty = True
+    if files_dirty:
+        save_downloads_db(db)
+
     # Setup state machine variables for the selected offline anime
     ms._is_downloads = True
     ms._download_dir = folder_path
     ms.show_title = title
-    ms.show_id = show.get("_id")
-    ms.auto_download_next = cfg.get("auto_download_next", False)
+    ms.show_id = show.get("_id") or show.get("id") or show.get("_folder_name") or title
+    ms.auto_download_next = cfg.get("auto_download_next", "adaptive")
     ms.auto_delete_watched = cfg.get("auto_delete_watched", False)
     ms.auto_delete_buffer = int(cfg.get("auto_delete_buffer", 1))
     set_ui_context(ui, show, ttype)

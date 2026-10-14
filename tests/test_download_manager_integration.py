@@ -65,6 +65,16 @@ def test_unknown_alt_key_is_ignored():
         os.close(w)
 
 
+def test_f5_key_decoding():
+    r, w = os.pipe()
+    try:
+        os.write(w, b"\x1b[15~")
+        assert get_key(r) == "F5"
+    finally:
+        os.close(r)
+        os.close(w)
+
+
 def test_download_worker_lifecycle():
     with tempfile.TemporaryDirectory() as tmpdir:
         w = DownloadWorker(download_dir=tmpdir, max_concurrent=2)
@@ -865,6 +875,13 @@ def test_download_log_display_lines_start_with_item_details(tmp_path, monkeypatc
     assert "⚡ Resolving stream URL on the fly…" in lines
 
 
+def test_download_log_cell_pads_short_lines_to_clear_old_text():
+    from media_cli.ui.download_manager import format_log_cell
+
+    assert format_log_cell("short", 12) == "short       "
+    assert format_log_cell("this line is too long", 9) == "this line"
+
+
 def test_download_table_layout_keeps_short_titles_compact():
     from media_cli.ui.download_manager import UIItemWrapper, build_download_table_layout
 
@@ -929,6 +946,45 @@ def test_download_table_layout_expands_value_columns_before_title():
     assert layout["spd_hdr_w"] >= len("123.4MiB/s")
     assert layout["eta_w"] >= len("01:23:45")
     assert layout["title_w"] >= layout["min_title_w"]
+
+
+def test_download_table_layout_reserves_stable_speed_width_for_live_values():
+    from media_cli.ui.download_manager import UIItemWrapper, build_download_table_layout
+
+    item = DownloadItem(
+        id="active-short-speed",
+        title="A Record Of Mortal's Journey Through Jittery Columns",
+        episode="Episode 195",
+        destination_path="/tmp/active-short-speed.mp4",
+    )
+    item.status = DownloadStatus.DOWNLOADING
+    item.speed_str = "4.0MiB/s"
+    row = UIItemWrapper(item)
+
+    layout = build_download_table_layout(96, [row])
+
+    assert layout["spd_hdr_w"] >= len("999.9MiB/s")
+
+
+def test_download_table_layout_reserves_stable_status_progress_and_eta_widths():
+    from media_cli.ui.download_manager import UIItemWrapper, build_download_table_layout
+
+    item = DownloadItem(
+        id="stable-columns",
+        title="Stable Columns",
+        episode="Episode 1",
+        destination_path="/tmp/stable-columns.mp4",
+    )
+    item.status = DownloadStatus.DOWNLOADING
+    item.progress = 4.3
+    item.eta_str = "1:02"
+    row = UIItemWrapper(item)
+
+    layout = build_download_table_layout(96, [row])
+
+    assert layout["stat_w"] >= len("✖ STOPPED")
+    assert layout["prog_hdr_w"] >= len("100.0%")
+    assert layout["eta_w"] >= len("99:59:59")
 
 
 def test_download_content_rows_leave_blank_line_above_footer():

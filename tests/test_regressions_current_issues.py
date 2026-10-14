@@ -1,4 +1,5 @@
 import argparse
+import json
 
 from media_cli.context import CliFlags, MachineState, UiState
 
@@ -71,6 +72,66 @@ def test_available_metadata_uses_latest_provider_episode_label():
     assert format_available_episodes(show, "sub") == "Avail 19 [195]"
 
 
+def test_history_catalog_uses_full_download_catalog_when_provider_page_is_partial(monkeypatch, tmp_path):
+    from media_cli.services import catalog
+    from media_cli.state import paths
+
+    db_file = tmp_path / "downloads_db.json"
+    full_ids = [f"https://animexin.dev/show-episode-{idx}/" for idx in range(1, 4)]
+    labels = {eid: str(idx) for idx, eid in enumerate(full_ids, start=1)}
+    db_file.write_text(json.dumps({
+        "shows": {
+            "Demo": {
+                "metadata": {
+                    "_id": "https://animexin.dev/show/",
+                    "_provider": "animexin",
+                    "name": "Demo",
+                    "_episode_ids": full_ids,
+                    "_episode_ids_ttype": "sub",
+                    "_episode_labels": labels,
+                    "availableEpisodes": {"sub": 3},
+                },
+                "episodes": [full_ids[-1]],
+            }
+        }
+    }))
+    monkeypatch.setattr(paths, "DOWNLOADS_DB_PATH", str(db_file))
+
+    class PartialProvider:
+        def episode_catalog(self, show_id, ttype="sub"):
+            return {
+                "state": "loaded",
+                "ids": [full_ids[-1]],
+                "labels": {full_ids[-1]: "3"},
+            }
+
+    show = {
+        "_id": "https://animexin.dev/show/",
+        "_provider": "animexin",
+        "name": "Demo",
+        "availableEpisodes": {"sub": 3},
+    }
+
+    monkeypatch.setattr(catalog, "_provider_for_title", lambda show_arg: PartialProvider())
+
+    assert catalog.ensure_episode_ids(show, "sub") == full_ids
+    assert show["_episode_ids"] == full_ids
+    assert show["_episode_ids_ttype"] == "sub"
+    assert show["_episode_labels"][full_ids[0]] == "1"
+    assert "_folder_name" not in show
+
+
+def test_context_footer_keeps_mode_before_provider():
+    from media_cli.app.footer import context_footer
+    from media_cli.context import MachineState, UiState
+
+    ui = UiState(search_prev_state="HISTORY")
+    ms = MachineState()
+    show = {"_provider": "lucifer", "_provider_name": "Lucifer"}
+
+    assert context_footer(show, ui, ms, "Enter=select") == "History • Lucifer • Enter=select"
+
+
 def test_background_auto_download_uses_provider_key(monkeypatch, tmp_path):
     from media_cli.app import playback_player
 
@@ -89,27 +150,30 @@ def test_background_auto_download_uses_provider_key(monkeypatch, tmp_path):
     }
     captured = {}
 
-    class SyncThread:
-        def __init__(self, target, daemon=False):
-            self.target = target
-            self.daemon = daemon
+    class FakeWorker:
+        def __init__(self):
+            self.items = []
 
-        def start(self):
-            self.target()
+        def add_item(self, item):
+            self.items.append(item)
+            item.resolve_fn(item)
+            return item
 
-    def fake_fetch(show_id, ep, ttype, quality="best", provider_id=None, ep_data=None):
+    def fake_fetch(show_id, ep, ttype, quality="best", provider_id=None, ep_data=None, **kwargs):
         captured["show_id"] = show_id
         captured["provider_id"] = provider_id
         return ({"link": "https://example.test/video.m3u8"}, "Mirror", {}, [])
 
+    fake_worker = FakeWorker()
     monkeypatch.setattr(playback_player.app_core, "is_online", lambda: True)
+    monkeypatch.setattr(playback_player.app_core, "is_termux", lambda: False)
     monkeypatch.setattr(playback_player.app_core, "find_offline_file_for_episode", lambda *a, **k: None)
     monkeypatch.setattr(playback_player.app_core, "fetch_episode_stream", fake_fetch)
-    monkeypatch.setattr(playback_player.app_core, "download_episode", lambda *a, **k: True)
+    monkeypatch.setattr(playback_player.app_core.storage, "get_default_download_dir", lambda: str(tmp_path))
     monkeypatch.setattr(playback_player.app_core, "set_action_feedback", lambda *a, **k: None)
-    monkeypatch.setattr("threading.Thread", SyncThread)
+    monkeypatch.setattr("media_cli.media.download_worker.get_global_worker", lambda *a, **k: fake_worker)
 
-    playback_player.trigger_background_auto_download(show, 0, ["1", "2"], "sub", cfg, ms)
+    playback_player.trigger_background_auto_download(show, 0, ["1", "2"], "sub", cfg, ms, current_stream={"is_local": True})
 
     assert captured["show_id"] == "provider-title-456"
     assert captured["provider_id"] == "anikoto"
@@ -133,30 +197,119 @@ def test_background_auto_download_prefers_provider_title_id(monkeypatch, tmp_pat
     }
     captured = {}
 
-    class SyncThread:
-        def __init__(self, target, daemon=False):
-            self.target = target
-            self.daemon = daemon
+    class FakeWorker:
+        def __init__(self):
+            self.items = []
 
-        def start(self):
-            self.target()
+        def add_item(self, item):
+            self.items.append(item)
+            item.resolve_fn(item)
+            return item
 
-    def fake_fetch(show_id, ep, ttype, quality="best", provider_id=None, ep_data=None):
+    def fake_fetch(show_id, ep, ttype, quality="best", provider_id=None, ep_data=None, **kwargs):
         captured["show_id"] = show_id
         captured["provider_id"] = provider_id
         return ({"link": "https://example.test/video.m3u8"}, "Mirror", {}, [])
 
+    fake_worker = FakeWorker()
     monkeypatch.setattr(playback_player.app_core, "is_online", lambda: True)
+    monkeypatch.setattr(playback_player.app_core, "is_termux", lambda: False)
     monkeypatch.setattr(playback_player.app_core, "find_offline_file_for_episode", lambda *a, **k: None)
     monkeypatch.setattr(playback_player.app_core, "fetch_episode_stream", fake_fetch)
-    monkeypatch.setattr(playback_player.app_core, "download_episode", lambda *a, **k: True)
+    monkeypatch.setattr(playback_player.app_core.storage, "get_default_download_dir", lambda: str(tmp_path))
     monkeypatch.setattr(playback_player.app_core, "set_action_feedback", lambda *a, **k: None)
-    monkeypatch.setattr("threading.Thread", SyncThread)
+    monkeypatch.setattr("media_cli.media.download_worker.get_global_worker", lambda *a, **k: fake_worker)
 
-    playback_player.trigger_background_auto_download(show, 0, ["1", "2"], "sub", cfg, ms)
+    playback_player.trigger_background_auto_download(show, 0, ["1", "2"], "sub", cfg, ms, current_stream={"is_local": True})
 
     assert captured["show_id"] == "provider-title-456"
     assert captured["provider_id"] == "anikoto"
+
+
+def test_auto_download_mode_normalizes_legacy_values():
+    from media_cli.app.playback_player import auto_download_mode
+
+    assert auto_download_mode({"auto_download_next": True}, None) == "adaptive"
+    assert auto_download_mode({"auto_download_next": False}, None) == "off"
+    assert auto_download_mode({"auto_download_next": "adaptive"}, None) == "adaptive"
+    assert auto_download_mode({"auto_download_next": "off"}, None) == "off"
+
+
+def test_adaptive_auto_download_waits_for_safe_cache_before_starting():
+    from media_cli.app.playback_player import AdaptiveAutoDownloadController
+
+    actions = []
+    controller = AdaptiveAutoDownloadController(
+        start=lambda: actions.append("start"),
+        pause=lambda: actions.append("pause"),
+        resume=lambda: actions.append("resume"),
+        log=lambda msg: actions.append(msg),
+    )
+
+    controller.update({"demuxer-cache-duration": 45, "duration": 1400, "playback-time": 100})
+    assert actions == []
+
+    controller.update({"demuxer-cache-duration": 91, "duration": 1400, "playback-time": 100})
+    assert actions[0] == "start"
+    assert any("resumed, cache 91s" in str(action) for action in actions)
+
+
+def test_adaptive_auto_download_pauses_and_resumes_with_hysteresis(monkeypatch):
+    from media_cli.app import playback_player
+
+    now = [100.0]
+    monkeypatch.setattr(playback_player.time, "monotonic", lambda: now[0])
+    actions = []
+    controller = playback_player.AdaptiveAutoDownloadController(
+        start=lambda: actions.append("start"),
+        pause=lambda: actions.append("pause"),
+        resume=lambda: actions.append("resume"),
+        log=lambda msg: actions.append(msg),
+    )
+
+    controller.update({"demuxer-cache-duration": 95, "duration": 1400, "playback-time": 100})
+    now[0] += 10
+    controller.update({"demuxer-cache-duration": 27, "duration": 1400, "playback-time": 100})
+    now[0] += 10
+    controller.update({"demuxer-cache-duration": 80, "duration": 1400, "playback-time": 100})
+    now[0] += 10
+    controller.update({"demuxer-cache-duration": 92, "duration": 1400, "playback-time": 100})
+
+    assert actions.count("start") == 1
+    assert actions.count("pause") == 1
+    assert actions.count("resume") == 1
+    assert any("paused, cache 27s" in str(action) for action in actions)
+    assert any("resumed, cache 92s" in str(action) for action in actions)
+
+
+def test_adaptive_auto_download_missing_cache_does_not_pause(monkeypatch):
+    from media_cli.app import playback_player
+
+    now = [100.0]
+    monkeypatch.setattr(playback_player.time, "monotonic", lambda: now[0])
+    actions = []
+    controller = playback_player.AdaptiveAutoDownloadController(
+        start=lambda: actions.append("start"),
+        pause=lambda: actions.append("pause"),
+        resume=lambda: actions.append("resume"),
+        log=lambda msg: actions.append(msg),
+    )
+
+    controller.update({"demuxer-cache-duration": 95, "duration": 1400, "playback-time": 100})
+    now[0] += 10
+    controller.update({"duration": 1400, "playback-time": 100})
+
+    assert actions == ["start", "Auto-download resumed, cache 95s"]
+
+
+def test_should_start_adaptive_auto_download_mobile_only_for_local_playback(monkeypatch):
+    from media_cli.app import playback_player
+
+    monkeypatch.setattr(playback_player.app_core, "is_termux", lambda: True)
+
+    assert playback_player.should_start_adaptive_auto_download({"is_local": True}, "adaptive") is True
+    assert playback_player.should_start_adaptive_auto_download({"link": "https://example.test/ep.m3u8"}, "adaptive") is False
+    assert playback_player.should_start_adaptive_auto_download({"is_local": True}, "off") is False
 
 
 def test_auto_delete_prunes_downloaded_watched_episode_after_normal_playback(monkeypatch):
@@ -214,7 +367,7 @@ def test_auto_delete_prunes_downloaded_watched_episode_after_normal_playback(mon
     monkeypatch.setattr(playback_player.app_core, "save_resume_time", lambda *a, **k: None)
     monkeypatch.setattr(playback_player.app_core, "clear_pending_completion", lambda *a, **k: None)
     monkeypatch.setattr(playback_player.app_core, "set_action_feedback", lambda *a, **k: None)
-    monkeypatch.setattr(playback_player.app_core, "delete_offline_episode", lambda folder, ep, cfg=None: deleted.append(str(ep)) or True)
+    monkeypatch.setattr(playback_player.app_core, "delete_offline_episode", lambda folder, ep, cfg=None, **kwargs: deleted.append(str(ep)) or True)
 
     next_state = playback_player.handle_play_state(
         flags,
@@ -499,11 +652,11 @@ def test_playback_settings_keeps_header_and_stays_open_after_toggle(monkeypatch)
     )
 
     assert state == "DETAILS"
-    assert ms.auto_download_next is True
+    assert ms.auto_download_next == "adaptive"
     assert len(playback_calls) == 2
     assert callable(playback_headers[0])
-    assert any("Auto-Download Next: OFF" in opt for opt in playback_calls[0])
-    assert any("Auto-Download Next: ON" in opt for opt in playback_calls[1])
+    assert any("Auto-Download Next: Off" in opt for opt in playback_calls[0])
+    assert any("Auto-Download Next: Adaptive" in opt for opt in playback_calls[1])
     assert playback_initial_selected == [0, 0]
 
 

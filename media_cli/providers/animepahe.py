@@ -7,7 +7,10 @@ import json
 import logging
 import os
 import re
+import shutil
 import sqlite3
+import sys
+import time
 import urllib.parse
 from typing import Any
 
@@ -31,19 +34,43 @@ except ImportError:
     CURL_CFFI_AVAILABLE = False
 
 
-def _find_browser_cookies() -> dict[str, str]:
-    """Search for existing animepahe or kwik cookies from local Firefox profiles."""
+def _cookie_host_matches(cookie_host: str, request_host: str) -> bool:
+    host = cookie_host.lstrip(".").lower()
+    request_host = request_host.lower()
+    return request_host == host or request_host.endswith(f".{host}")
+
+
+def _find_browser_cookies(url: str | None = None) -> dict[str, str]:
+    """Search Firefox profiles for cookies that match the requested URL."""
     cookies: dict[str, str] = {}
+    request_host = ""
+    is_https = True
+    if url:
+        parsed = urllib.parse.urlparse(url)
+        request_host = (parsed.hostname or "").lower()
+        is_https = parsed.scheme == "https"
+
     for p in glob.glob(os.path.expanduser("~/.mozilla/firefox/*/cookies.sqlite")):
         conn = None
         try:
             conn = sqlite3.connect(f"file:{p}?immutable=1", uri=True)
             cur = conn.cursor()
-            cur.execute(
-                "SELECT name, value FROM moz_cookies "
-                "WHERE host LIKE '%animepahe%' OR host LIKE '%kwik%'"
-            )
-            for name, val in cur.fetchall():
+            if request_host:
+                cur.execute(
+                    "SELECT host, name, value, isSecure FROM moz_cookies "
+                    "WHERE host LIKE ? OR host LIKE ?",
+                    (f"%{request_host}", f"%.{request_host}"),
+                )
+            else:
+                cur.execute(
+                    "SELECT host, name, value, isSecure FROM moz_cookies "
+                    "WHERE host LIKE '%animepahe%' OR host LIKE '%kwik%'"
+                )
+            for host, name, val, is_secure in cur.fetchall():
+                if request_host and not _cookie_host_matches(str(host), request_host):
+                    continue
+                if bool(is_secure) and not is_https:
+                    continue
                 cookies[name] = val
         except Exception:
             pass
@@ -67,6 +94,110 @@ def _detect_firefox_user_agent() -> str:
     except Exception:
         pass
     return "Mozilla/5.0 (X11; Linux x86_64; rv:155.0) Gecko/20100101 Firefox/155.0"
+
+
+def _looks_like_cloudflare_challenge(text: str) -> bool:
+    lowered = (text or "").lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "just a moment",
+            "performing security verification",
+            "verify you are not a bot",
+            "security service to protect",
+            "ray id:",
+            "window._cf_chl_opt",
+        )
+    )
+
+
+def _resolve_browser_response(url: str, user_agent: str, timeout: int = 25) -> tuple[str, dict[str, str]]:
+    _resolve_browser_response.last_error = ""
+    if os.environ.get("ANYPLAY_BROWSER_COOKIES", "").strip().lower() in {"0", "false", "off", "no"}:
+        _resolve_browser_response.last_error = "browser helper disabled"
+        return "", {}
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception as exc:
+        _resolve_browser_response.last_error = f"Playwright is not installed for {sys.executable}"
+        _logger.debug("Playwright import failed: %s", exc)
+        return "", {}
+
+    deadline = time.time() + max(3, timeout)
+    browser = None
+    context = None
+    candidates = [
+        shutil.which("chromium"),
+        shutil.which("google-chrome-stable"),
+        shutil.which("google-chrome"),
+        shutil.which("brave-browser"),
+        shutil.which("brave"),
+    ]
+    executable_paths = [path for path in candidates if path]
+    try:
+        with sync_playwright() as pw:
+            launch_kwargs = {
+                "headless": True,
+                "args": [
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-dev-shm-usage",
+                ],
+            }
+            if executable_paths:
+                launch_kwargs["executable_path"] = executable_paths[0]
+            browser = pw.chromium.launch(**launch_kwargs)
+            context = browser.new_context(user_agent=user_agent, storage_state=None)
+            page = context.new_page()
+            page.goto(url, wait_until="domcontentloaded", timeout=timeout * 1000)
+            parsed = urllib.parse.urlparse(url)
+            host = parsed.hostname or ""
+            body_text = ""
+            while time.time() < deadline:
+                cookies = {
+                    cookie.get("name", ""): cookie.get("value", "")
+                    for cookie in context.cookies([url])
+                    if _cookie_host_matches(cookie.get("domain", ""), host)
+                }
+                try:
+                    body_text = page.locator("body").inner_text(timeout=1000).strip()
+                except Exception:
+                    body_text = ""
+                if cookies.get("cf_clearance") and body_text and not _looks_like_cloudflare_challenge(body_text):
+                    return body_text, cookies
+                if cookies.get("cf_clearance"):
+                    try:
+                        page.reload(wait_until="domcontentloaded", timeout=timeout * 1000)
+                    except Exception:
+                        pass
+                page.wait_for_timeout(500)
+            _resolve_browser_response.last_error = "browser session did not receive a usable AnimePahe response"
+    except Exception as exc:
+        _resolve_browser_response.last_error = str(exc)
+        _logger.debug("Browser cookie resolver failed on %s: %s", url, exc)
+    finally:
+        try:
+            if context is not None:
+                context.close()
+        except Exception:
+            pass
+        try:
+            if browser is not None:
+                browser.close()
+        except Exception:
+            pass
+    return "", {}
+
+
+_resolve_browser_response.last_error = ""
+
+
+def _resolve_browser_cookies(url: str, user_agent: str, timeout: int = 25) -> dict[str, str]:
+    _body, cookies = _resolve_browser_response(url, user_agent, timeout)
+    _resolve_browser_cookies.last_error = getattr(_resolve_browser_response, "last_error", "")
+    return cookies
+
+
+_resolve_browser_cookies.last_error = ""
 
 
 def _pahe_src_sort_key(s: dict, ttype: str = "sub") -> tuple:
@@ -99,6 +230,7 @@ class AnimePaheProvider(Provider):
         self._session = None
         self._cookies: dict[str, str] = {}
         self._user_agent = os.environ.get("ANIMEPAHE_USER_AGENT", "").strip()
+        self._browser_cookie_refresh_attempted = False
         self._init_cookies()
 
     @property
@@ -120,7 +252,7 @@ class AnimePaheProvider(Provider):
 
         # 2. Browser cookies
         if "cf_clearance" not in self._cookies:
-            browser_cookies = _find_browser_cookies()
+            browser_cookies = _find_browser_cookies(self.base_url)
             self._cookies.update(browser_cookies)
 
         if not self._user_agent:
@@ -150,17 +282,36 @@ class AnimePaheProvider(Provider):
         if sess is not None:
             try:
                 resp = sess.get(url, headers=req_headers, timeout=timeout)
-                if resp.status_code == 200:
+                if resp.status_code == 200 and not _looks_like_cloudflare_challenge(resp.text):
                     return resp.text
-                if resp.status_code == 403 and "Just a moment..." in resp.text:
+                if resp.status_code in {200, 403, 503} and _looks_like_cloudflare_challenge(resp.text):
                     self._cf_blocked = True
                     _logger.debug("AnimePahe returned Cloudflare challenge on %s", url)
+                    if not self._browser_cookie_refresh_attempted:
+                        self._browser_cookie_refresh_attempted = True
+                        browser_text, fresh_cookies = _resolve_browser_response(url, req_headers["User-Agent"], timeout=25)
+                        if fresh_cookies:
+                            self._cookies.update(fresh_cookies)
+                            try:
+                                sess.cookies.update(fresh_cookies)
+                            except Exception:
+                                pass
+                        if browser_text:
+                            self._cf_blocked = False
+                            return browser_text
+                        if fresh_cookies:
+                            resp = sess.get(url, headers=req_headers, timeout=timeout)
+                            if resp.status_code == 200:
+                                self._cf_blocked = False
+                                return resp.text
             except Exception as e:
                 _logger.debug("AnimePahe session GET error on %s: %s", url, e)
 
         # Fallback to urllib
         import urllib.request
-        cookie_header = "; ".join(f"{k}={v}" for k, v in self._cookies.items())
+        request_cookies = dict(self._cookies)
+        request_cookies.update(_find_browser_cookies(url))
+        cookie_header = "; ".join(f"{k}={v}" for k, v in request_cookies.items())
         if cookie_header:
             req_headers["Cookie"] = cookie_header
         req = urllib.request.Request(url, headers=req_headers)
@@ -204,8 +355,11 @@ class AnimePaheProvider(Provider):
         if not data or not isinstance(data, dict):
             if getattr(self, "_cf_blocked", False):
                 from ..core.api import SearchFailure
+                browser_reason = getattr(_resolve_browser_response, "last_error", "") or getattr(_resolve_browser_cookies, "last_error", "")
+                browser_hint = f" Browser helper: {browser_reason}." if browser_reason else ""
                 raise SearchFailure(
-                    "AnimePahe is protected by Cloudflare. Open https://animepahe.pw in Firefox once, or set ANIMEPAHE_COOKIE."
+                    "AnimePahe is protected by Cloudflare."
+                    f"{browser_hint} Run with the pipx anyplay command, install the animepahe-browser extra for this Python, or open https://animepahe.pw in Firefox once."
                 )
             return []
 

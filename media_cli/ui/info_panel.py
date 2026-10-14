@@ -75,13 +75,19 @@ def build_info_panel(
         show.get("_anilist_progress"),
         show.get("_anilist_list"),
         show.get("_sync_enabled"),
+        tuple(str(ep) for ep in show.get("watched_episodes", [])),
     )
     cached = _panel_cache.get(cache_key)
     if cached is not None:
         parts.extend(cached)
         return
 
-    prepare_show_display_state(show, ttype, show.get("_sync_enabled") if "_sync_enabled" in show else None)
+    prepare_show_display_state(
+        show,
+        ttype,
+        show.get("_sync_enabled") if "_sync_enabled" in show else None,
+        prefer_watched_episodes=local_only,
+    )
 
     cache_key_updated = (
         str(show.get("_id") or id(show)),
@@ -95,6 +101,7 @@ def build_info_panel(
         show.get("_anilist_progress"),
         show.get("_anilist_list"),
         show.get("_sync_enabled"),
+        tuple(str(ep) for ep in show.get("watched_episodes", [])),
     )
     cached = _panel_cache.get(cache_key_updated)
     if cached is not None:

@@ -2,6 +2,7 @@ import logging
 
 from media_cli.core.anilist import fetch_anilist_by_ids
 from media_cli.core.storage import get_source_anilist_matches, save_source_anilist_matches
+from media_cli.domain.metadata import provider_status_is_authoritative
 from media_cli.domain.matching import choose_confident_match, reset_title_cache
 
 
@@ -45,7 +46,7 @@ def _merge_anilist_into_provider(provider_show, anilist_show):
 
     if anilist_show.get("status"):
         provider_show["_anilist_status"] = anilist_show["status"]
-        if anilist_show["status"] == "FINISHED":
+        if anilist_show["status"] == "FINISHED" and not provider_status_is_authoritative(provider_show):
             provider_show["status"] = "FINISHED"
     if any(term in str(provider_show.get("status") or "").upper() for term in ("FINISHED", "COMPLETED", "ENDED")):
         provider_show["status"] = "FINISHED"

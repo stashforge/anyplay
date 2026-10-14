@@ -52,6 +52,20 @@ def sanitize_filename(title: str) -> str:
     ).strip()
 
 
+def anyplay_metadata_args(title: str = "", episode: str = "", title_id: str = "", episode_id: str = "") -> list[str]:
+    tags = {
+        "anyplay_title": str(title or "").strip(),
+        "anyplay_episode": str(episode or "").strip(),
+        "anyplay_title_id": str(title_id or "").strip(),
+        "anyplay_episode_id": str(episode_id or "").strip(),
+    }
+    args: list[str] = []
+    for key, value in tags.items():
+        if value:
+            args.extend(["-metadata", f"{key}={value}"])
+    return args
+
+
 def download_episode(
     title,
     episode,
@@ -74,8 +88,7 @@ def download_episode(
         download_sub_langs = cfg.get("download_sub_langs", "multi")
     if download_audio_langs is None:
         download_audio_langs = cfg.get("download_audio_langs", "multi")
-    if subtitle_mode is None:
-        subtitle_mode = cfg.get("subtitle_mode", "embed")
+    subtitle_mode = "embed"
 
     raw_url = stream.get("link") or stream.get("streamUrl") or stream.get("sourceUrl") or ""
     if not raw_url:
@@ -98,7 +111,7 @@ def download_episode(
         subtitles = [{"url": stream.get("subtitle"), "label": "Default", "language": "en", "default": True}]
 
     has_multi_audio = len(audio_tracks) > 1 or (audio_url and audio_url != raw_url)
-    embed_subs = (subtitle_mode == "embed") and bool(subtitles) and (download_sub_langs not in ("none", "no", False))
+    embed_subs = bool(subtitles) and (download_sub_langs not in ("none", "no", False))
 
     if downloader == "auto":
         if has_multi_audio:
@@ -109,8 +122,8 @@ def download_episode(
     if downloader == "yt-dlp":
         if embed_subs and not shutil.which("ffmpeg"):
             if not quiet:
-                print(f"{YELLOW}⚠ ffmpeg not found; cannot embed subtitles into container. Saving as sidecar subtitles.{RESET}")
-            embed_subs = False
+                _error("ffmpeg is required to embed subtitles into the final MKV.")
+            return False
         if has_multi_audio and not quiet:
             print(f"{YELLOW}ℹ yt-dlp uses --audio-multistreams for multi-audio (ffmpeg is recommended for separate stream inputs).{RESET}")
 
@@ -145,11 +158,10 @@ def download_episode(
 
     # Base path without extension
     base_filename = os.path.join(target_dir, f"{safe_title} - Episode {episode}")
-    ext = ".mkv" if embed_subs else ".mp4"
+    ext = ".mkv"
     final_filename = f"{base_filename}{ext}"
 
-    # If using yt-dlp to download video before remuxing into mkv with ffmpeg
-    yt_dlp_remux = (downloader == "yt-dlp" and embed_subs)
+    yt_dlp_remux = downloader == "yt-dlp" and embed_subs
     download_filename = f"{base_filename}.temp.mp4" if yt_dlp_remux else final_filename
     ffmpeg_partial_filename = _partial_output_path(final_filename) if downloader == "ffmpeg" else ""
 
@@ -275,6 +287,8 @@ def download_episode(
 
         os.makedirs(os.path.dirname(ffmpeg_partial_filename), exist_ok=True)
 
+        command.extend(anyplay_metadata_args(title=title, episode=str(episode)))
+
         # Stream copy without re-encoding
         command.extend(["-c", "copy", ffmpeg_partial_filename])
     else:
@@ -346,6 +360,7 @@ def download_episode(
                     actual_download_path,
                     downloaded_sidecars,
                     final_filename,
+                    metadata_args=anyplay_metadata_args(title=title, episode=str(episode)),
                     quiet=quiet,
                 )
                 if remux_ok:
@@ -357,21 +372,27 @@ def download_episode(
                     except Exception:
                         pass
                 else:
-                    fallback_mp4 = f"{base_filename}.mp4"
                     try:
-                        os.replace(actual_download_path, fallback_mp4)
-                    except Exception:
+                        if os.path.exists(actual_download_path):
+                            os.remove(actual_download_path)
+                        for s_path in downloaded_sidecars:
+                            if os.path.exists(s_path):
+                                os.remove(s_path)
+                    except OSError:
                         pass
                     if not quiet:
-                        print(f"{YELLOW}⚠ Subtitle embedding failed; video saved as {os.path.basename(fallback_mp4)} with sidecars.{RESET}")
+                        _error("Subtitle embedding failed; no sidecar fallback was kept.")
+                    return False
             elif os.path.exists(actual_download_path):
-                fallback_mp4 = f"{base_filename}.mp4"
                 try:
-                    os.replace(actual_download_path, fallback_mp4)
-                except Exception:
+                    os.remove(actual_download_path)
+                except OSError:
                     pass
+                if not quiet:
+                    _error("yt-dlp did not produce a remuxable subtitle download.")
+                return False
 
-        if downloader == "ffmpeg" and embed_subs and downloaded_sidecars:
+        if downloader == "ffmpeg" and downloaded_sidecars:
             for s_path in downloaded_sidecars:
                 try:
                     if os.path.exists(s_path):

@@ -33,9 +33,13 @@ def test_download_episode_multi_audio_ffmpeg_command():
             mock_proc.returncode = 0
             return mock_proc
 
+        dummy_sub = os.path.join(tmpdir, "Slime S04 - Episode 1.en.vtt")
+        with open(dummy_sub, "w") as f:
+            f.write("WEBVTT\n")
+
         with patch("subprocess.Popen", side_effect=mock_popen), \
              patch("shutil.which", return_value="/usr/bin/ffmpeg"), \
-             patch("media_cli.media.download.download_sidecar_subtitles") as mock_sidecar:
+             patch("media_cli.media.download.download_sidecar_subtitles", return_value=[dummy_sub]) as mock_sidecar:
 
             # Test 1: Download with all languages (multi)
             ok = download_episode(
@@ -46,13 +50,14 @@ def test_download_episode_multi_audio_ffmpeg_command():
                 downloader="ffmpeg",
                 download_audio_langs="multi",
                 download_sub_langs="multi",
-                subtitle_mode="sidecar",
                 quiet=True,
             )
 
             assert ok is True
-            # Verify sidecar subtitles called
             assert mock_sidecar.called
+            assert captured_cmd[-1].endswith(".mkv")
+            assert "4:s:0" in captured_cmd
+            assert not os.path.exists(dummy_sub)
 
             # Check FFmpeg inputs: 0 is video, 1 is ja, 2 is en, 3 is es
             assert "-i" in captured_cmd
@@ -70,6 +75,50 @@ def test_download_episode_multi_audio_ffmpeg_command():
             assert "language=jpn" in captured_cmd
             assert "language=eng" in captured_cmd
             assert "language=spa" in captured_cmd
+
+
+def test_download_episode_ignores_removed_sidecar_mode_and_embeds_subs():
+    stream = {
+        "link": "https://stream.example.com/video.mp4",
+        "subtitles": [{"url": "https://stream.example.com/en.vtt", "label": "English", "language": "en"}],
+    }
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        captured_cmd = []
+
+        def mock_popen(cmd, *args, **kwargs):
+            nonlocal captured_cmd
+            captured_cmd = cmd
+            os.makedirs(os.path.dirname(cmd[-1]), exist_ok=True)
+            with open(cmd[-1], "wb") as fh:
+                fh.write(b"fake-video")
+            mock_proc = MagicMock()
+            mock_proc.wait.return_value = 0
+            mock_proc.returncode = 0
+            return mock_proc
+
+        dummy_sub = os.path.join(tmpdir, "Slime S04 - Episode 1.en.vtt")
+        with open(dummy_sub, "w") as f:
+            f.write("WEBVTT\n")
+
+        with patch("subprocess.Popen", side_effect=mock_popen), \
+             patch("shutil.which", return_value="/usr/bin/ffmpeg"), \
+             patch("media_cli.media.download.download_sidecar_subtitles", return_value=[dummy_sub]):
+            ok = download_episode(
+                "Slime S04",
+                1,
+                stream,
+                download_dir=tmpdir,
+                downloader="ffmpeg",
+                subtitle_mode="sidecar",
+                download_sub_langs="eng",
+                quiet=True,
+            )
+
+        assert ok is True
+        assert captured_cmd[-1].endswith(".mkv")
+        assert dummy_sub in captured_cmd
+        assert not os.path.exists(dummy_sub)
 
 
 def test_download_episode_filtered_audio_ffmpeg():
@@ -169,6 +218,8 @@ def test_download_episode_embedded_subs_mkv():
             assert dummy_sub in captured_cmd
             assert "1:s:0" in captured_cmd
             assert "language=eng" in captured_cmd
+            assert "anyplay_title=Slime S04" in captured_cmd
+            assert "anyplay_episode=1" in captured_cmd
 
 
 def test_download_episode_ffmpeg_commits_only_after_partial_success():
@@ -199,7 +250,7 @@ def test_download_episode_ffmpeg_commits_only_after_partial_success():
                 quiet=True,
             )
 
-        final_path = os.path.join(tmpdir, "Atomic Show", "Atomic Show - Episode 7.mp4")
+        final_path = os.path.join(tmpdir, "Atomic Show", "Atomic Show - Episode 7.mkv")
         assert ok is True
         assert captured_cmd[-1] != final_path
         assert ".anyplay-partials" in captured_cmd[-1]

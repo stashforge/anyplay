@@ -19,6 +19,7 @@ from ..domain.episodes import (
 from ..ui.help import picker_help
 from ..ui import loading_messages
 from ..ui.picker import tui_pick
+from .footer import context_footer
 
 _C_HINT = "\033[38;5;244m"
 _RST    = "\033[0m"
@@ -526,9 +527,6 @@ def handle_episode_state(
         if feedback:
             parts.append(f"\033[38;5;222m{_t(feedback)}{_RST}")
         else:
-            p_name = (show.get("_provider_name") or (show.get("_provider") or "").title()) if show else ""
-            offline_badge = "\033[38;2;225;85;85m[Offline]\033[0m • " if app_core.is_confirmed_offline() else ""
-            prefix = f"{offline_badge}{p_name} • " if p_name else offline_badge
             action_nav = ""
             if 0 <= si < len(display_order):
                 orig_i = display_order[si]
@@ -538,7 +536,14 @@ def handle_episode_state(
                     action_nav = "Enter=Play • Del=Delete • "
                 elif getattr(ms, "_is_downloads", False):
                     action_nav = "Enter=Download • "
-            parts.append(f"{_C_HINT}{_t(prefix + action_nav + 'Tab=Sub/Dub • Ctrl+R=flip • ?=Help • ' + nav_text)}{_RST}")
+            footer = context_footer(
+                show,
+                ui,
+                ms,
+                action_nav + "Tab=Sub/Dub • Ctrl+R=flip • ?=Help • " + nav_text,
+                offline=app_core.is_confirmed_offline(),
+            )
+            parts.append(f"{_C_HINT}{_t(footer)}{_RST}")
         res = "\n".join(parts)
         _hdr_cache[cache_key] = res
         return res

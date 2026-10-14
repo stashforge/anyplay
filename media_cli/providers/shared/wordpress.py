@@ -25,6 +25,7 @@ class Entry:
     url: str
     meta: str = ""
     image: str = ""
+    date: str = ""
 
 
 @dataclass(frozen=True)
@@ -65,6 +66,20 @@ def clean_text(value: str) -> str:
     value = re.sub(r"<[^>]+>", " ", value)
     value = html.unescape(value)
     return re.sub(r"\s+", " ", value).strip()
+
+
+def _parse_release_day(value: str) -> int | None:
+    text = clean_text(value)
+    if not text:
+        return None
+    from datetime import datetime
+
+    for fmt in ("%B %d, %Y", "%b %d, %Y"):
+        try:
+            return datetime.strptime(text, fmt).date().toordinal()
+        except ValueError:
+            continue
+    return None
 
 
 def attr_value(attrs: str, name: str) -> str:
@@ -127,6 +142,8 @@ def parse_series(base_url: str, page_html: str, valid_domains: list[str] = None,
     seen: set[str] = set()
     # Tracks whether we've already done one extra episode-page HTTP fetch this call.
     _extra_fetch_done = [False]
+    newest_seen_episode_num = None
+    previous_release_day = None
 
     # Detect the latest released episode number from div.lastend (e.g. "New Episode: Episode 22")
     last_end_node = (
@@ -161,6 +178,9 @@ def parse_series(base_url: str, page_html: str, valid_domains: list[str] = None,
             if title_node else link.get_text(" ", strip=True)
         )
         meta = clean_text(label_node.get_text(" ", strip=True) if label_node else "")
+        date_node = item.select_one(".epl-date, .ep-date, .date")
+        release_date = clean_text(date_node.get_text(" ", strip=True) if date_node else "")
+        release_day = _parse_release_day(release_date)
 
         from media_cli.domain.episodes import clean_episode_identifier
         ep_num_str = clean_episode_identifier(href) or clean_episode_identifier(meta) or clean_episode_identifier(title)
@@ -168,6 +188,16 @@ def parse_series(base_url: str, page_html: str, valid_domains: list[str] = None,
             ep_num = float(ep_num_str)
         except (ValueError, TypeError):
             ep_num = None
+
+        if (
+            release_day is not None
+            and previous_release_day is not None
+            and release_day < previous_release_day
+            and ep_num is not None
+            and newest_seen_episode_num is not None
+            and ep_num > newest_seen_episode_num
+        ):
+            continue
 
         if latest_released_num is not None and ep_num is not None and ep_num > latest_released_num:
             # Check if this episode is truly an unreleased countdown or an early release.
@@ -204,7 +234,11 @@ def parse_series(base_url: str, page_html: str, valid_domains: list[str] = None,
 
         if title:
             seen.add(href)
-            items.append(Entry(title=title, url=href, meta=meta, image=image_url))
+            items.append(Entry(title=title, url=href, meta=meta, image=image_url, date=release_date))
+            if ep_num is not None:
+                newest_seen_episode_num = max(newest_seen_episode_num or ep_num, ep_num)
+            if release_day is not None:
+                previous_release_day = release_day
     return items
 
 
@@ -613,6 +647,7 @@ class WordPressAnimeProvider:
                 title=entry.title,
                 url=entry.url,
                 translation_type="sub",
+                date=entry.date,
             ))
         return build_catalog(
             provider=self.id,

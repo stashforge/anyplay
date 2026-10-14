@@ -15,6 +15,7 @@ from ..domain.tracking import (
 )
 from ..ui.help import picker_help
 from ..ui.picker import tui_pick
+from .footer import context_footer
 
 
 def handle_update_progress_state(
@@ -127,7 +128,13 @@ def handle_update_progress_state(
             return _hdr_cache[cache_key]
         parts = []
         app_core.build_info_panel(s, ttype_local, w, parts, local_only=getattr(ms, "_is_downloads", False))
-        parts.append(app_core._poster_footer_line(s, "Enter/Right=set progress  Ctrl+R=flip  ? = Help  Left/Esc=back", w))
+        footer = context_footer(
+            s,
+            ui,
+            ms,
+            "Enter/Right=set progress  Ctrl+R=flip  ? = Help  Left/Esc=back",
+        )
+        parts.append(app_core._poster_footer_line(s, footer, w))
         res = "\n".join(parts)
         _hdr_cache[cache_key] = res
         return res
@@ -181,6 +188,9 @@ def handle_update_progress_state(
         al_target = chosen["anilist_progress"]
         local_target = chosen["ep_number"]
         target_ep_id = chosen["provider_id"]
+        is_downloads = bool(getattr(ms, "_is_downloads", False))
+        folder_name = s.get("_folder_name") or getattr(ms, "show_title", "") or s.get("name")
+        progress_saved = False
 
         if sync_active:
             status_value = tracking_status_for_progress(s, al_target) if al_target > 0 else None
@@ -196,15 +206,24 @@ def handle_update_progress_state(
             if updated:
                 apply_tracking_progress_local(s, al_target, status_value)
                 s["_progress_authority"] = "AL"
-                if target_ep_id and str(target_ep_id) != "0":
+                if is_downloads and folder_name:
+                    app_core.record_download_watch_progress(
+                        s, folder_name, target_ep_id or "0", ttype_local, sync_enabled=True
+                    )
+                elif target_ep_id and str(target_ep_id) != "0":
                     app_core.write_history_progress(s, target_ep_id, ttype_local, touch=True)
                 s["_local_progress"] = local_target
                 s["_local_episode_label"] = chosen["label"]
                 app_core.set_action_feedback(s, f"✔ Synced {chosen['label']} to AniList")
+                progress_saved = True
             else:
                 app_core.err("AniList sync failed.")
         else:
-            if target_ep_id and str(target_ep_id) != "0":
+            if is_downloads and folder_name:
+                app_core.record_download_watch_progress(
+                    s, folder_name, target_ep_id or "0", ttype_local, sync_enabled=False
+                )
+            elif target_ep_id and str(target_ep_id) != "0":
                 app_core.write_history_progress(s, target_ep_id, ttype_local, touch=True)
             else:
                 app_core.write_history_progress(s, "0", ttype_local, touch=True)
@@ -212,6 +231,11 @@ def handle_update_progress_state(
             s["_local_episode_label"] = chosen["label"]
             s["_progress_authority"] = "LOCAL"
             app_core.set_action_feedback(s, f"✔ Saved progress: {chosen['label']}")
+            progress_saved = True
+
+        if progress_saved and is_downloads:
+            from .playback_player import _auto_delete_watched_downloads
+            _auto_delete_watched_downloads(s, episode_ids, ttype_local, cfg, ms)
 
         if s.get("_id") and target_ep_id and str(target_ep_id) != "0":
             app_core.save_resume_time(s.get("_id"), target_ep_id, 0)
@@ -246,7 +270,13 @@ def handle_update_status_state(
             return _hdr_cache[cache_key]
         parts = []
         app_core.build_info_panel(s, ttype_local, w, parts, local_only=getattr(ms, "_is_downloads", False))
-        parts.append(app_core._poster_footer_line(s, "Enter/Right=select  ? = Help  Left/Esc=back", w))
+        footer = context_footer(
+            s,
+            ui,
+            ms,
+            "Enter/Right=select  ? = Help  Left/Esc=back",
+        )
+        parts.append(app_core._poster_footer_line(s, footer, w))
         res = "\n".join(parts)
         _hdr_cache[cache_key] = res
         return res
@@ -330,7 +360,13 @@ def handle_update_score_state(
             return _hdr_cache[cache_key]
         parts = []
         app_core.build_info_panel(s, ttype_local, w, parts, local_only=getattr(ms, "_is_downloads", False))
-        parts.append(app_core._poster_footer_line(s, "Enter/Right=select  ? = Help  Left/Esc=back", w))
+        footer = context_footer(
+            s,
+            ui,
+            ms,
+            "Enter/Right=select  ? = Help  Left/Esc=back",
+        )
+        parts.append(app_core._poster_footer_line(s, footer, w))
         res = "\n".join(parts)
         _hdr_cache[cache_key] = res
         return res

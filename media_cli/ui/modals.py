@@ -6,9 +6,18 @@ import os
 from typing import Any, Callable
 
 from ..core.terminal import truncate_display
-from .display import _get_poster, _poster_footer_line, with_loading
-from .panels import render_modal_card, render_search_header
+from ..domain.metadata import format_info_metadata_line
+from ..domain.titles import get_display_titles, get_show_display_title
+from .display import _get_poster, with_loading
+from .panels import render_search_header
 from .picker import tui_pick
+
+C_TITLE = "\033[1;97m"
+C_ALT = "\033[38;5;248m"
+C_HINT = "\033[38;5;244m"
+C_WARN = "\033[38;5;222m"
+C_ACCENT = "\033[36m"
+R = "\033[0m"
 
 
 def _show_needs_enrichment(show: dict[str, Any] | None) -> bool:
@@ -73,6 +82,30 @@ def make_single_show_info_fn(
         )
 
     return _info_fn
+
+
+def _match_header_card(
+    show: dict[str, Any] | None,
+    ttype: str,
+    context_line: str,
+    width: int,
+    *,
+    sync_enabled: bool | None = None,
+    local_only: bool = False,
+) -> str:
+    show = show if isinstance(show, dict) else {}
+    title = get_show_display_title(show, sync_enabled=sync_enabled)
+    alt = get_display_titles(show, title) or "No alternative title"
+    metadata = format_info_metadata_line(show, ttype, local_only=local_only)
+    if not metadata:
+        metadata = "No metadata"
+
+    return "\n".join([
+        f"{C_TITLE}{truncate_display(title, max(1, width - 1))}{R}",
+        f"{C_ALT}{truncate_display(alt, max(1, width - 1))}{R}",
+        f"{C_ALT}{truncate_display(metadata, max(1, width - 1))}{R}",
+        truncate_display(context_line, max(1, width - 1)),
+    ])
 
 
 def search_input_header(
@@ -150,56 +183,30 @@ def manual_match_input_header(
     provider_label = p_name or target_provider_name or "Provider"
 
     def _hdr(si: int) -> str:
-        C_K = "\033[38;5;244m"
-        C_T = "\033[1;97m"
-        R = "\033[0m"
-        anilist_title = (
-            (anilist_show or {}).get("name")
-            or (anilist_show or {}).get("englishName")
-            or ""
-        )
         try:
             w = os.get_terminal_size().columns
         except OSError:
             w = 80
-        parts = [
-            "",
-            f"{C_K}Search {provider_label} for:{R}",
-            f"{C_T}{truncate_display(anilist_title, w)}{R}",
-        ]
-        footer_text = f"{error} • Esc=cancel" if error else "Enter=search • Esc=cancel"
-        parts.append(_poster_footer_line(anilist_show, footer_text, w))
-        return "\n".join(parts)
+        if error:
+            context = f"{C_WARN}{error}{R} • {provider_label} • Enter=search • Esc=cancel"
+        else:
+            context = f"{provider_label} • Enter=search • Esc=cancel"
+        return _match_header_card(anilist_show, "sub", context, w, sync_enabled=True)
 
     return _hdr
 
 
 def manual_anilist_input_header(show: dict[str, Any], error: str = ""):
     def _hdr(si: int) -> str:
-        C_K = "\033[38;5;244m"
-        C_T = "\033[1;97m"
-        R = "\033[0m"
-        source_title = (
-            show.get("_allanime_name") or show.get("name") or ""
-            if isinstance(show, dict)
-            else str(show or "")
-        )
         try:
             w = os.get_terminal_size().columns
         except OSError:
             w = 80
-        parts = [
-            "",
-            f"{C_K}Search AniList and select tracking title.{R}",
-            f"{C_T}{truncate_display(source_title, w)}{R}",
-        ]
-        footer_text = (
-            f"\033[38;5;222m{error}\033[0m • Enter=search • Esc=cancel"
-            if error
-            else "Enter=search • Esc=cancel"
-        )
-        parts.append(_poster_footer_line(show, footer_text, w))
-        return "\n".join(parts)
+        if error:
+            context = f"{C_WARN}{error}{R} • AniList • Enter=search • Esc=cancel"
+        else:
+            context = "AniList • Enter=search • Esc=cancel"
+        return _match_header_card(show, "sub", context, w, sync_enabled=False)
 
     return _hdr
 
@@ -237,26 +244,11 @@ def select_provider_for_match(
             opts.append(p_name)
 
     curr_name = provider_display_name(current_key)
-    al_title = (
-        (anilist_show or {}).get("name")
-        or (anilist_show or {}).get("englishName")
-        or "Anime Title"
-    )
-
     def _hdr(idx: int) -> str:
-        C_T = "\033[1;97m"
-        C_K = "\033[38;5;244m"
-        C_Y = "\033[38;5;222m"
-        C_C = "\033[36m"
-        R = "\033[0m"
-
         try:
             w = os.get_terminal_size().columns
         except OSError:
             w = 80
-
-        line1 = f"{C_T}{truncate_display(al_title, w)}{R}"
-        line2 = f"{C_K}Switch provider stream match:{R}"
 
         hov_key = ordered_keys[idx] if 0 <= idx < len(ordered_keys) else current_key
         hov_name = provider_display_name(hov_key)
@@ -264,10 +256,12 @@ def select_provider_for_match(
         ptype = str(hov_info.get("type") or "anime").title()
         langs = "/".join(lang.upper() for lang in hov_info.get("languages", ["sub"]))
         badge = f" [{ptype} • {langs}]" if ptype else ""
-        line3 = f"{C_Y}Current: {curr_name}{R}  {C_K}│{R}  {C_C}Target: {hov_name}{badge}{R}"
-        line4 = f"{C_K}Enter=select  Left/Esc=cancel{R}"
-
-        return f"{line1}\n{line2}\n{line3}\n{line4}"
+        context = (
+            f"{C_WARN}Current: {curr_name}{R}  {C_HINT}│{R}  "
+            f"{C_ACCENT}Target: {hov_name}{badge}{R}  "
+            f"{C_HINT}Enter=select  Left/Esc=cancel{R}"
+        )
+        return _match_header_card(anilist_show, ttype, context, w, sync_enabled=True)
 
     idx = tui_pick(
         flags,
@@ -303,8 +297,6 @@ def confirm_auto_match(
         or matched_show.get("englishName")
         or "Unknown Stream Title"
     )
-    al_title = anilist_show.get("name") or anilist_show.get("englishName") or ""
-    al_eng = anilist_show.get("englishName")
 
     def _hdr(idx: int) -> str:
         try:
@@ -312,18 +304,8 @@ def confirm_auto_match(
         except OSError:
             w = 80
 
-        if al_eng and al_eng.strip().lower() != (target_title or "").strip().lower():
-            secondary = al_eng
-        else:
-            secondary = (
-                f"AniList: {al_title}"
-                if al_title and al_title.lower() != target_title.lower()
-                else ""
-            )
-
         curr_name = provider_display_name(current_pid)
         t_name = provider_display_name(target_pid)
-        trans_line = f"\033[38;5;222m{curr_name}\033[0m  \033[38;5;244m➔\033[0m  \033[36m{t_name}\033[0m"
 
         t_info = get_provider_registry().get(target_pid, {})
         langs = "/".join(
@@ -341,11 +323,11 @@ def confirm_auto_match(
                 else "✔ Suggested match"
             )
         )
-        status_line = f"\033[38;5;250m{match_tag} • {eps_badge}{langs}\033[0m"
-
-        return render_modal_card(
-            target_title, secondary, trans_line, status_line, width=w
+        context = (
+            f"{C_WARN}{curr_name}{R}  {C_HINT}→{R}  {C_ACCENT}{t_name}{R} "
+            f"{C_HINT}• {match_tag} • {eps_badge}{langs}{R}"
         )
+        return _match_header_card(matched_show, ttype, context, w, sync_enabled=False)
 
     hints = {"Link Title": target_title}
     idx = tui_pick(
@@ -372,9 +354,7 @@ def confirm_auto_anilist_match(
     al_romaji = (
         anilist_show.get("name") or anilist_show.get("englishName") or "Unknown Title"
     )
-    al_eng = anilist_show.get("englishName")
     al_id = str(anilist_show.get("_id") or anilist_show.get("id") or "")
-    p_title = provider_show.get("name") or ""
     p_name = (
         provider_show.get("_provider_name")
         or (provider_show.get("_provider") or "").title()
@@ -392,31 +372,14 @@ def confirm_auto_anilist_match(
         except OSError:
             w = 80
 
-        if al_eng and al_eng.strip().lower() != al_romaji.strip().lower():
-            secondary = al_eng
-        elif p_title and p_title.lower() != al_romaji.lower():
-            secondary = f"Source: {p_title}"
-        else:
-            secondary = ""
-
         id_badge = f" (ID: {al_id})" if al_id else ""
-        trans_line = f"\033[38;5;222m{p_name}\033[0m  \033[38;5;244m➔\033[0m  \033[36mAniList{id_badge}\033[0m"
-
-        al_status = str(anilist_show.get("status") or "").title() or "Finished"
-        al_fmt = str(
-            anilist_show.get("format") or anilist_show.get("type") or "TV"
-        ).upper()
-        al_eps = anilist_show.get("episodeCount")
-        eps_str = f" • EP {al_eps}" if al_eps else ""
-        al_score = anilist_show.get("score") or anilist_show.get("averageScore")
-        score_str = f" • ★ {al_score}" if al_score else ""
         source = anilist_show.get("_match_source")
         tag = "✔ Matched by ID" if source == "id" else "✔ Suggested match"
-        status_line = (
-            f"\033[38;5;250m{tag} • {al_status} • {al_fmt}{eps_str}{score_str}\033[0m"
+        context = (
+            f"{C_WARN}{p_name}{R}  {C_HINT}→{R}  {C_ACCENT}AniList{id_badge}{R} "
+            f"{C_HINT}• {tag}{R}"
         )
-
-        return render_modal_card(al_romaji, secondary, trans_line, status_line, width=w)
+        return _match_header_card(anilist_show, "sub", context, w, sync_enabled=True)
 
     hints = {"Link Title": al_romaji}
     idx = tui_pick(
@@ -458,31 +421,13 @@ def no_match_prompt(
         except OSError:
             w = 80
 
-        t_romaji = (
-            anilist_show.get("name")
-            or anilist_show.get("englishName")
-            or "Unknown Title"
-        )
-        t_eng = anilist_show.get("englishName")
-        if (
-            t_eng
-            and t_eng.strip().lower()
-            != (anilist_show.get("name") or "").strip().lower()
-        ):
-            secondary = t_eng
-        else:
-            al_list = str(anilist_show.get("_anilist_list") or "").upper() or "WATCHING"
-            al_prog = anilist_show.get("_anilist_progress", 0)
-            secondary = (
-                f"\033[38;5;244mAL {al_list} • EP {al_prog} • {ttype.upper()}\033[0m"
-            )
-
         curr_name = provider_display_name(current_pid)
         t_name = provider_display_name(target_pid)
-        trans_line = f"\033[38;5;222m{curr_name}\033[0m  \033[38;5;244m➔\033[0m  \033[36m{t_name}\033[0m"
-        status_line = "\033[38;5;222m* No match found\033[0m"
-
-        return render_modal_card(t_romaji, secondary, trans_line, status_line, width=w)
+        context = (
+            f"{C_WARN}{curr_name}{R}  {C_HINT}→{R}  {C_ACCENT}{t_name}{R} "
+            f"{C_HINT}• No match found • Search manually or go back{R}"
+        )
+        return _match_header_card(anilist_show, ttype, context, w, sync_enabled=True)
 
     idx = tui_pick(
         flags,

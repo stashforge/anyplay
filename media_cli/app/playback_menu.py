@@ -29,6 +29,7 @@ from ..playback.rules import marked_watched_osd
 from ..ui.help import picker_help
 from ..ui.picker import tui_pick
 from . import playback as playback_mod
+from .footer import context_footer
 
 _torrent_mirror_augmenting: set[tuple] = set()
 _torrent_mirror_augment_lock = threading.RLock()
@@ -146,6 +147,25 @@ def handle_action_menu_state(
         else ""
     )
 
+    def _resume_show_id():
+        return (
+            ms.show_id
+            or action_show.get("_id")
+            or action_show.get("id")
+            or action_show.get("_folder_name")
+            or ms.show_title
+        )
+
+    def _current_resume_time():
+        show_key = _resume_show_id()
+        if not show_key:
+            return 0
+        return (
+            app_core.get_resume_time(show_key, ms.current_ep)
+            or app_core.get_resume_time(show_key, current_ep_label)
+            or 0
+        )
+
     al_id = app_core.get_show_anilist_id(action_show)
     has_token = bool(cfg.get("anilist_token")) and not flags.incognito_mode
     has_anilist_link = bool(al_id)
@@ -168,9 +188,14 @@ def handle_action_menu_state(
     )
 
     al_prog = int(action_show.get("_anilist_progress") or 0)
-    local_p = app_core.get_local_progress(action_show, ttype)
-    if local_p is None:
+    if getattr(ms, "_is_downloads", False):
         local_p = action_show.get("_local_progress")
+        if local_p is None:
+            local_p = app_core.get_local_progress(action_show, ttype)
+    else:
+        local_p = app_core.get_local_progress(action_show, ttype)
+        if local_p is None:
+            local_p = action_show.get("_local_progress")
     local_lbl = action_show.get("_local_episode_label") or local_p
     resolved_lbl = resolve_dual_episode_label(action_show, local_lbl or local_p)
     l_prim, l_sec = parse_episode_dual_numbers(resolved_lbl)
@@ -202,9 +227,12 @@ def handle_action_menu_state(
 
     status_str = str(action_show.get("status") or "").upper()
     is_finished = status_str in ("FINISHED", "COMPLETED", "ENDED")
+    available_completion_threshold = max(
+        value for value in (ms.total_eps, highest_ep_num) if value and value > 0
+    ) if (ms.total_eps > 0 or highest_ep_num > 0) else 0
     all_available_watched = bool(
-        (ms.total_eps > 0 and eff_prog >= ms.total_eps)
-        or (highest_ep_num > 0 and eff_prog >= highest_ep_num)
+        available_completion_threshold > 0
+        and eff_prog >= available_completion_threshold
     )
 
     playback_status = (
@@ -222,9 +250,14 @@ def handle_action_menu_state(
     def _refresh_progress_state():
         nonlocal al_prog, local_p, local_lbl, resolved_lbl, l_prim, l_sec, local_prog_val, eff_prog, all_available_watched, is_completed
         al_prog = int(action_show.get("_anilist_progress") or 0)
-        local_p = app_core.get_local_progress(action_show, ttype)
-        if local_p is None:
+        if getattr(ms, "_is_downloads", False):
             local_p = action_show.get("_local_progress")
+            if local_p is None:
+                local_p = app_core.get_local_progress(action_show, ttype)
+        else:
+            local_p = app_core.get_local_progress(action_show, ttype)
+            if local_p is None:
+                local_p = action_show.get("_local_progress")
         local_lbl = action_show.get("_local_episode_label") or local_p
         resolved_lbl = resolve_dual_episode_label(action_show, local_lbl or local_p)
         l_prim, l_sec = parse_episode_dual_numbers(resolved_lbl)
@@ -241,8 +274,8 @@ def handle_action_menu_state(
         )
 
         all_available_watched = bool(
-            (ms.total_eps > 0 and eff_prog >= ms.total_eps)
-            or (highest_ep_num > 0 and eff_prog >= highest_ep_num)
+            available_completion_threshold > 0
+            and eff_prog >= available_completion_threshold
         )
 
         pb_status = (
@@ -330,13 +363,7 @@ def handle_action_menu_state(
 
         pending_watched_ep = getattr(ms, "_android_pending_watched_ep", None)
 
-        resume_time = 0
-        if not getattr(ms, "_is_downloads", False) and ms.show_id:
-            resume_time = (
-                app_core.get_resume_time(ms.show_id, ms.current_ep)
-                or app_core.get_resume_time(ms.show_id, current_ep_label)
-                or 0
-            )
+        resume_time = _current_resume_time()
 
         # Primary Action (Continue vs Start Rewatch vs Play vs Play Next vs Replay)
         if is_completed:
@@ -535,11 +562,7 @@ def handle_action_menu_state(
     action_hints = {}
     _build_menu()
 
-    _last_menu_resume = (
-        app_core.get_resume_time(ms.show_id, ms.current_ep)
-        or app_core.get_resume_time(ms.show_id, current_ep_label)
-        or 0
-    )
+    _last_menu_resume = _current_resume_time()
     _last_menu_watched = is_watched
     _last_menu_al_prog = action_show.get("_anilist_progress")
     _last_menu_local_prog = action_show.get("_local_progress")
@@ -575,19 +598,14 @@ def handle_action_menu_state(
         if feedback:
             parts.append(f"\033[38;5;222m{_t(feedback)}{R}")
         else:
-            p_name = (
-                (
-                    action_show.get("_provider_name")
-                    or (action_show.get("_provider") or "").title()
-                )
-                if action_show
-                else ""
+            footer = context_footer(
+                action_show,
+                ui,
+                ms,
+                "Enter/Right=select • Tab=Sub/Dub • ?=Help • Left/Esc=back",
+                offline=app_core.is_confirmed_offline(),
             )
-            offline_badge = "\033[38;2;225;85;85m[Offline]\033[0m • " if app_core.is_confirmed_offline() else ""
-            prefix = f"{offline_badge}{p_name} • " if p_name else offline_badge
-            parts.append(
-                f"{C_K}{_t(prefix + 'Enter/Right=select • Tab=Sub/Dub • ?=Help • Left/Esc=back')}{R}"
-            )
+            parts.append(f"{C_K}{_t(footer)}{R}")
 
         res = "\n".join(parts)
         _hdr_cache[cache_key] = res
@@ -669,11 +687,7 @@ def handle_action_menu_state(
             return ""
         opt_name = opts[opt_idx]
         if opt_name == "Continue":
-            cur_rt = (
-                app_core.get_resume_time(ms.show_id, ms.current_ep)
-                or app_core.get_resume_time(ms.show_id, current_ep_label)
-                or 0
-            )
+            cur_rt = _current_resume_time()
             if cur_rt > 35:
                 eff_r = max(0, cur_rt - 30)
             elif cur_rt > 10:
@@ -685,11 +699,7 @@ def handle_action_menu_state(
 
     def _action_live_fn(q):
         nonlocal _last_menu_resume, _last_menu_watched, _last_menu_al_prog, _last_menu_local_prog
-        cur_rt = (
-            app_core.get_resume_time(ms.show_id, ms.current_ep)
-            or app_core.get_resume_time(ms.show_id, current_ep_label)
-            or 0
-        )
+        cur_rt = _current_resume_time()
         cur_al_p = action_show.get("_anilist_progress")
         cur_loc_p = action_show.get("_local_progress")
         _refresh_progress_state()
@@ -719,7 +729,9 @@ def handle_action_menu_state(
         selected_idx = 0
 
         def _settings_options():
-            dl_status = "ON" if getattr(ms, "auto_download_next", False) else "OFF"
+            from .playback_player import auto_download_mode
+            dl_mode = auto_download_mode(cfg, getattr(ms, "auto_download_next", None))
+            dl_status = "Adaptive" if dl_mode == "adaptive" else "Off"
             del_status = "ON" if getattr(ms, "auto_delete_watched", False) else "OFF"
             buf = getattr(ms, "auto_delete_buffer", cfg.get("auto_delete_buffer", 1))
             return (
@@ -736,7 +748,7 @@ def handle_action_menu_state(
                     "SKIP_SETTINGS",
                 ],
                 {
-                    f"Auto-Download Next: {dl_status}": "session only; fetch next episode after playback",
+                    f"Auto-Download Next: {dl_status}": "session only; download next when playback is safe",
                     f"Auto-Delete Watched: {del_status}": "session only; delete older watched downloads",
                     f"Auto-Delete Buffer: {buf} ep" + ("" if buf == 1 else "s"): "session only; keep recent watched downloads",
                     "Skip Settings": "AniSkip and custom opening/ending skips",
@@ -763,8 +775,9 @@ def handle_action_menu_state(
             selected_idx = sidx
             selected = setting_acts[sidx]
             if selected == "TOGGLE_AUTO_DOWNLOAD":
-                ms.auto_download_next = not getattr(ms, "auto_download_next", False)
-                status = "ON" if ms.auto_download_next else "OFF"
+                from .playback_player import auto_download_mode
+                ms.auto_download_next = "off" if auto_download_mode(cfg, getattr(ms, "auto_download_next", None)) == "adaptive" else "adaptive"
+                status = "Adaptive" if ms.auto_download_next == "adaptive" else "Off"
                 app_core.set_action_feedback(action_show, f"Auto-Download: {status}")
             elif selected == "TOGGLE_AUTO_DELETE":
                 ms.auto_delete_watched = not getattr(ms, "auto_delete_watched", False)
@@ -996,25 +1009,30 @@ def handle_action_menu_state(
             target_idx = episode_index_for_id(
                 episode_ids, target_ep, labels=action_show.get("_episode_labels")
             )
+        sync_active = bool(use_anilist and cfg.get("anilist_token"))
         if getattr(ms, "_is_downloads", False):
-            from media_cli.core.storage import update_offline_watch_status
-
             folder_name = action_show.get("_folder_name", ms.show_title)
-            if update_offline_watch_status(folder_name, target_ep):
-                watched = action_show.get("watched_episodes", [])
-                if str(target_ep) not in watched:
-                    watched.append(str(target_ep))
-                action_show["watched_episodes"] = watched
-                app_core.prepare_show_display_state(action_show, ttype, False)
-            app_core.save_history(action_show, target_ep, ttype)
-            target_lbl = playback_mod._display_episode_label(
-                action_show, target_ep, ttype
+            app_core.record_download_watch_progress(
+                action_show,
+                folder_name,
+                target_ep,
+                ttype,
+                sync_enabled=sync_active,
             )
-            app_core.set_action_feedback(
-                action_show, f"✔ Marked {playback_mod._fmt_ep(target_lbl)} watched"
+            app_core.prepare_show_display_state(
+                action_show, ttype, False, prefer_watched_episodes=True
             )
-            app_core.save_resume_time(ms.show_id, target_ep, 0)
-            return False
+            from .playback_player import _auto_delete_watched_downloads
+            _auto_delete_watched_downloads(action_show, episode_ids, ttype, cfg, ms)
+            if not sync_active:
+                target_lbl = playback_mod._display_episode_label(
+                    action_show, target_ep, ttype
+                )
+                app_core.set_action_feedback(
+                    action_show, f"✔ Marked {playback_mod._fmt_ep(target_lbl)} watched"
+                )
+                app_core.save_resume_time(ms.show_id, target_ep, 0)
+                return False
 
         tkn = cfg.get("anilist_token")
         synced = False
@@ -1064,32 +1082,25 @@ def handle_action_menu_state(
         return _mark_ep_watched(ms.current_ep, ms.current_ep_index)
 
     def _execute_untrack_action():
+        sync_active = bool(use_anilist and cfg.get("anilist_token"))
         if getattr(ms, "_is_downloads", False):
             folder_name = action_show.get("_folder_name", ms.show_title)
-            watched = [
-                ep
-                for ep in action_show.get("watched_episodes", [])
-                if str(ep) != str(ms.current_ep)
-            ]
-            action_show["watched_episodes"] = watched
-            try:
-                from media_cli.core.storage import (
-                    load_downloads_db,
-                    save_downloads_db,
-                )
-
-                db = load_downloads_db()
-                if folder_name in db.get("shows", {}):
-                    db["shows"][folder_name]["watched_episodes"] = watched
-                    save_downloads_db(db)
-            except Exception:
-                pass
-            app_core.prepare_show_display_state(action_show, ttype, False)
-            app_core.set_action_feedback(
+            app_core.record_download_unwatch_progress(
                 action_show,
-                f"✔ Marked {playback_mod._fmt_ep(current_ep_label)} unwatched",
+                folder_name,
+                ms.current_ep,
+                ttype,
+                sync_enabled=sync_active,
             )
-            return False
+            app_core.prepare_show_display_state(
+                action_show, ttype, False, prefer_watched_episodes=True
+            )
+            if not sync_active:
+                app_core.set_action_feedback(
+                    action_show,
+                    f"✔ Marked {playback_mod._fmt_ep(current_ep_label)} unwatched",
+                )
+                return False
 
         prev_num = episode_progress_number(prev_ep, 0) if prev_ep is not None else 0
         tkn = cfg.get("anilist_token")
@@ -1241,8 +1252,9 @@ def handle_action_menu_state(
         return _playback_settings_menu()
 
     elif a == "TOGGLE_AUTO_DOWNLOAD":
-        ms.auto_download_next = not getattr(ms, "auto_download_next", False)
-        status = "ON" if ms.auto_download_next else "OFF"
+        from .playback_player import auto_download_mode
+        ms.auto_download_next = "off" if auto_download_mode(cfg, getattr(ms, "auto_download_next", None)) == "adaptive" else "adaptive"
+        status = "Adaptive" if ms.auto_download_next == "adaptive" else "Off"
         app_core.set_action_feedback(action_show, f"Auto-Download: {status}")
         return "DETAILS"
 
@@ -1673,24 +1685,21 @@ def _execute_batch_download(flags, ui, ms, cfg, args, ttype, action_show, queued
 
         def _on_complete(item):
             try:
-                from media_cli.core.storage import load_downloads_db, save_downloads_db
-                db = load_downloads_db()
+                from media_cli.core.storage import collect_downloaded_episode_files, register_downloaded_episode_files
                 f_key = sanitize_filename(item.title) or item.title
-                if f_key not in db["shows"]:
-                    db["shows"][f_key] = {"episodes": []}
-                if getattr(item, "show_metadata", None):
-                    db["shows"][f_key]["metadata"] = item.show_metadata
                 ep_str = str(getattr(item, "ep_id", item.episode))
-                if ep_str not in db["shows"][f_key]["episodes"]:
-                    db["shows"][f_key]["episodes"].append(ep_str)
-                save_downloads_db(db)
+                files = list(getattr(item, "output_files", []) or collect_downloaded_episode_files(item.destination_path))
+                register_downloaded_episode_files(
+                    f_key,
+                    ep_str,
+                    files,
+                    metadata=getattr(item, "show_metadata", None),
+                )
             except Exception:
                 pass
 
         quality = cfg.get("quality", "best")
-        effective_subtitle_mode = getattr(args, "subtitle_mode", None) or cfg.get("subtitle_mode", "embed")
-        embed_subs = effective_subtitle_mode == "embed"
-        ext = ".mkv" if embed_subs else ".mp4"
+        ext = ".mkv"
 
         for ep_id in queued_eps:
             ep_label = playback_mod._display_episode_label(action_show, ep_id, ttype)
@@ -1759,22 +1768,21 @@ def _execute_batch_download(flags, ui, ms, cfg, args, ttype, action_show, queued
             success_count += 1
             try:
                 from media_cli.core.storage import (
-                    load_downloads_db,
-                    save_downloads_db,
+                    collect_downloaded_episode_files,
+                    register_downloaded_episode_files,
                 )
 
                 from media_cli.media.download import sanitize_filename
-                db = load_downloads_db()
                 title = ms.show_title
                 folder_key = sanitize_filename(title) or title
-                if folder_key not in db["shows"]:
-                    db["shows"][folder_key] = {"episodes": []}
-                if "metadata" not in db["shows"][folder_key]:
-                    db["shows"][folder_key]["metadata"] = action_show
-                ep_str = str(ep_id)
-                if ep_str not in db["shows"][folder_key]["episodes"]:
-                    db["shows"][folder_key]["episodes"].append(ep_str)
-                save_downloads_db(db)
+                offline_file = app_core.find_offline_file_for_episode(title, ep_label, cfg)
+                if offline_file:
+                    register_downloaded_episode_files(
+                        folder_key,
+                        str(ep_id),
+                        collect_downloaded_episode_files(offline_file),
+                        metadata=action_show,
+                    )
             except Exception:
                 pass
 

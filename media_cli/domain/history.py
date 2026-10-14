@@ -3,7 +3,7 @@
 import time
 
 from .episodes import clean_episode_identifier, episode_id_at, episode_index_for_id
-from .metadata import positive_int
+from .metadata import positive_int, provider_status_is_authoritative
 from .titles import get_show_display_title
 
 
@@ -210,6 +210,9 @@ def format_history_entry(
 
 
 def history_provider_is_completed(show):
+    if provider_status_is_authoritative(show):
+        status = str(show.get("status") or "").upper()
+        return any(term in status for term in ("COMPLETED", "FINISHED", "ENDED"))
     al_status = str(show.get("_anilist_status") or "").upper()
     if any(term in al_status for term in ("COMPLETED", "FINISHED", "ENDED")):
         return True
@@ -217,6 +220,66 @@ def history_provider_is_completed(show):
     if any(term in status for term in ("COMPLETED", "FINISHED", "ENDED")):
         return True
     return False
+
+
+def history_can_skip_finished_provider_refresh(show, *, require_genres=False):
+    if provider_status_is_authoritative(show):
+        return False
+    status = str((show or {}).get("status") or "").upper()
+    if not any(term in status for term in ("FINISHED", "COMPLETED", "ENDED")):
+        return False
+    if not ((show or {}).get("episodeCount") and (show or {}).get("description")):
+        return False
+    if require_genres and not (show or {}).get("genres"):
+        return False
+    return True
+
+
+HISTORY_REFRESH_COOLDOWN_SECONDS = 30 * 60
+
+
+def history_refresh_last_checked_at(show):
+    show = show or {}
+    values = []
+    for key in (
+        "_provider_catalog_checked_at",
+        "_anilist_airing_checked_at",
+        "_allanime_checked_at",
+    ):
+        try:
+            value = int(float(show.get(key) or 0))
+        except (TypeError, ValueError):
+            value = 0
+        if value > 0:
+            values.append(value)
+    return max(values) if values else 0
+
+
+def history_entry_refresh_is_stale(
+    entry,
+    *,
+    now=None,
+    cooldown=HISTORY_REFRESH_COOLDOWN_SECONDS,
+):
+    now = int(time.time() if now is None else now)
+    last_checked = history_refresh_last_checked_at((entry or {}).get("show", {}))
+    return last_checked <= 0 or (now - last_checked) >= int(cooldown)
+
+
+def history_entry_should_auto_refresh(
+    entry,
+    *,
+    now=None,
+    cooldown=HISTORY_REFRESH_COOLDOWN_SECONDS,
+):
+    show = (entry or {}).get("show", {})
+    if not (show.get("_id") or show.get("id")):
+        return False
+    category = history_entry_category(entry)
+    if category not in ("Active", "Up to date"):
+        return False
+    return history_entry_refresh_is_stale(entry, now=now, cooldown=cooldown)
+
 
 def history_available_episode_count(entry):
     from media_cli.domain.episodes import highest_episode_number
@@ -347,6 +410,7 @@ def playback_ep_from_history_entry(h, ttype=None, *, ensure_episode_ids_fn=None,
 
 def refresh_history_entry_provider_catalog(entry):
     import time
+    from contextlib import contextmanager
 
     from ..core.reporting import debug_warn
     from ..providers.shared.models import title_provider_key
@@ -365,6 +429,26 @@ def refresh_history_entry_provider_catalog(entry):
     changed = False
     if not show_id:
         return False
+
+    @contextmanager
+    def _cached_provider_fetch(provider):
+        fetch_fn = getattr(provider, "_fetch", None)
+        if not callable(fetch_fn):
+            yield
+            return
+        cache = {}
+
+        def cached_fetch(url, *args, **kwargs):
+            key = (url, args, tuple(sorted(kwargs.items())))
+            if key not in cache:
+                cache[key] = fetch_fn(url, *args, **kwargs)
+            return cache[key]
+
+        provider._fetch = cached_fetch
+        try:
+            yield
+        finally:
+            provider._fetch = fetch_fn
 
     pkey = title_provider_key(show)
     if pkey == "allanime":
@@ -412,28 +496,33 @@ def refresh_history_entry_provider_catalog(entry):
     else:
         try:
             prov = _provider_for_title(show)
-            if hasattr(prov, "get_title"):
-                try:
-                    prov_show = prov.get_title(show_id)
-                    if prov_show and isinstance(prov_show, dict):
-                        from .metadata import apply_provider_metadata_to_history_show
-                        if apply_provider_metadata_to_history_show(show, prov_show):
-                            changed = True
-                except Exception as e:
-                    debug_warn(f"Failed to refresh title metadata for {pkey}", e)
+            with _cached_provider_fetch(prov):
+                if hasattr(prov, "get_title"):
+                    try:
+                        prov_show = prov.get_title(show_id)
+                        if prov_show and isinstance(prov_show, dict):
+                            from .metadata import apply_provider_metadata_to_history_show
+                            if apply_provider_metadata_to_history_show(show, prov_show):
+                                changed = True
+                    except Exception as e:
+                        debug_warn(f"Failed to refresh title metadata for {pkey}", e)
 
-            catalog = prov.episode_catalog(show_id, ttype=ttype)
+                catalog = prov.episode_catalog(show_id, ttype=ttype)
             if catalog and catalog.get("state") == "loaded":
                 old_avail = (show.get("availableEpisodes") or {}).get(ttype)
-                new_avail = len(catalog.get("ids", []))
+                episode_ids = catalog.get("ids", [])
+                labels = catalog.get("labels", {})
+                from .episodes import highest_episode_number
+                new_avail = highest_episode_number(episode_ids, labels)
                 current_ids = show.get("_episode_ids") or []
-                if old_avail != new_avail or show.get("_episode_ids_ttype") != ttype or current_ids != catalog.get("ids", []):
-                    if not show.get("availableEpisodes"):
-                        show["availableEpisodes"] = {}
-                    show["availableEpisodes"][ttype] = new_avail
-                    show["_episode_ids"] = catalog.get("ids", [])
-                    show["_episode_labels"] = catalog.get("labels", {})
-                    show["_episode_ids_ttype"] = ttype
+                if old_avail != new_avail or show.get("_episode_ids_ttype") != ttype or current_ids != episode_ids:
+                    update_available_count_from_episode_ids(
+                        show,
+                        ttype,
+                        episode_ids,
+                        catalog.get("detail"),
+                        labels,
+                    )
                     changed = True
                     if old_avail is not None:
                         try:
@@ -468,4 +557,3 @@ def refresh_history_entry_provider_catalog(entry):
 
 
 refresh_history_entry_allanime_catalog = refresh_history_entry_provider_catalog
-

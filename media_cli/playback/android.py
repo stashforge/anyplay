@@ -171,13 +171,18 @@ def play_android(
                     except Exception:
                         pass
 
-                    if (cfg or {}).get("auto_download_next", False) and action_show and ep_index is not None:
+                    try:
+                        from ..app.playback_player import auto_download_mode
+                        auto_dl_enabled = auto_download_mode(cfg or {}, None) == "adaptive"
+                    except Exception:
+                        auto_dl_enabled = False
+                    if auto_dl_enabled and action_show and ep_index is not None:
                         try:
                             from ..app.playback_player import trigger_background_auto_download
                             eids = action_show.get("_episode_ids") or []
                             from ..context import MachineState
-                            dummy_ms = MachineState(show_title=title, auto_download_next=True)
-                            trigger_background_auto_download(action_show, ep_index, eids, ttype, cfg, dummy_ms)
+                            dummy_ms = MachineState(show_title=title, auto_download_next="adaptive")
+                            trigger_background_auto_download(action_show, ep_index, eids, ttype, cfg, dummy_ms, current_stream=stream)
                         except Exception:
                             pass
             else:

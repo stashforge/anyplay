@@ -51,9 +51,13 @@ def get_key(descriptor):
                     return "PAGE_UP"
                 if rest == b"6~":
                     return "PAGE_DOWN"
+                if rest == b"15~":
+                    return "F5"
                 return "UNKNOWN"
             if second in (b"d", b"D"):
                 return "ALT_D"
+            if second in (b"r", b"R"):
+                return "ALT_R"
             return "UNKNOWN"
         return "ESC"
 

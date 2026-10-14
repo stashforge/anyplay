@@ -231,7 +231,7 @@ class TestDownloadsFullCatalog(unittest.TestCase):
              patch("media_cli.app_core.save_config") as mock_save:
 
             playback_menu.handle_action_menu_state(flags, ui, ms, cfg, MagicMock(), "sub", MagicMock(return_value=False))
-            self.assertTrue(ms.auto_download_next)
+            self.assertEqual(ms.auto_download_next, "adaptive")
             self.assertFalse(cfg["auto_download_next"])
             mock_save.assert_not_called()
 

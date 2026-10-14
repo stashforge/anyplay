@@ -785,6 +785,60 @@ def patch_history_entry_show(show_id, ttype, updated_show):
     return False
 
 
+def patch_history_entry_state(updated_entry):
+    """Persist refreshed history show metadata and category flags for one entry."""
+    if not isinstance(updated_entry, dict):
+        return False
+    updated_show = updated_entry.get("show") or {}
+    show_id = updated_show.get("_id") or updated_show.get("id")
+    if not show_id:
+        return False
+    ttype = updated_entry.get("translation_type", "sub")
+    history = load_history()
+    changed = False
+    str_show_id = str(show_id)
+    entry_keys = {"episode", "translation_type", "timestamp", "was_caught_up", "has_new_release", "last_synced_progress"}
+    show_keys = {
+        "status", "episodeCount", "availableEpisodes", "availableEpisodesDetail",
+        "name", "englishName", "nativeName", "thumbnail", "altNames",
+        "type", "season", "airedStart", "airedEnd", "score",
+        "_episode_ids", "_episode_ids_ttype", "_episode_labels", "_episode_labels_ttype",
+        "_episode_ids_by_ttype", "_episodes_map", "_episodes_map_by_ttype",
+        "_episodes_by_number", "_episodes_by_number_by_ttype",
+        "_episode_catalog_state", "_episode_catalog_error", "_allanime_checked_at",
+        "_provider_catalog_checked_at", "_anilist_airing_checked_at",
+        "aniListId", "malId", "_provider", "_provider_id", "_provider_name",
+        "description", "genres", "banner", "format",
+        "_next_airing_ep", "_next_airing_time", "_next_airing_at",
+        "_anilist_score", "_anilist_status", "_anilist_episode_count",
+        "anilistMatch", "_title_enriched", "_anilist_search_checked",
+    }
+    for entry in history:
+        if entry.get("translation_type", "sub") != ttype:
+            continue
+        show = entry.get("show") or {}
+        if str(show.get("_id") or show.get("id") or "") != str_show_id:
+            continue
+        if entry is updated_entry:
+            changed = True
+        for key in entry_keys:
+            if key in updated_entry and entry.get(key) != updated_entry.get(key):
+                entry[key] = updated_entry.get(key)
+                changed = True
+        if not isinstance(entry.get("show"), dict):
+            entry["show"] = {}
+            show = entry["show"]
+            changed = True
+        for key in show_keys:
+            if key in updated_show and show.get(key) != updated_show.get(key):
+                show[key] = updated_show.get(key)
+                changed = True
+        break
+    if changed:
+        return save_refreshed_history(history)
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Search history
 # ---------------------------------------------------------------------------
@@ -1024,6 +1078,223 @@ def update_offline_watch_status(title, episode):
     return False
 
 
+def _download_watched_through(show: dict | None, episode) -> list[str] | None:
+    if str(episode).strip() == "0":
+        return []
+    show = show or {}
+    episode_ids = [str(ep) for ep in (show.get("_episode_ids") or [])]
+    if not episode_ids:
+        return None
+    from media_cli.domain.episodes import episode_index_for_id
+
+    idx = episode_index_for_id(episode_ids, episode, labels=show.get("_episode_labels"))
+    if idx is None:
+        return None
+    return episode_ids[: idx + 1]
+
+
+def set_offline_watch_progress(title, show: dict | None, episode) -> bool:
+    watched = _download_watched_through(show, episode)
+    if watched is None:
+        return update_offline_watch_status(title, episode)
+    db = load_downloads_db()
+    if title not in db.get("shows", {}):
+        return False
+    show_data = db["shows"][title]
+    old_watched = [str(ep) for ep in show_data.get("watched_episodes", [])]
+    if old_watched == watched:
+        return False
+    show_data["watched_episodes"] = watched
+    save_downloads_db(db)
+    return True
+
+
+_DOWNLOAD_SIDECAR_EXTS = (
+    ".srt",
+    ".vtt",
+    ".ass",
+    ".ssa",
+    ".sub",
+    ".idx",
+    ".ttml",
+    ".dfxp",
+)
+
+
+def _normal_download_file_path(path) -> str:
+    return os.path.abspath(os.path.expanduser(str(path or "")))
+
+
+def collect_downloaded_episode_files(video_path: str) -> list[str]:
+    """Return the downloaded video plus existing same-stem sidecar files."""
+    if not video_path:
+        return []
+    video = _normal_download_file_path(video_path)
+    files: list[str] = []
+    if os.path.isfile(video):
+        files.append(video)
+    base, _ = os.path.splitext(video)
+    folder = os.path.dirname(video)
+    stem = os.path.basename(base)
+    try:
+        for name in sorted(os.listdir(folder)):
+            full_path = os.path.join(folder, name)
+            if not os.path.isfile(full_path):
+                continue
+            n_base, n_ext = os.path.splitext(name)
+            if n_base.startswith(stem + ".") and n_ext.lower() in _DOWNLOAD_SIDECAR_EXTS:
+                n_path = _normal_download_file_path(full_path)
+                if n_path not in files:
+                    files.append(n_path)
+    except OSError:
+        pass
+    return files
+
+
+def _episode_matches(left, right) -> bool:
+    left_s = str(left).strip()
+    right_s = str(right).strip()
+    if left_s == right_s:
+        return True
+    from media_cli.domain.episodes import clean_episode_identifier, parse_episode_dual_numbers
+    l_prim, _ = parse_episode_dual_numbers(left_s)
+    r_prim, _ = parse_episode_dual_numbers(right_s)
+    l_clean = (l_prim or clean_episode_identifier(left_s) or left_s).lstrip("0") or "0"
+    r_clean = (r_prim or clean_episode_identifier(right_s) or right_s).lstrip("0") or "0"
+    return l_clean == r_clean
+
+
+def _matching_episode_file_keys(episode_files: dict, episode) -> list[str]:
+    if not isinstance(episode_files, dict):
+        return []
+    return [str(key) for key in episode_files.keys() if _episode_matches(key, episode)]
+
+
+def _download_show_lookup_keys(show_title: str) -> list[str]:
+    keys = []
+    for key in (show_title, str(show_title or "").strip()):
+        if key and key not in keys:
+            keys.append(key)
+    try:
+        from media_cli.media.download import sanitize_filename
+        safe_key = sanitize_filename(show_title)
+        if safe_key and safe_key not in keys:
+            keys.append(safe_key)
+    except Exception:
+        pass
+    return keys
+
+
+def register_downloaded_episode_files(show_title: str, episode, files: list[str] | tuple[str, ...], metadata: dict | None = None) -> bool:
+    """Remember the exact files Anyplay created for a downloaded episode."""
+    if not show_title or episode is None:
+        return False
+    clean_files = []
+    for file_path in files or []:
+        path = _normal_download_file_path(file_path)
+        if path and os.path.isfile(path) and path not in clean_files:
+            clean_files.append(path)
+    if not clean_files:
+        return False
+
+    db = load_downloads_db()
+    shows = db.setdefault("shows", {})
+    show_data = shows.setdefault(show_title, {"episodes": []})
+    ep_str = str(episode).strip()
+    episodes = [str(ep) for ep in show_data.get("episodes", [])]
+    if ep_str not in episodes:
+        episodes.append(ep_str)
+    show_data["episodes"] = episodes
+    if metadata:
+        show_data["metadata"] = metadata
+    episode_files = show_data.setdefault("episode_files", {})
+    episode_files[ep_str] = clean_files
+    meta = show_data.get("metadata", {})
+    if isinstance(meta, dict):
+        meta["downloadedCount"] = len(show_data.get("episodes", []))
+    save_downloads_db(db)
+    return True
+
+
+def _set_show_watched_episode(show, episode, watched=True):
+    if not isinstance(show, dict):
+        return
+    ep_str = str(episode)
+    watched_eps = [str(ep) for ep in show.get("watched_episodes", [])]
+    if watched:
+        if ep_str not in watched_eps:
+            watched_eps.append(ep_str)
+    else:
+        watched_eps = [ep for ep in watched_eps if ep != ep_str]
+    show["watched_episodes"] = watched_eps
+
+
+def _set_show_watched_progress(show, episode):
+    if not isinstance(show, dict):
+        return
+    watched = _download_watched_through(show, episode)
+    if watched is None:
+        _set_show_watched_episode(show, episode, watched=True)
+        return
+    show["watched_episodes"] = watched
+
+
+def _latest_watched_episode(watched):
+    if not watched:
+        return "0"
+    import decimal
+    from media_cli.domain.episodes import clean_episode_identifier, parse_episode_dual_numbers
+
+    def score(value):
+        raw = str(value)
+        primary, _secondary = parse_episode_dual_numbers(raw)
+        cleaned = primary or clean_episode_identifier(raw) or raw
+        try:
+            return decimal.Decimal(str(cleaned))
+        except (decimal.InvalidOperation, TypeError, ValueError):
+            return decimal.Decimal("-1")
+
+    return str(max((str(ep) for ep in watched), key=score))
+
+
+def record_download_watch_progress(show, folder_name, episode, ttype="sub", sync_enabled=False):
+    """Record watched progress for a local file and mirror title progress to history."""
+    changed = set_offline_watch_progress(folder_name, show, episode)
+    _set_show_watched_progress(show, episode)
+    if not sync_enabled:
+        save_history(show, episode, ttype)
+    try:
+        from media_cli.ui.info_panel import invalidate_panel_cache
+        invalidate_panel_cache()
+    except ImportError:
+        pass
+    return bool(changed or (not sync_enabled and get_history_entry(show, ttype)))
+
+
+def record_download_unwatch_progress(show, folder_name, episode, ttype="sub", sync_enabled=False):
+    """Remove local watched state and lower title progress to the latest watched local file."""
+    ep_str = str(episode)
+    changed = False
+    db = load_downloads_db()
+    if folder_name in db.get("shows", {}):
+        watched = [str(ep) for ep in db["shows"][folder_name].get("watched_episodes", [])]
+        new_watched = [ep for ep in watched if ep != ep_str]
+        if new_watched != watched:
+            db["shows"][folder_name]["watched_episodes"] = new_watched
+            save_downloads_db(db)
+            changed = True
+    _set_show_watched_episode(show, episode, watched=False)
+    if not sync_enabled:
+        next_progress = _latest_watched_episode((show or {}).get("watched_episodes", []))
+        write_history_progress(show, next_progress, ttype, touch=True)
+    try:
+        from media_cli.ui.info_panel import invalidate_panel_cache
+        invalidate_panel_cache()
+    except ImportError:
+        pass
+    return changed
+
+
 VIDEO_DOWNLOAD_EXTS = (".mp4", ".mkv", ".webm", ".avi", ".ts")
 _TEXT_FAKE_VIDEO_MARKERS = (
     b"#EXTM3U",
@@ -1123,39 +1394,63 @@ def find_offline_file_for_episode(show_title: str, episode, cfg: dict | None = N
     return None
 
 
-def delete_offline_episode(show_title: str, episode, cfg: dict | None = None) -> bool:
-    """Delete a downloaded episode video file from disk and update downloads.db."""
-    filepath = find_offline_file_for_episode(show_title, episode, cfg)
+def delete_offline_episode(show_title: str, episode, cfg: dict | None = None, require_recorded: bool = False) -> bool:
+    """Delete a downloaded episode and update downloads.db.
+
+    When require_recorded is true, only files explicitly registered in
+    downloads.db are removed. This keeps automatic cleanup from touching files
+    the user may have copied into the download folder.
+    """
+    db = load_downloads_db()
+    show_data = None
+    for title_key in _download_show_lookup_keys(show_title):
+        if title_key in db.get("shows", {}):
+            show_data = db["shows"][title_key]
+            break
+
+    registered_files: list[str] = []
+    if show_data:
+        episode_files = show_data.get("episode_files", {})
+        for key in _matching_episode_file_keys(episode_files, episode):
+            raw_files = episode_files.get(key, [])
+            if isinstance(raw_files, str):
+                raw_files = [raw_files]
+            for raw_file in raw_files or []:
+                path = _normal_download_file_path(raw_file)
+                if path and path not in registered_files:
+                    registered_files.append(path)
+
+    if require_recorded and not registered_files:
+        return False
+
+    filepath = None if registered_files else find_offline_file_for_episode(show_title, episode, cfg)
+    target_files = registered_files or ([filepath] if filepath else [])
     deleted = False
-    if filepath and os.path.isfile(filepath):
+    for target in target_files:
         try:
-            os.remove(filepath)
-            deleted = True
+            target_path = _normal_download_file_path(target)
+            if target_path and os.path.isfile(target_path):
+                os.remove(target_path)
+                deleted = True
         except OSError:
             pass
 
-    db = load_downloads_db()
-    for title_key in (show_title, show_title.strip()):
+    for title_key in _download_show_lookup_keys(show_title):
         if title_key in db.get("shows", {}):
             show_data = db["shows"][title_key]
             eps = show_data.get("episodes", [])
             ep_str = str(episode).strip()
-            from media_cli.domain.episodes import clean_episode_identifier, parse_episode_dual_numbers
-            t_prim, _ = parse_episode_dual_numbers(ep_str)
-            t_clean = (t_prim or clean_episode_identifier(ep_str) or ep_str).lstrip("0") or "0"
-
-            new_eps = []
-            for e in eps:
-                e_prim, _ = parse_episode_dual_numbers(str(e))
-                e_clean = (e_prim or clean_episode_identifier(str(e)) or str(e)).lstrip("0") or "0"
-                if e_clean != t_clean and str(e).strip() != ep_str:
-                    new_eps.append(e)
+            new_eps = [e for e in eps if not _episode_matches(e, ep_str)]
 
             show_data["episodes"] = new_eps
             meta = show_data.get("metadata", {})
             meta["downloadedCount"] = len(new_eps)
             watched = show_data.get("watched_episodes", [])
-            show_data["watched_episodes"] = [w for w in watched if str(w).strip() != ep_str]
+            show_data["watched_episodes"] = [w for w in watched if not _episode_matches(w, ep_str)]
+            episode_files = show_data.get("episode_files", {})
+            if isinstance(episode_files, dict):
+                for key in _matching_episode_file_keys(episode_files, ep_str):
+                    episode_files.pop(key, None)
             save_downloads_db(db)
             break
 

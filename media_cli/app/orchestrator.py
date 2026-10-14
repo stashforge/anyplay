@@ -866,7 +866,9 @@ def main() -> None:
 
     auto_download_val = getattr(args, "auto_download", None)
     if auto_download_val is None:
-        auto_download_val = cfg.get("auto_download_next", False)
+        auto_download_val = cfg.get("auto_download_next", "adaptive")
+    else:
+        auto_download_val = "adaptive" if auto_download_val else "off"
 
     auto_delete_val = getattr(args, "auto_delete", None)
     if auto_delete_val is None:
@@ -877,7 +879,7 @@ def main() -> None:
         just_searched=bool(args.query),
         anilist_search_parent="QUIT",
         download_batch_end=globals().get("_download_batch_end"),
-        auto_download_next=bool(auto_download_val),
+        auto_download_next=auto_download_val,
         auto_delete_watched=bool(auto_delete_val),
         auto_delete_buffer=int(cfg.get("auto_delete_buffer", 1)),
     )
