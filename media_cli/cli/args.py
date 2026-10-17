@@ -20,7 +20,7 @@ from .args_common import (
 from .args_subcommands import register_all_subcommands
 
 
-def build_command_parser():
+def build_command_parser(search_provider=None):
     parser = _configure_help_parser(CLIParser(
         prog=APP_NAME,
         usage=f"{APP_NAME} <command> [options]",
@@ -29,6 +29,7 @@ def build_command_parser():
         epilog=(
             "Quick start:\n"
             f"  {APP_NAME} search frieren\n"
+            f'  {APP_NAME} search animexin:"renegade immortal"\n'
             f"  {APP_NAME} search frieren -e 1 --download\n"
             f"  {APP_NAME} continue\n"
             f"  {APP_NAME} downloads\n"
@@ -53,7 +54,7 @@ def build_command_parser():
     _add_debug_option(global_options)
     _add_plain_option(global_options)
 
-    register_all_subcommands(commands)
+    register_all_subcommands(commands, search_provider)
     return parser
 
 
@@ -82,24 +83,6 @@ def parse_cli_args(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     meaningful = [arg for arg in argv if arg != "--debug"]
 
-    # Support: anyplay <provider> ...
-    if meaningful and meaningful[0] in _provider_command_names():
-        p_id = meaningful[0]
-        if len(meaningful) > 1 and meaningful[1] == "anilist":
-            rest = meaningful[2:]
-            if rest and rest[0] == "search":
-                parser = build_anilist_search_parser()
-                parsed_args = parser.parse_args(rest[1:] + ["--provider", p_id] + (["--debug"] if "--debug" in argv else []))
-                return parsed_args, parser
-            else:
-                parser = build_command_parser()
-                parsed_args, _ = parser.parse_known_args(["anilist"] + rest + ["--provider", p_id] + (["--debug"] if "--debug" in argv else []))
-                target = str(getattr(parsed_args, "target", "menu") or "menu").lower()
-                parsed_args.anilist = ANILIST_COMMAND_TARGETS.get(target, target)
-                if hasattr(parsed_args, "target"):
-                    del parsed_args.target
-                return parsed_args, parser
-
     if meaningful[:2] == ["anilist", "search"]:
         debug_enabled = "--debug" in argv
         nested_argv = meaningful[2:]
@@ -108,7 +91,58 @@ def parse_cli_args(argv=None):
         parser = build_anilist_search_parser()
         return parser.parse_args(nested_argv), parser
     parser = build_command_parser()
+    search_provider = None
+    command_index = next((i for i, word in enumerate(argv) if not word.startswith("-")), None)
+    if command_index is not None and argv[command_index] in _provider_command_names() | {"animethemes"}:
+        import shlex
+        provider = argv[command_index]
+        rest = argv[command_index + 1:]
+        if rest[:1] == ["search"]:
+            rest = rest[1:]
+        prefix = provider + ":"
+        if rest and not rest[0].startswith("-"):
+            rest = [prefix + rest[0], *rest[1:]]
+        else:
+            rest = [prefix, *rest]
+        parser._command_suggestion = shlex.join([APP_NAME, *argv[:command_index], "search", *rest])
+    if command_index is not None and argv[command_index] == "search":
+        # Skip option values so only the first query word can select a provider.
+        search_parser = parser._subparsers._group_actions[0].choices["search"]
+        index = command_index + 1
+        while index < len(argv):
+            word = argv[index]
+            if word == "--":
+                index += 1
+                break
+            if not word.startswith("-"):
+                break
+            option = search_parser._option_string_actions.get(word.split("=", 1)[0])
+            index += 2 if option and option.nargs != 0 and "=" not in word else 1
+        if index < len(argv) and ":" in argv[index]:
+            search_provider, _, query_start = argv[index].partition(":")
+            valid = _provider_command_names() | {"animethemes"}
+            if search_provider not in valid:
+                import shlex
+                from .suggestions import suggest
+                matches = suggest(search_provider, valid)
+                print(f"\n\033[31mUnknown provider:\033[0m {search_provider}\n")
+                if matches:
+                    print("Did you mean:")
+                    for match in matches[:1]:
+                        corrected = list(argv)
+                        corrected[index] = f"{match}:{query_start}"
+                        print(f"  {shlex.join([APP_NAME, *corrected])}")
+                    print()
+                print(f"Run '{APP_NAME} providers' to list providers.\n")
+                parser.exit(2)
+            argv[index:index + 1] = [query_start] if query_start else []
+            parser = build_command_parser(search_provider)
     args, extra = parser.parse_known_args(argv)
+    if search_provider and search_provider != "animethemes":
+        explicit_provider = getattr(args, "provider", None)
+        if explicit_provider and explicit_provider != search_provider:
+            parser.error("provider prefix conflicts with --provider")
+        args.provider = search_provider
 
     removed_flags = {"--sidecar-subs", "--embed-subs"}
     if any(arg in removed_flags for arg in extra):
@@ -118,7 +152,9 @@ def parse_cli_args(argv=None):
         if getattr(args, "download", False):
             args.extra_args = extra
         else:
-            parser.error(f"unrecognized arguments: {' '.join(extra)}")
+            import shlex
+            error_parser = parser._subparsers._group_actions[0].choices.get(args.command, parser)
+            error_parser.error(f"unrecognized arguments: {shlex.join(extra)}")
 
     if args.command is None:
         parser.print_help()
@@ -159,9 +195,4 @@ def parse_cli_args(argv=None):
         del args.completion_args
     elif args.command == "logs":
         args.logs = True
-    elif args.command in _provider_command_names():
-        args.download = getattr(args, "download", False) or (getattr(args, "provider_action", "") == "download")
-        args.command = "search"
-        if hasattr(args, "provider_action"):
-            del args.provider_action
     return args, parser

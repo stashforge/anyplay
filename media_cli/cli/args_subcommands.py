@@ -1,11 +1,10 @@
 """Subcommand builders for parser."""
 
-import argparse
-
 from ..constants import APP_NAME
 from ..providers import available_providers
 
 from .args_common import (
+    ANILIST_COMMAND_TARGETS,
     MinimalHelpFormatter,
     _add_anilist_options,
     _add_debug_option,
@@ -19,15 +18,27 @@ from .args_common import (
 )
 
 
-def add_search_subcommand(commands):
+def add_search_subcommand(commands, provider_id=None):
+    if provider_id == "animethemes":
+        return add_animethemes_subcommand(commands)
+    provider = available_providers().get(provider_id)
+    query_usage = f"{provider_id}:<query>" if provider_id else "[provider:]<query>"
     search = commands.add_parser(
         "search",
         help="Search and watch anime",
-        usage=f"{APP_NAME} search <query> [options]",
-        description="Search and watch anime from Anime Providers.",
+        usage=f"{APP_NAME} search {query_usage} [options]",
+        description=(f"Search and watch anime from {provider.name}." if provider else
+                     "Search using your default provider, or prefix the query with a provider ID."),
         epilog=(
             "Examples:\n"
+            f'  {APP_NAME} search {provider_id}:"one piece"\n'
+            f'  {APP_NAME} search {provider_id}:"one piece" -e 3 --download'
+        ) if provider_id else (
+            "Examples:\n"
             f"  {APP_NAME} search slime\n"
+            f'  {APP_NAME} search animexin:"renegade immortal"\n'
+            f"  {APP_NAME} search animethemes:idol\n"
+            f"  {APP_NAME} search animexin: -h\n"
             f"  {APP_NAME} search slime -e 3\n"
             f"  {APP_NAME} search slime -e 3 --dub -q 1080p\n"
             f'  {APP_NAME} search "one piece" -e 1000 -p mpv'
@@ -37,38 +48,11 @@ def add_search_subcommand(commands):
     )
     _configure_help_parser(search)
     search._positionals.title = "Arguments"
-    search.add_argument("query", nargs="*", help="Anime title to search")
+    search.add_argument("query", nargs="*", help="Search query, optionally prefixed with provider:")
     _add_search_options(search)
+    if provider_id:
+        search.set_defaults(provider=provider_id)
     return search
-
-
-def add_provider_subcommands(commands):
-    for provider_id, provider in sorted(available_providers().items()):
-        provider_parser = commands.add_parser(
-            provider_id,
-            help="==SUPPRESS==",
-            usage=f"{APP_NAME} {provider_id} search <query> [options]",
-            description=f"Search and watch anime from {provider.name}.",
-            epilog=(
-                "Examples:\n"
-                f"  {APP_NAME} {provider_id} search renegade\n"
-                f"  {APP_NAME} {provider_id} search renegade -e 3 --download"
-            ),
-            add_help=False,
-            formatter_class=MinimalHelpFormatter,
-        )
-        _configure_help_parser(provider_parser)
-        provider_parser._positionals.title = "Arguments"
-        provider_parser.add_argument(
-            "provider_action",
-            choices=["search"],
-            metavar="search",
-            help=argparse.SUPPRESS,
-        )
-        provider_parser.add_argument("query", nargs="*", help="Anime title to search")
-        provider_parser._is_provider_parser = True
-        _add_search_options(provider_parser)
-        provider_parser.set_defaults(provider=provider_id)
 
 
 def add_downloads_subcommand(commands):
@@ -147,6 +131,7 @@ def add_anilist_subcommand(commands):
     anilist.add_argument(
         "target", nargs="?", default="menu", metavar="[list]",
         type=_anilist_target,
+        choices=list(ANILIST_COMMAND_TARGETS),
         help="List to open. Omit to show the AniList menu.",
     )
     _add_anilist_options(anilist)
@@ -155,26 +140,21 @@ def add_anilist_subcommand(commands):
 
 def add_animethemes_subcommand(commands):
     animethemes = commands.add_parser(
-        "animethemes",
+        "search",
         help="Search and play anime opening/ending videos",
-        usage=f"{APP_NAME} animethemes search <query> [options]",
+        usage=f"{APP_NAME} search animethemes:<query> [options]",
         description="Search AnimeThemes and play anime opening/ending videos.",
         epilog=(
             "Examples:\n"
-            f"  {APP_NAME} animethemes search idol\n"
-            f'  {APP_NAME} animethemes search "oshi no ko"'
+            f"  {APP_NAME} search animethemes:idol\n"
+            f'  {APP_NAME} search animethemes:"oshi no ko"'
         ),
         add_help=False,
         formatter_class=MinimalHelpFormatter,
     )
     _configure_help_parser(animethemes)
     animethemes._positionals.title = "Arguments"
-    animethemes.add_argument(
-        "animethemes",
-        choices=["search"],
-        metavar="search",
-        help="Search AnimeThemes",
-    )
+    animethemes.set_defaults(animethemes="search")
     animethemes.add_argument("query", nargs="*", help="Anime, song, or artist to search")
     playback = animethemes.add_argument_group("Playback options")
     playback.add_argument(
@@ -263,6 +243,7 @@ def add_auth_subcommand(commands):
     auth._positionals.title = "Arguments"
     auth.add_argument(
         "action", metavar="<action>", type=_auth_action,
+        choices=["login", "logout", "status", "token"],
         help="Authentication action to run",
     )
     auth_options = auth.add_argument_group("Auth options")
@@ -287,9 +268,12 @@ def add_providers_subcommand(commands):
         add_help=False,
         epilog=(
             "Examples:\n"
-            "  You can search a specific provider directly by using its ID as a command:\n"
-            f"    {APP_NAME} allanime search frieren\n"
-            f"    {APP_NAME} miruro search \"one piece\"\n\n"
+            "  Prefix your query with a provider ID:\n"
+            f"    {APP_NAME} search animexin:renegade immortal\n"
+            f'    {APP_NAME} search miruro:"one piece"\n'
+            f"    {APP_NAME} search animethemes:idol\n\n"
+            "  Show provider-specific search help:\n"
+            f"    {APP_NAME} search miruro: -h\n\n"
             "  Alternatively, you can temporarily switch providers during a normal search:\n"
             f"    {APP_NAME} search frieren --provider miruro"
         ),
@@ -446,12 +430,10 @@ def add_logs_subcommand(commands):
     return logs
 
 
-def register_all_subcommands(commands):
-    add_search_subcommand(commands)
-    add_provider_subcommands(commands)
+def register_all_subcommands(commands, search_provider=None):
+    add_search_subcommand(commands, search_provider)
     add_downloads_subcommand(commands)
     add_anilist_subcommand(commands)
-    add_animethemes_subcommand(commands)
     add_history_subcommand(commands)
     add_continue_subcommand(commands)
     add_auth_subcommand(commands)

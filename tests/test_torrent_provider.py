@@ -99,7 +99,7 @@ def test_torrent_provider_is_available_to_cli():
 
     assert "torrent" in available_providers()
 
-    args, _ = parse_cli_args(["torrent", "search", "slime"])
+    args, _ = parse_cli_args(["search", "torrent:slime"])
 
     assert args.command == "search"
     assert args.provider == "torrent"

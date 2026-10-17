@@ -811,7 +811,9 @@ def tui_pick(
                     cur_header = new_hdr
                     _needs_redraw = True
 
-                if _done and auto_select_single_when_done and len(options) == 1:
+                auto_select = (auto_select_single_when_done() if callable(auto_select_single_when_done)
+                               else auto_select_single_when_done)
+                if _done and auto_select and len(options) == 1:
                     if not _can_select(filt[0]):
                         _needs_redraw = True
                         render(filt)

@@ -3,12 +3,20 @@
 from __future__ import annotations
 
 from urllib.parse import quote, urlencode
+from concurrent.futures import ThreadPoolExecutor
 
 from .http import request_json
 
 API_BASE = "https://api.animethemes.moe"
-ANIMETHEMES_SEARCH_TABS = ("anime", "songs", "videos", "artists")
-ANIME_INCLUDE = "resources,animethemes.song.artists,animethemes.animethemeentries.videos"
+ANIMETHEMES_SEARCH_TABS = (
+    "anime",
+    "animethemes",
+    "artists",
+    "series",
+    "studios",
+    "playlists",
+)
+ANIME_INCLUDE = "images,resources,animethemes.song.artists,animethemes.animethemeentries.videos"
 
 
 def _text(value) -> str:
@@ -38,6 +46,12 @@ def _video_flags(video: dict, entry: dict | None = None) -> list[str]:
         if entry.get("nsfw"):
             flags.append("NSFW")
     return flags
+
+
+def _anime_name(value) -> str:
+    if isinstance(value, dict):
+        return _text(value.get("name") or value.get("title"))
+    return _text(value)
 
 
 def anime_lookup_url(show: dict) -> str:
@@ -92,12 +106,136 @@ def get_anime_for_show(show: dict) -> dict | None:
     return _first_anime(request_json(detail_url, extra_hdrs={"User-Agent": "anyplay-cli"}))
 
 
+def _anime_detail_by_slug(slug: str) -> dict | None:
+    if not slug:
+        return None
+    url = f"{API_BASE}/anime/{quote(slug)}?{urlencode({'include': ANIME_INCLUDE})}"
+    return _first_anime(request_json(url, extra_hdrs={"User-Agent": "anyplay-cli"}))
+
+
+def _merge_search_anime_details(search: dict) -> dict:
+    anime_items = search.get("anime")
+    if not isinstance(anime_items, list) or not anime_items:
+        return search
+
+    enriched_anime = []
+    enriched_themes = []
+    seen_theme_ids = set()
+    for item in anime_items:
+        if not isinstance(item, dict):
+            continue
+        detail = None
+        try:
+            detail = _anime_detail_by_slug(_text(item.get("slug")))
+        except Exception:
+            detail = None
+        anime = detail if isinstance(detail, dict) else item
+        enriched_anime.append(anime)
+        for theme in anime.get("animethemes") or []:
+            if not isinstance(theme, dict):
+                continue
+            theme_id = theme.get("id")
+            if theme_id and theme_id in seen_theme_ids:
+                continue
+            if theme_id:
+                seen_theme_ids.add(theme_id)
+            enriched_themes.append({**theme, "anime": anime})
+
+    if enriched_anime:
+        search["anime"] = enriched_anime
+    if enriched_themes:
+        search["animethemes"] = enriched_themes
+    return search
+
+
 def search(query: str) -> dict:
     payload = request_json(
         f"{API_BASE}/search?{urlencode({'q': query})}",
         extra_hdrs={"User-Agent": "anyplay-cli"},
     )
-    return payload.get("search") or {}
+    search_payload = payload.get("search") or {}
+    if isinstance(search_payload, dict):
+        result = _merge_search_anime_details(search_payload)
+        def enrich_artist(item):
+            try:
+                return {**item, **get_artist(item.get("slug", ""), summary=True)}
+            except Exception:
+                return item
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            result["artists"] = list(pool.map(enrich_artist, result.get("artists") or []))
+        return result
+    return {}
+
+
+def get_artist(slug: str, *, summary=False) -> dict:
+    include = "images,groups" if summary else "images,groups,songs.animethemes.anime,memberPerformances.song"
+    url = f"{API_BASE}/artist/{quote(slug, safe='')}?{urlencode({'include': include})}"
+    return request_json(url, extra_hdrs={"User-Agent": "anyplay-cli"}).get("artist") or {}
+
+
+def artist_theme_rows(artist: dict, owner: dict | None = None) -> list[dict]:
+    rows = []
+    seen = set()
+    member_songs = None
+    if owner is not None:
+        member_songs = {p.get("song", {}).get("id") for p in owner.get("memberPerformances") or []}
+    for song in artist.get("songs") or []:
+        if member_songs is not None and song.get("id") not in member_songs:
+            continue
+        for theme in song.get("animethemes") or []:
+            if theme.get("id") in seen:
+                continue
+            seen.add(theme.get("id"))
+            label = _text(theme.get("type")) + str(theme.get("sequence") or "")
+            rows.append({
+                "kind": "theme", "bucket": "animethemes",
+                "label": f"{label}  {_text(song.get('title')) or 'Unknown song'}",
+                "raw": {**theme, "song": song},
+                "credit": song.get("artistsong") or {},
+                "artist": (owner or artist).get("name", "Unknown artist"),
+            })
+    return rows
+
+
+def artist_sections(artist: dict) -> list[dict]:
+    sections = []
+    direct = artist_theme_rows(artist)
+    if direct:
+        sections.append({"label": "Song Performances", "rows": direct, "credit": ""})
+
+    def group_section(group):
+        detail = get_artist(group["slug"])
+        rows = artist_theme_rows(detail, artist)
+        return {"label": f"In {group['name']}", "rows": rows,
+                "credit": _text((group.get("artistmember") or {}).get("as")),
+                "group": group["name"]}
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        sections.extend(section for section in pool.map(group_section, artist.get("groups") or []) if section["rows"])
+    return sections
+
+
+def enrich_artist_theme(row: dict) -> dict:
+    theme = row["raw"]
+    song = theme["song"]
+    song_url = f"{API_BASE}/song/{song['id']}?{urlencode({'include': 'artists'})}"
+    song_detail = request_json(song_url, extra_hdrs={"User-Agent": "anyplay-cli"}).get("song") or song
+    anime = theme.get("anime") or {}
+    anime_detail = _anime_detail_by_slug(anime.get("slug", "")) or anime
+    full_theme = next((t for t in anime_detail.get("animethemes") or [] if t.get("id") == theme.get("id")), theme)
+    return {**row, "raw": {**full_theme, "song": {**song, **song_detail}, "anime": anime_detail}}
+
+
+def _theme_song(theme: dict) -> dict:
+    song = theme.get("song")
+    return song if isinstance(song, dict) else {}
+
+
+def theme_video_rows(theme: dict) -> list[dict]:
+    anime = theme.get("anime")
+    if not isinstance(anime, dict):
+        anime = {"name": _anime_name(anime) or "AnimeThemes"}
+    return flatten_anime_videos({**anime, "animethemes": [theme]})
 
 
 def flatten_anime_videos(anime: dict) -> list[dict]:
@@ -149,23 +287,26 @@ def flatten_search_bucket(bucket: str, items: list[dict]) -> list[dict]:
     for item in items or []:
         if bucket == "anime":
             title = _text(item.get("name"))
-            tail = " ".join(part for part in (_text(item.get("year")), _text(item.get("media_format"))) if part)
-            label = f"{title}  {tail}".rstrip()
             kind = "anime"
-        elif bucket == "songs":
-            title = _text(item.get("title"))
-            artists = _artist_names(item)
-            label = f"{title}  {artists}".rstrip()
-            kind = "song"
-        elif bucket == "videos":
-            title = _text(item.get("basename") or item.get("filename"))
-            res = _text(item.get("resolution"))
-            tail = " ".join(part for part in (res, *_video_flags(item)) if part)
-            label = f"{title}  {tail}".rstrip()
-            kind = "video"
+            label = title
+        elif bucket == "animethemes":
+            song = _theme_song(item)
+            title = _text(song.get("title")) or _text(item.get("slug") or item.get("type"))
+            artists = _artist_names(song)
+            label = f"{title} by {artists}" if title and artists else title
+            kind = "theme"
         elif bucket == "artists":
             label = _text(item.get("name"))
             kind = "artist"
+        elif bucket == "series":
+            label = _text(item.get("name"))
+            kind = "series"
+        elif bucket == "studios":
+            label = _text(item.get("name"))
+            kind = "studio"
+        elif bucket == "playlists":
+            label = _text(item.get("name"))
+            kind = "playlist"
         else:
             continue
         if label:

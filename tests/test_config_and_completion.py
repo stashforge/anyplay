@@ -140,6 +140,13 @@ class TestConfigCommand(unittest.TestCase):
 
 
 class TestShellCompletion(unittest.TestCase):
+    def test_provider_prefixes_replace_provider_commands(self):
+        self.assertNotIn("animexin", COMMANDS)
+        for shell in ("bash", "zsh", "fish"):
+            script = generate_completion(shell)
+            self.assertIn("animexin:", script)
+            self.assertIn("animethemes:", script)
+
     def test_commands_include_config_and_providers(self):
         self.assertIn("config", COMMANDS)
         self.assertIn("providers", COMMANDS)

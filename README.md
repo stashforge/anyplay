@@ -58,10 +58,13 @@ anyplay search "grand blue"
 Search with a specific provider:
 
 ```bash
-anyplay anikoto search "grand blue"
-anyplay anizone search "grand blue"
-anyplay animexin search "martial master"
+anyplay search anikoto:"grand blue"
+anyplay search anizone:"grand blue"
+anyplay search animexin:"martial master"
 ```
+
+Quotes are optional for multiword queries. Use `anyplay search animexin: -h`
+for provider-specific help, or `anyplay providers` to list provider IDs.
 
 Open your watch history:
 

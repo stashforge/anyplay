@@ -94,42 +94,61 @@ def _configure_help_parser(parser):
     return parser
 
 class CLIParser(argparse.ArgumentParser):
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("allow_abbrev", False)
+        super().__init__(*args, **kwargs)
+
     def error(self, message):
-        import difflib
-        import re
-        import sys
-        if "invalid choice: " in message and "(choose from" in message:
-            m = re.search(r"invalid choice: '([^']+)'", message)
-            if m:
-                bad_cmd = m.group(1)
-                try:
-                    choices_str = message.split("(choose from ")[1].rstrip(")")
-                    choices = [c.strip("' ") for c in choices_str.split(",")]
-                    matches = difflib.get_close_matches(bad_cmd, choices, n=3, cutoff=0.2)
-                except Exception:
-                    matches = []
+        if message.startswith("unrecognized arguments: "):
+            import shlex
+            from .suggestions import suggest
 
-                print(f"\n\033[31mUnknown command:\033[0m {bad_cmd}\n")
-                if matches:
-                    print("Did you mean:")
-                    for match in matches:
-                        print(f"  {match}")
-                    print()
-
-                print(f"Run '{APP_NAME} -h' to see all commands.")
-                print(f"Run '{APP_NAME} providers' to see available providers.\n")
-                sys.exit(2)
-        elif "the following arguments are required: <action>" in message or "the following arguments are required: provider_action" in message or "the following arguments are required: <command>" in message:
-            provider = self.prog.split()[-1]
-            if provider == APP_NAME or provider not in _provider_command_names():
-                super().error(message)
-            print("\n\033[31mNo action specified.\033[0m\n")
-            print("Usage:")
-            print(f"  {APP_NAME} {provider} search <query>\n")
-            print("Run:")
-            print(f"  {APP_NAME} {provider} -h\n")
-            sys.exit(2)
+            arguments = message.removeprefix("unrecognized arguments: ")
+            try:
+                unknown = shlex.split(arguments)
+            except ValueError:
+                unknown = arguments.split()
+            options = [word for word in unknown if word.startswith("-")]
+            if options:
+                for option in options:
+                    flag, separator, value = option.partition("=")
+                    print(f"\n\033[31mUnknown option:\033[0m {flag}\n")
+                    matches = suggest(flag, self._option_string_actions)
+                    if matches:
+                        print("Did you mean:")
+                        for match in matches:
+                            print(f"  {match}{separator}{value}")
+                        print()
+                print(f"Run '{self.prog} -h' for help.\n")
+                self.exit(2)
         super().error(message)
+
+    def _check_value(self, action, value):
+        if action.choices is not None and value not in action.choices:
+            from .suggestions import suggest
+            import shlex
+
+            if action.dest == "command":
+                label = "Unknown command"
+            elif action.option_strings:
+                label = "Invalid " + action.dest.replace("_", " ")
+            else:
+                label = "Unknown " + ({"target": "AniList list", "action": "action"}.get(action.dest, action.dest))
+            print(f"\n\033[31m{label}:\033[0m {value}\n")
+            exact = getattr(self, "_command_suggestion", None)
+            matches = suggest(str(value), action.choices)
+            if exact or matches:
+                print("Did you mean:")
+                if exact:
+                    print(f"  {exact}")
+                else:
+                    for match in matches:
+                        correction = match if action.option_strings else f"{self.prog} {shlex.quote(match)}"
+                        print(f"  {correction}")
+                print()
+            print(f"Run '{self.prog} -h' for help.\n")
+            self.exit(2)
+        return super()._check_value(action, value)
 
 ANILIST_COMMAND_TARGETS = {
     "menu": "menu",
@@ -147,18 +166,10 @@ ANILIST_COMMAND_TARGETS = {
 }
 
 def _anilist_target(value):
-    target = str(value or "").lower()
-    if target not in ANILIST_COMMAND_TARGETS:
-        raise argparse.ArgumentTypeError(
-            "use airing, watching, planning, completed, paused, dropped, or rewatching"
-        )
-    return target
+    return str(value or "").lower()
 
 def _auth_action(value):
-    action = str(value or "").lower()
-    if action not in ("login", "logout", "status", "token"):
-        raise argparse.ArgumentTypeError("use login, logout, status, or token")
-    return action
+    return str(value or "").lower()
 
 def _set_cli_defaults(parser):
     parser.set_defaults(

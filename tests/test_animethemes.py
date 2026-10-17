@@ -1,5 +1,10 @@
 from media_cli.cli.args import parse_cli_args
-from media_cli.app.animethemes import _search_header
+from media_cli.app.animethemes import (
+    _active_tabs,
+    _row_show,
+    _search_header,
+    _search_prompt,
+)
 from media_cli.core.terminal import strip_ansi
 from urllib.parse import parse_qs, urlparse
 from media_cli.services.animethemes import (
@@ -7,6 +12,7 @@ from media_cli.services.animethemes import (
     anime_lookup_url,
     flatten_anime_videos,
     flatten_search_bucket,
+    theme_video_rows,
 )
 
 
@@ -73,26 +79,59 @@ def test_animethemes_flattens_anime_theme_videos():
     assert rows[1]["kind"] == "video"
 
 
-def test_animethemes_search_tabs_and_rows_are_limited_to_useful_buckets():
-    assert ANIMETHEMES_SEARCH_TABS == ("anime", "songs", "videos", "artists")
+def test_animethemes_search_tabs_match_visible_site_tabs():
+    assert ANIMETHEMES_SEARCH_TABS == (
+        "anime",
+        "animethemes",
+        "artists",
+        "series",
+        "studios",
+        "playlists",
+    )
     data = {
-        "anime": [{"name": "[Oshi no Ko]", "year": 2023, "media_format": "TV"}],
-        "songs": [{"title": "Idol", "artists": [{"name": "YOASOBI"}]}],
-        "videos": [{"basename": "OshiNoKo-OP1.webm", "resolution": 720, "source": "WEB"}],
+        "anime": [{
+            "name": "[Oshi no Ko]",
+            "year": 2023,
+            "media_format": "TV",
+            "animethemes": [{}, {}],
+        }],
+        "animethemes": [{
+            "slug": "OP1",
+            "song": {"title": "Idol", "artists": [{"name": "YOASOBI"}]},
+            "anime": {"name": "[Oshi no Ko]"},
+        }],
         "artists": [{"name": "YOASOBI"}],
-        "studios": [{"name": "Ignored"}],
+        "series": [{"name": "[Oshi no Ko]"}],
+        "studios": [{"name": "Doga Kobo"}],
+        "playlists": [{"name": "Oshi no Ko OPs", "visibility": "Public"}],
     }
 
-    assert flatten_search_bucket("anime", data["anime"])[0]["label"] == "[Oshi no Ko]  2023 TV"
-    assert flatten_search_bucket("songs", data["songs"])[0]["label"] == "Idol  YOASOBI"
-    assert flatten_search_bucket("videos", data["videos"])[0]["label"] == "OshiNoKo-OP1.webm  720 WEB"
+    assert flatten_search_bucket("anime", data["anime"])[0]["label"] == "[Oshi no Ko]"
+    assert flatten_search_bucket("animethemes", data["animethemes"])[0]["label"] == "Idol by YOASOBI"
     assert flatten_search_bucket("artists", data["artists"])[0]["label"] == "YOASOBI"
+    assert flatten_search_bucket("series", data["series"])[0]["label"] == "[Oshi no Ko]"
+    assert flatten_search_bucket("studios", data["studios"])[0]["label"] == "Doga Kobo"
+    assert flatten_search_bucket("playlists", data["playlists"])[0]["label"] == "Oshi no Ko OPs"
+
+
+def test_animethemes_search_uses_only_non_empty_tabs_and_prompt_names_active_tab():
+    data = {
+        "anime": [{"name": "[Oshi no Ko]"}],
+        "animethemes": [{"slug": "OP1", "song": {"title": "Idol"}}],
+        "artists": [],
+        "series": [],
+        "studios": [],
+        "playlists": [],
+    }
+
+    assert _active_tabs(data) == ["anime", "animethemes"]
+    assert _search_prompt(["anime", "animethemes"], 1) == "Search AnimeThemes · Theme"
 
 
 def test_animethemes_command_parses_query():
-    args, _ = parse_cli_args(["animethemes", "search", "idol"])
+    args, _ = parse_cli_args(["search", "animethemes:idol"])
 
-    assert args.command == "animethemes"
+    assert args.command == "search"
     assert args.animethemes == "search"
     assert args.query == ["idol"]
 
@@ -100,12 +139,17 @@ def test_animethemes_command_parses_query():
 def test_animethemes_search_header_keeps_standard_four_line_shape():
     rows = flatten_search_bucket(
         "anime",
-        [{"name": "[Oshi no Ko]", "year": 2023, "media_format": "TV"}],
+        [{
+            "name": "[Oshi no Ko]",
+            "year": 2023,
+            "season": "Spring",
+            "media_format": "TV",
+            "animethemes": [{}, {}],
+        }],
     )
     header = _search_header(
         "oshi no ko",
         "anime",
-        {"anime": 1, "songs": 2, "videos": 3, "artists": 4},
         rows,
         0,
     )
@@ -114,16 +158,33 @@ def test_animethemes_search_header_keeps_standard_four_line_shape():
     assert len(lines) == 4
     assert lines[0] == "[Oshi no Ko]"
     assert lines[1] == "No alternative title"
-    assert "TV" in lines[2]
-    assert "Anime 1" in lines[3]
-    assert "AnimeThemes" in lines[3]
+    assert lines[2] == "TV • Spring 2023 • 2 themes"
+    assert lines[3] == 'AnimeThemes • "oshi no ko" • Tab=switch • Enter=open • Left=search • Esc=back'
+
+
+def test_animethemes_theme_header_uses_theme_metadata_only():
+    rows = flatten_search_bucket(
+        "animethemes",
+        [{
+            "slug": "OP1",
+            "type": "OP",
+            "song": {"title": "Idol", "artists": [{"name": "YOASOBI"}]},
+            "anime": {"name": "[Oshi no Ko]"},
+        }],
+    )
+    header = _search_header("oshi no ko", "animethemes", rows, 0)
+
+    lines = [strip_ansi(line) for line in header.splitlines()]
+    assert lines[0] == "Idol by YOASOBI"
+    assert lines[1] == "YOASOBI"
+    assert lines[2] == "OP1 • [Oshi no Ko]"
+    assert "Anime 1" not in lines[3]
 
 
 def test_animethemes_loading_header_matches_search_shape():
     header = _search_header(
         "oshi no ko",
         "anime",
-        {"anime": 0, "songs": 0, "videos": 0, "artists": 0},
         [],
         0,
         loading_msg=":: Searching...",
@@ -134,3 +195,58 @@ def test_animethemes_loading_header_matches_search_shape():
     assert lines[1] == "Use Up/Down to browse previous searches."
     assert lines[2] == "Provider: AnimeThemes"
     assert lines[3] == ":: Searching..."
+
+
+def test_animethemes_row_show_maps_images_to_existing_cover_fields():
+    row = flatten_search_bucket(
+        "anime",
+        [{
+            "name": "[Oshi no Ko]",
+            "images": [{"link": "https://img.example/oshi.jpg"}],
+        }],
+    )[0]
+
+    show = _row_show(row)
+
+    assert show["thumbnail"] == "https://img.example/oshi.jpg"
+
+
+def test_animethemes_theme_row_uses_nested_anime_image():
+    row = flatten_search_bucket(
+        "animethemes",
+        [{
+            "slug": "ED",
+            "song": {"title": "Mephisto", "artists": [{"name": "Ziyouu-vachi"}]},
+            "anime": {
+                "name": "[Oshi no Ko]",
+                "images": [{"link": "https://img.example/oshi-theme.jpg"}],
+            },
+        }],
+    )[0]
+
+    show = _row_show(row)
+
+    assert show["name"] == "Mephisto by Ziyouu-vachi"
+    assert show["englishName"] == "Ziyouu-vachi"
+    assert show["thumbnail"] == "https://img.example/oshi-theme.jpg"
+
+
+def test_animethemes_theme_result_can_open_its_videos():
+    rows = theme_video_rows({
+        "slug": "ED",
+        "song": {"title": "Mephisto", "artists": [{"name": "Ziyouu-vachi"}]},
+        "anime": {"name": "[Oshi no Ko]"},
+        "animethemeentries": [{
+            "episodes": "2-10",
+            "version": 1,
+            "videos": [{
+                "link": "https://v.animethemes.moe/OshiNoKo-ED.webm",
+                "resolution": 720,
+                "source": "WEB",
+            }],
+        }],
+    })
+
+    assert rows[0]["label"] == "ED  Mephisto  Ziyouu-vachi  720 WEB"
+    assert rows[0]["anime"] == "[Oshi no Ko]"
+    assert rows[0]["stream"]["link"] == "https://v.animethemes.moe/OshiNoKo-ED.webm"

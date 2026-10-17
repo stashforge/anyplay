@@ -25,7 +25,9 @@ ANILIST_SORTS = ("recent", "title", "score", "progress")
 BOOLEANS = ("true", "false")
 
 PROVIDERS = tuple(sorted(available_providers()))
-COMMANDS = BASE_COMMANDS + PROVIDERS
+SEARCH_PROVIDERS = PROVIDERS + ("animethemes",)
+PROVIDER_PREFIXES = tuple(provider + ":" for provider in SEARCH_PROVIDERS)
+COMMANDS = BASE_COMMANDS
 
 ROOT_OPTIONS = ("-h", "--help", "-v", "--version", "--debug", "--plain", "--no-tui")
 
@@ -214,15 +216,13 @@ def bash_completion():
     esac
 
     case "$cmd" in
-        {_case_words(PROVIDERS)})
+        search)
             if [[ $COMP_CWORD -eq 2 ]]; then
-                COMPREPLY=( $(compgen -W "search" -- "$cur") )
+                COMPREPLY=( $(compgen -W "{_words(PROVIDER_PREFIXES)} {_words(SEARCH_OPTIONS)}" -- "$cur") )
+                [[ ${{#COMPREPLY[@]}} -eq 1 && ${{COMPREPLY[0]}} == *: ]] && compopt -o nospace
             else
                 COMPREPLY=( $(compgen -W "{_words(SEARCH_OPTIONS)}" -- "$cur") )
             fi
-            ;;
-        search)
-            COMPREPLY=( $(compgen -W "{_words(SEARCH_OPTIONS)}" -- "$cur") )
             ;;
         downloads)
             COMPREPLY=( $(compgen -W "{_words(DOWNLOADS_OPTIONS)}" -- "$cur") )
@@ -255,7 +255,6 @@ complete -F {fn_name} {APP_NAME}
 
 
 def zsh_completion():
-    newline = "\n"
     return f"""#compdef {APP_NAME}
 
 local -a commands
@@ -270,17 +269,9 @@ commands=(
   'completion:Generate shell completion'
   'config:Manage or open configuration'
   'logs:Show diagnostic logs'
-    {"".join(f"  '{provider}:Search {provider}'{newline}" for provider in PROVIDERS)}
 )
 
 case $words[2] in
-  {'|'.join(PROVIDERS)})
-    if [[ $CURRENT -eq 3 ]]; then
-      _arguments '*:: :(search)'
-    else
-      _arguments '*:: :(({_words(SEARCH_OPTIONS)}))'
-    fi
-    ;;
   anilist)
     _arguments '*:: :(({_words(ANILIST_LISTS)} {_words(ANILIST_OPTIONS)}))'
     ;;
@@ -300,7 +291,11 @@ case $words[2] in
     _arguments '*:: :(({_words(LOGS_OPTIONS)}))'
     ;;
   search)
-    _arguments '*:: :(({_words(SEARCH_OPTIONS)}))'
+    if [[ $CURRENT -eq 3 && $words[CURRENT] != -* ]]; then
+      compadd -S '' -- {_words(PROVIDER_PREFIXES)}
+    else
+      _arguments '*:: :(({_words(SEARCH_OPTIONS)}))'
+    fi
     ;;
   downloads)
     _arguments '*:: :(({_words(DOWNLOADS_OPTIONS)}))'
@@ -366,12 +361,11 @@ def fish_completion():
         "config": CONFIG_OPTIONS,
         "logs": LOGS_OPTIONS,
     }
-    for provider in PROVIDERS:
+    for prefix in PROVIDER_PREFIXES:
         lines.append(
             f"complete -c {APP_NAME} -n "
-            f"'__fish_seen_subcommand_from {provider}' -a 'search'"
+            f"'__fish_seen_subcommand_from search; and test (count (commandline -opc)) -eq 2' -a '{prefix}'"
         )
-        command_options[provider] = SEARCH_OPTIONS
     for command, options in command_options.items():
         for option in options:
             lines.append(
