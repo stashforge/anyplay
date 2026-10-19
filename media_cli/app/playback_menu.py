@@ -25,9 +25,14 @@ from ..domain.episodes import (
 )
 from ..domain.titles import get_show_display_title
 from ..media.urls import open_external_url
-from ..playback.rules import marked_watched_osd
+from ..playback.rules import marked_watched_osd, should_clear_query_on_child_left
+from ..ui.actions import ActionBindings
+from ..ui.background_loading import BackgroundLoadingStatus
 from ..ui.help import picker_help
+from ..ui.loading_model import LoadingInteraction, LoadingOwner, LoadingPlacement, LoadingProgress, LoadingTaskSpec
 from ..ui.picker import tui_pick
+from ..ui.picker_state import PickerState
+from ..ui.spinner import spinner_from_config
 from . import playback as playback_mod
 from .footer import context_footer
 
@@ -606,7 +611,7 @@ def handle_action_menu_state(
                 action_show,
                 ui,
                 ms,
-                "Enter/Right=select • Tab=Sub/Dub • ?=Help • Left/Esc=back",
+                "Enter=select • Tab=Sub/Dub • ?=Help • Esc=back",
                 offline=app_core.is_confirmed_offline(),
             )
             parts.append(f"{C_K}{_t(footer)}{R}")
@@ -627,20 +632,24 @@ def handle_action_menu_state(
                 app_core.set_action_feedback(action_show, reason)
             return (opts, _action_hdr(0))
 
-        new_ids = app_core.with_loading(
-            f"Switching to {target_ttype.upper()}…",
-            app_core.ensure_episode_ids,
-            action_show,
-            target_ttype,
-            status_msg=f"Switching to {target_ttype.upper()}…",
-        )
+        from copy import deepcopy
+        from .details_preparation import PreparedDetails, commit_details_transition
+        original = deepcopy(action_show)
+        prepared_show = deepcopy(original)
+        def prepare_translation():
+            ids = app_core.ensure_episode_ids(prepared_show, target_ttype,
+                status_msg=f"Switching to {target_ttype.upper()}…")
+            if ids:
+                app_core.prepare_show_display_state(prepared_show, target_ttype)
+            return tuple(str(ep) for ep in ids)
+        new_ids = app_core.with_loading(f"Switching to {target_ttype.upper()}…", prepare_translation)
         if new_ids:
+            commit_details_transition(action_show, PreparedDetails(prepared_show, new_ids, original))
             ttype = target_ttype
             ui.ui_ttype_ctx = ttype
             episode_ids = new_ids
             ms.total_eps = len(episode_ids)
             ms.selected_stream = None
-            app_core.prepare_show_display_state(action_show, ttype)
             ms.current_ep_index = episode_index_for_id(
                 episode_ids, ms.current_ep, labels=ui.ui_show_ctx.get("_episode_labels")
             )
@@ -731,6 +740,7 @@ def handle_action_menu_state(
 
     def _playback_settings_menu():
         selected_idx = 0
+        picker_state = PickerState()
 
         def _settings_options():
             from .playback_player import auto_download_mode
@@ -760,8 +770,19 @@ def handle_action_menu_state(
             )
 
         hd = picker_help("Playback", "Back", "Back")
+        hd["Left Arrow"] = "OFF / previous value at filter start; otherwise move cursor or go back"
+        hd["Right Arrow"] = "ON / next value at filter end; otherwise move cursor or open"
         while True:
             setting_opts, setting_acts, setting_hints = _settings_options()
+            adjustment = None
+
+            def adjust(index, direction):
+                nonlocal adjustment
+                if setting_acts[index] == "SKIP_SETTINGS":
+                    return False
+                adjustment = (index, direction)
+                return True
+
             sidx = tui_pick(
                 flags,
                 ui,
@@ -772,7 +793,12 @@ def handle_action_menu_state(
                 help_dict=hd,
                 info_fn=app_core.make_single_show_info_fn(action_show, ui),
                 initial_selected=selected_idx,
+                state=picker_state,
+                adjust_fn=adjust,
             )
+            direction = None
+            if sidx == -6 and adjustment is not None:
+                sidx, direction = adjustment
             if sidx in (-2, -3) or sidx < 0:
                 return "DETAILS"
 
@@ -780,11 +806,12 @@ def handle_action_menu_state(
             selected = setting_acts[sidx]
             if selected == "TOGGLE_AUTO_DOWNLOAD":
                 from .playback_player import auto_download_mode
-                ms.auto_download_next = "off" if auto_download_mode(cfg, getattr(ms, "auto_download_next", None)) == "adaptive" else "adaptive"
+                enabled = direction > 0 if direction is not None else auto_download_mode(cfg, getattr(ms, "auto_download_next", None)) != "adaptive"
+                ms.auto_download_next = "adaptive" if enabled else "off"
                 status = "Adaptive" if ms.auto_download_next == "adaptive" else "Off"
                 app_core.set_action_feedback(action_show, f"Auto-Download: {status}")
             elif selected == "TOGGLE_AUTO_DELETE":
-                ms.auto_delete_watched = not getattr(ms, "auto_delete_watched", False)
+                ms.auto_delete_watched = direction > 0 if direction is not None else not getattr(ms, "auto_delete_watched", False)
                 status = "ON" if ms.auto_delete_watched else "OFF"
                 app_core.set_action_feedback(action_show, f"Auto-Delete: {status}")
             elif selected == "CYCLE_AUTO_DELETE_BUFFER":
@@ -793,11 +820,15 @@ def handle_action_menu_state(
                     current = int(current)
                 except (TypeError, ValueError):
                     current = 1
-                choices = [0, 1, 2, 3, 5]
+                choices = (0, 1, 2, 3, 5)
                 try:
-                    next_buf = choices[(choices.index(current) + 1) % len(choices)]
+                    position = choices.index(current)
                 except ValueError:
-                    next_buf = 1
+                    position = choices.index(1)
+                if direction is None:
+                    next_buf = choices[(position + 1) % len(choices)] if current in choices else 1
+                else:
+                    next_buf = choices[max(0, min(position + direction, len(choices) - 1))]
                 ms.auto_delete_buffer = next_buf
                 app_core.set_action_feedback(action_show, f"Auto-Delete Buffer: {next_buf}")
             elif selected == "SKIP_SETTINGS":
@@ -836,6 +867,7 @@ def handle_action_menu_state(
 
     def _skip_settings_menu():
         selected_idx = 0
+        picker_state = PickerState()
 
         def _options():
             aniskip_enabled = getattr(args, "aniskip", None)
@@ -872,8 +904,19 @@ def handle_action_menu_state(
             return opts2, acts2, hints2
 
         hd = picker_help("Skip Settings", "Back", "Back")
+        hd["Left Arrow"] = "OFF at filter start; otherwise move cursor or go back"
+        hd["Right Arrow"] = "ON at filter end; otherwise move cursor or open"
         while True:
             opts2, acts2, hints2 = _options()
+            adjustment = None
+
+            def adjust(index, direction):
+                nonlocal adjustment
+                if not acts2[index].startswith("TOGGLE_"):
+                    return False
+                adjustment = (index, direction)
+                return True
+
             sidx = tui_pick(
                 flags,
                 ui,
@@ -884,7 +927,12 @@ def handle_action_menu_state(
                 help_dict=hd,
                 info_fn=app_core.make_single_show_info_fn(action_show, ui),
                 initial_selected=selected_idx,
+                state=picker_state,
+                adjust_fn=adjust,
             )
+            direction = None
+            if sidx == -6 and adjustment is not None:
+                sidx, direction = adjustment
             if sidx in (-2, -3) or sidx < 0:
                 return
             selected_idx = sidx
@@ -893,14 +941,14 @@ def handle_action_menu_state(
                 current = getattr(args, "aniskip", None)
                 if current is None:
                     current = cfg.get("aniskip", cfg.get("aniskip_enabled", True))
-                args.aniskip = not bool(current)
+                args.aniskip = direction > 0 if direction is not None else not bool(current)
                 app_core.set_action_feedback(action_show, f"AniSkip: {'ON' if args.aniskip else 'OFF'}")
                 continue
             if act == "TOGGLE_AUTO_SKIP":
                 current = getattr(args, "auto_skip", None)
                 if current is None:
                     current = cfg.get("auto_skip", cfg.get("aniskip_auto", True))
-                args.auto_skip = not bool(current)
+                args.auto_skip = direction > 0 if direction is not None else not bool(current)
                 app_core.set_action_feedback(action_show, f"Auto-Skip: {'ON' if args.auto_skip else 'OFF'}")
                 continue
             if act == "TOGGLE_CUSTOM_SKIPS":
@@ -909,7 +957,8 @@ def handle_action_menu_state(
                     keys = [str(ms.show_id or ms.show_title or "")]
                 disabled = getattr(ms, "custom_skip_disabled_titles", set())
                 has_custom = bool(_session_entries_for_title() or _saved_entries_for_title())
-                if _custom_skips_disabled():
+                enable = direction > 0 if direction is not None else _custom_skips_disabled()
+                if enable and (_custom_skips_disabled() or has_custom):
                     for key in keys:
                         disabled.discard(key)
                     app_core.set_action_feedback(action_show, "Custom skips enabled.")
@@ -954,7 +1003,6 @@ def handle_action_menu_state(
                         "intervals": [],
                     }
                 try:
-                    app_core.restore_terminal()
                     spec = custom_skips.edit_skip_form(
                         title=get_show_display_title(action_show) if action_show else ms.show_title,
                         providers=provider_ids,
@@ -1006,7 +1054,10 @@ def handle_action_menu_state(
     )
 
     if idx in (-2, -3):
-        return ui.action_prev_state or "DETAILS"
+        previous = ui.action_prev_state or "DETAILS"
+        if should_clear_query_on_child_left(previous, len(ms.shows) <= 1):
+            ms.query_str = ""
+        return previous
 
     def _mark_ep_watched(target_ep, target_idx=None):
         if target_idx is None:
@@ -1522,7 +1573,7 @@ def handle_download_menu_state(
         )
         prefix = f"{p_name} • " if p_name else ""
         parts.append(
-            f"{C_K}{_truncate_display(prefix + 'Enter=select • Left/Esc=back', max(1, w - 1))}{R}"
+            f"{C_K}{_truncate_display(prefix + 'Enter=select • Esc=back', max(1, w - 1))}{R}"
         )
         res = "\n".join(parts)
         _dl_hdr_cache[cache_key] = res
@@ -1595,7 +1646,7 @@ def handle_download_menu_state(
                     local_only=getattr(ms, "_is_downloads", False),
                 )
             parts.append(
-                f"{C_K}{_truncate_display('Space/Tab=Toggle • Enter=Download • Left/Esc=Cancel', max(1, w - 1))}{R}"
+                f"{C_K}{_truncate_display('Space/Tab=Toggle • Enter=Download • Esc=Cancel', max(1, w - 1))}{R}"
             )
             res = "\n".join(parts)
             _pick_hdr_cache[cache_key] = res
@@ -1975,6 +2026,30 @@ def handle_mirrors_state(
         return out
 
     _live_deduped = []
+    initial_source_loading = BackgroundLoadingStatus(
+        LoadingTaskSpec(
+            "initial-sources", LoadingOwner("mirrors", 0), "Loading sources…",
+            LoadingInteraction.BACKGROUND, LoadingPlacement.FOOTER,
+            ActionBindings(()), delay=0,
+        ),
+        spinner_from_config(cfg),
+    )
+    counted_source_loading = BackgroundLoadingStatus(
+        LoadingTaskSpec(
+            "checking-sources", LoadingOwner("mirrors", 0), "Checking sources…",
+            LoadingInteraction.BACKGROUND, LoadingPlacement.FOOTER,
+            ActionBindings(()), delay=0,
+        ),
+        spinner_from_config(cfg),
+    )
+    torrent_search_loading = BackgroundLoadingStatus(
+        LoadingTaskSpec(
+            "torrent-search", LoadingOwner("mirrors", 0), "searching torrent mirrors...",
+            LoadingInteraction.BACKGROUND, LoadingPlacement.FOOTER,
+            ActionBindings(()), delay=0,
+        ),
+        spinner_from_config(cfg),
+    )
 
     def _mirror_refresh(q=""):
         nonlocal _live_deduped
@@ -1998,6 +2073,20 @@ def handle_mirrors_state(
             if torrent_alive and not resolver_alive:
                 status_msg = "searching torrent mirrors..."
 
+        initial_status = initial_source_loading.read(
+            alive and not torrent_alive and tot == 0 and (r + f) >= tot
+        )
+        counted_checking = alive and not torrent_alive and (r + f) < tot
+        counted_status = counted_source_loading.read(
+            counted_checking,
+            progress=LoadingProgress(r + f, tot) if counted_checking else None,
+        )
+        torrent_status = torrent_search_loading.read(
+            torrent_alive,
+            progress=LoadingProgress(r + f, tot)
+            if torrent_alive and resolver_alive and (r + f) < tot else None,
+        )
+
         C_D = "\033[38;5;248m"
         R = "\033[0m"
 
@@ -2014,28 +2103,21 @@ def handle_mirrors_state(
         )
 
         if torrent_alive:
-            from media_cli.ui.spinner import spinner_frame, spinner_from_config
-
-            spinner = spinner_frame(spinner_from_config(cfg))
+            spinner = torrent_status.indicator
             if resolver_alive and (r + f) < tot:
                 left_part = f"{spinner} {found_str} • checking ({r+f}/{tot})"
-                right_part = status_msg or "searching torrent mirrors..."
+                right_part = status_msg or torrent_status.message
             else:
                 left_part = f"{spinner} {found_str}"
-                right_part = "searching torrent mirrors..."
+                right_part = torrent_status.message
             plain_status = f"{left_part}  │  {right_part}"
         elif alive and (r + f) < tot:
-            from media_cli.ui.spinner import spinner_frame, spinner_from_config
-
-            spinner = spinner_frame(spinner_from_config(cfg))
+            spinner = counted_status.indicator
             left_part = f"{spinner} {found_str} • checking ({r+f}/{tot})"
             right_part = status_msg or "checking sources..."
             plain_status = f"{left_part}  │  {right_part}"
         elif alive and tot == 0:
-            from media_cli.ui.spinner import spinner_frame, spinner_from_config
-
-            spinner = spinner_frame(spinner_from_config(cfg))
-            plain_status = f"{spinner} Loading sources…"
+            plain_status = f"{initial_status.indicator} {initial_status.message}"
         else:
             sources_checked = tot if tot > 0 else (r + f)
             src_str = (
@@ -2141,18 +2223,23 @@ def handle_mirrors_state(
     )
     ui.pref_toast = ""
 
-    midx = tui_pick(
-        flags,
-        ui,
-        "Select mirror",
-        init_opts,
-        header=init_hdr,
-        live_fn=_mirror_refresh,
-        tab_fn=_tab_pref,
-        reverse_fn=_mirror_force_refresh,
-        info_fn=app_core.make_single_show_info_fn(ui.ui_show_ctx, ui),
-        help_dict=hd8,
-    )
+    try:
+        midx = tui_pick(
+            flags,
+            ui,
+            "Select mirror",
+            init_opts,
+            header=init_hdr,
+            live_fn=_mirror_refresh,
+            tab_fn=_tab_pref,
+            reverse_fn=_mirror_force_refresh,
+            info_fn=app_core.make_single_show_info_fn(ui.ui_show_ctx, ui),
+            help_dict=hd8,
+        )
+    finally:
+        initial_source_loading.read(False)
+        counted_source_loading.read(False)
+        torrent_search_loading.read(False)
 
     if midx in (-2, -3):
         return "DETAILS"

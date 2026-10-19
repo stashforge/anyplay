@@ -765,6 +765,7 @@ def patch_history_entry_show(show_id, ttype, updated_show):
         "description", "genres", "banner", "format",
         "_next_airing_ep", "_next_airing_time", "_next_airing_at",
         "_anilist_score", "_anilist_status", "anilistMatch", "_title_enriched",
+        "_metadata_fields_loaded",
     }
     for entry in history:
         if ttype is None or entry.get("translation_type", "sub") == ttype:
@@ -812,6 +813,7 @@ def patch_history_entry_state(updated_entry):
         "_next_airing_ep", "_next_airing_time", "_next_airing_at",
         "_anilist_score", "_anilist_status", "_anilist_episode_count",
         "anilistMatch", "_title_enriched", "_anilist_search_checked",
+        "_metadata_fields_loaded",
     }
     for entry in history:
         if entry.get("translation_type", "sub") != ttype:

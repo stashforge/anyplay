@@ -486,6 +486,299 @@ def _local_stream_for_episode(show_ctx, show_title, episode, ttype, cfg, ms):
     return None
 
 
+def _lookup_player_sources(
+    data: dict | None, show: dict | None, episode_id: object, ttype: str,
+    *, poster_manager=None, ui=None,
+) -> dict | None:
+    from copy import deepcopy
+    from threading import Event
+
+    from ..ui.player_screen import run_loading_work
+
+    episode_data, title = deepcopy(data), deepcopy(show)
+    retired = Event()
+
+    def lookup():
+        return playback_mod._augment_episode_sources_with_torrents(
+            episode_data, title, episode_id, ttype, cancel_check=retired.is_set,
+        )
+
+    try:
+        return run_loading_work(lookup, poster_manager=poster_manager, ui=ui)
+    finally:
+        # Abandoned work may finish, but cannot change the caller's cache/show.
+        retired.set()
+
+
+def _wait_for_player_streams(
+    data: dict | None, key: tuple, *, download: bool = False, poster_manager=None, ui=None,
+) -> list:
+    from copy import deepcopy
+    from threading import Event
+
+    from ..ui.player_screen import run_loading_work
+
+    episode_data = deepcopy(data)
+    retired = Event()
+
+    def wait_for_streams():
+        deadline = time.monotonic() + 5
+        while not retired.is_set() and time.monotonic() < deadline:
+            ready = app_core._stream_snapshot(*key, episode_data)
+            if ready:
+                return ready
+            retired.wait(0.15)
+        return []
+
+    try:
+        if download:
+            return wait_for_streams()
+        return run_loading_work(wait_for_streams, poster_manager=poster_manager, ui=ui)
+    finally:
+        retired.set()
+
+
+def _probe_player_mirrors(
+    candidates: tuple[dict, ...], key: tuple, *, download: bool = False, poster_manager=None, ui=None,
+    recovery: bool = False,
+) -> dict | None:
+    from copy import deepcopy
+    from threading import Event
+
+    from ..ui.player_screen import run_loading_work
+
+    snapshot = deepcopy(candidates)
+    retired = Event()
+
+    def probe() -> tuple[int | None, float | None, tuple]:
+        now = time.time()
+        dead_links = []
+        for index, candidate in enumerate(snapshot if recovery else snapshot[:3]):
+            if retired.is_set():
+                return None, None, ()
+            if not recovery and now - float(candidate.get("validated_at") or 0) < 30:
+                return index, None, tuple(dead_links)
+            if app_core.ping_stream_liveness(candidate, timeout=0.8):
+                return index, None if recovery else now, tuple(dead_links)
+            if not recovery:
+                dead_links.append(candidate.get("link") or candidate.get("streamUrl"))
+        return (0 if snapshot else None), None, tuple(dead_links)
+
+    try:
+        if download:
+            selected, validated_at, dead_links = probe()
+        else:
+            selected, validated_at, dead_links = run_loading_work(
+                probe, poster_manager=poster_manager, ui=ui,
+            )
+    finally:
+        retired.set()
+    for link in dead_links:
+        app_core._prune_dead_stream(key, link)
+    if selected is None:
+        return None
+    candidate = candidates[selected]
+    if validated_at is not None:
+        candidate["validated_at"] = validated_at
+    return candidate
+
+
+def _fetch_player_fallback(
+    data: dict | None, key: tuple, *, download: bool = False, poster_manager=None, ui=None,
+    exclude_sources: frozenset[str] = frozenset(),
+):
+    from copy import deepcopy
+    from threading import Event
+
+    from ..ui.player_screen import run_loading_work
+
+    if download:
+        return app_core.fetch_episode_stream(
+            *key[:3], key[4], provider_id=key[3], ep_data=data, exclude_sources=exclude_sources,
+        )
+    episode_data = deepcopy(data)
+    excluded = frozenset(exclude_sources)
+    retired = Event()
+
+    def fetch():
+        return app_core.fetch_episode_stream(
+            *key[:3], key[4], provider_id=key[3], ep_data=episode_data, cancel_check=retired.is_set,
+            exclude_sources=excluded,
+        )
+
+    try:
+        return run_loading_work(fetch, poster_manager=poster_manager, ui=ui)
+    finally:
+        retired.set()
+
+
+def _load_player_cached_streams(data: dict | None, key: tuple, *, poster_manager=None, ui=None):
+    from copy import deepcopy
+    from threading import Event
+
+    from ..ui.player_screen import run_loading_work
+
+    episode_data = deepcopy(data)
+    retired = Event()
+
+    def load():
+        return app_core._stream_snapshot(*key, episode_data, cancel_check=retired.is_set)
+
+    try:
+        return run_loading_work(load, poster_manager=poster_manager, ui=ui)
+    finally:
+        retired.set()
+
+
+def _load_player_mal_id(show: dict | None, *, poster_manager=None, ui=None) -> int | None:
+    from copy import deepcopy
+    from threading import Event
+
+    from ..ui.player_screen import run_loading_work
+    from ..ui.transition import PreparationCancelled
+
+    known = app_core.get_show_mal_id(show, fetch_missing=False)
+    anilist_id = app_core.get_show_anilist_id(show)
+    if known is not None or not anilist_id or show is None:
+        return known
+    identity = (show.get("_id"), title_provider_key(show), anilist_id)
+    active_show = getattr(ui, "ui_show_ctx", show)
+    draft = deepcopy(show)
+    retired = Event()
+
+    def lookup():
+        if retired.is_set():
+            return None
+        return app_core.get_show_mal_id(draft)
+
+    try:
+        resolved = run_loading_work(lookup, poster_manager=poster_manager, ui=ui)
+    finally:
+        retired.set()
+    current_identity = (show.get("_id"), title_provider_key(show), app_core.get_show_anilist_id(show))
+    if current_identity != identity or getattr(ui, "ui_show_ctx", show) is not active_show:
+        raise PreparationCancelled
+    current = app_core.get_show_mal_id(show, fetch_missing=False)
+    if current is not None:
+        return current
+    if resolved is not None:
+        show["malId"] = resolved
+    return resolved
+
+
+def _load_player_skips(mal_id: int, episode: int, future=None, *, poster_manager=None, ui=None):
+    from ..media.aniskip import fetch_skip_times
+    from ..ui.player_screen import run_loading_work
+
+    def load():
+        if future is not None:
+            try:
+                return future.result(timeout=4.0)
+            except Exception:
+                return []
+        return fetch_skip_times(mal_id, episode)
+
+    return run_loading_work(load, poster_manager=poster_manager, ui=ui)
+
+
+def _select_android_player(chosen: str | None, *, poster_manager=None, ui=None) -> str:
+    if chosen:
+        return "rex" if chosen == "mpvrex" else chosen
+
+    from threading import Event
+
+    from ..ui.player_screen import run_loading_work
+    from ..ui.transition import PreparationCancelled
+
+    retired = Event()
+
+    def installed(package):
+        if retired.is_set():
+            raise PreparationCancelled
+        result = app_core.pkg_installed(package)
+        if retired.is_set():
+            raise PreparationCancelled
+        return result
+
+    def detect():
+        if installed("app.gyrolet.mpvrx") and not installed("is.xyz.mpv"):
+            return "mpvrx"
+        if installed("xyz.mpv.rex") and not installed("is.xyz.mpv"):
+            return "rex"
+        return "mpv"
+
+    try:
+        return run_loading_work(detect, poster_manager=poster_manager, ui=ui)
+    finally:
+        retired.set()
+
+
+def _wait_for_android_start(stream_name: str, res_str: str, *, poster_manager=None, ui=None) -> None:
+    from threading import Event
+
+    from ..core.terminal import sanitize_terminal_text
+    from ..ui.actions import ActionBindings, ResolvedAction
+    from ..ui.loading_model import LoadingInteraction, LoadingOwner, LoadingPlacement, LoadingTaskSpec
+    from ..ui.message_choices import MAX_MESSAGE_LENGTH
+    from ..ui.player_screen import run_loading_work
+    from ..ui.transition import set_preparation_status
+    from ..ui.view_model import ViewAction
+
+    prefix = sanitize_terminal_text(f"Starting '{stream_name}'{res_str}")
+    budget = MAX_MESSAGE_LENGTH - len(" in 3s...")
+    if len(prefix) > budget:
+        prefix = prefix[:budget - 3] + "..."
+    messages = tuple(f"{prefix} in {second}s..." for second in (3, 2, 1))
+    retired = Event()
+
+    def countdown():
+        for message in messages:
+            if retired.is_set():
+                return
+            set_preparation_status(message)
+            if retired.wait(1):
+                return
+
+    task = LoadingTaskSpec(
+        "player-countdown", LoadingOwner("player", 0), messages[0],
+        LoadingInteraction.BLOCKING, LoadingPlacement.PLAYER_STATUS,
+        ActionBindings((ResolvedAction(ViewAction("back", "Cancel", ("q", "Q", "ESC"))),)), delay=0,
+    )
+    try:
+        run_loading_work(countdown, poster_manager=poster_manager, ui=ui, task=task)
+    finally:
+        retired.set()
+
+
+def _android_skip_hint_choice(flags: CliFlags) -> str:
+    from ..ui.player_screen import prompt_input_scope
+
+    with prompt_input_scope():
+        interactive = not getattr(flags, "plain_mode", False) and sys.stdin.isatty()
+        if interactive:
+            sys.stdout.write("\033[?1049h\033[2J\033[H\033[?25h")
+            sys.stdout.flush()
+        try:
+            print("\033[1;36mAniSkip on Android (MPV)\033[0m\n")
+            print("  \033[38;5;250m• Auto-skip is not supported via Android intents.\033[0m")
+            print("  \033[38;5;250m• To view chapter marks on the seekbar, add this line to /storage/emulated/0/Mpv/mpv.conf:\033[0m")
+            print("    \033[1;33mchapters-file=/storage/emulated/0/Mpv/chapters.txt\033[0m\n")
+            try:
+                return input("\033[1;97m[y = Don't show again, n = Disable AniSkip, s = Skip for now] (s): \033[0m").strip().lower()
+            except EOFError:
+                return "s"
+        finally:
+            if interactive:
+                sys.stdout.write("\033[2J\033[H\033[?25l")
+                sys.stdout.flush()
+
+
+def _pending_skip_validation_status(*, android: bool) -> str:
+    if not android:
+        return "Awaiting video duration to validate skip times"
+    return "Skip times ready; duration not checked"
+
+
 def handle_play_state(
     flags: CliFlags,
     ui: UiState,
@@ -498,11 +791,26 @@ def handle_play_state(
 ) -> str:
     s_ctx = ui.ui_show_ctx
     sync_enabled = resolve_tracking_fn(ui.search_prev_state, args, cfg, s_ctx)
-    app_core.prepare_show_display_state(s_ctx, ttype, sync_enabled)
+    from copy import deepcopy
+    from ..ui.transition import PreparationCancelled
+    from .details_preparation import PreparedDetails, commit_details_transition
+
+    original = deepcopy(s_ctx)
+    def prepare_entry():
+        show = deepcopy(original)
+        app_core.prepare_show_display_state(show, ttype, sync_enabled)
+        ids = app_core.ensure_episode_ids(show, ttype)
+        return PreparedDetails(show, tuple(str(ep) for ep in ids), original)
+
+    try:
+        prepared = app_core.with_loading("Preparing playback…", prepare_entry)
+    except PreparationCancelled:
+        return "DETAILS"
+    commit_details_transition(s_ctx, prepared)
     ms.show_title = get_show_display_title(s_ctx, sync_enabled=sync_enabled)
     ms.show_id = s_ctx.get("_id")
     al_id = app_core.get_show_anilist_id(s_ctx)
-    episode_ids = app_core.ensure_episode_ids(s_ctx, ttype)
+    episode_ids = prepared.episode_ids
 
     if not episode_ids:
         app_core._exit_player_screen()
@@ -553,11 +861,16 @@ def handle_play_state(
         provider_id = title_provider_key(ui.ui_show_ctx)
         p_name = (ui.ui_show_ctx.get("_provider_name") or ui.ui_show_ctx.get("provider_name") or provider_id).title()
 
-        def _with_torrent_sources(data):
+        def _with_torrent_sources(data, *, shared_loading=False):
             if is_download_mode or app_core.is_termux():
                 return data
             if str(provider_id or "").lower() == "torrent" or str((ui.ui_show_ctx or {}).get("_provider") or "").lower() == "torrent":
                 return data
+            if shared_loading:
+                return _lookup_player_sources(
+                    data, ui.ui_show_ctx, ms.current_ep, ttype,
+                    poster_manager=getattr(app_core, "_poster_manager", None), ui=ui,
+                )
             try:
                 from ..ui.player_screen import loading_cancel_requested
                 cancel_check = loading_cancel_requested
@@ -588,6 +901,17 @@ def handle_play_state(
         aniskip_future = None
         _skip_pool = None
         _cache_key = (ms.show_id, ms.current_ep, ttype, provider_id)
+        mal_id_loaded = False
+        playback_mal_id: int | None = None
+
+        def load_mal_id() -> int | None:
+            nonlocal mal_id_loaded, playback_mal_id
+            if not mal_id_loaded:
+                playback_mal_id = _load_player_mal_id(
+                    ui.ui_show_ctx, poster_manager=getattr(app_core, "_poster_manager", None), ui=ui,
+                )
+                mal_id_loaded = True
+            return playback_mal_id
 
         if is_prefetched:
             res = _ipc_player.prefetched_res
@@ -604,15 +928,8 @@ def handle_play_state(
                 _player_ui_state["loading_provider_name"] = p_name
                 _player_ui_state["loading_start_time"] = time.time()
 
-                try:
-                    from ..ui.player_screen import reset_loading_cancel, start_loading_ticker
-                    reset_loading_cancel()
-                    start_loading_ticker(
-                        poster_manager=getattr(app_core, "_poster_manager", None),
-                        ui=ui,
-                    )
-                except ImportError:
-                    pass
+                from ..ui.player_screen import reset_loading_cancel
+                reset_loading_cancel()
 
             aniskip_enabled = getattr(args, "aniskip", None)
             if aniskip_enabled is None:
@@ -620,31 +937,54 @@ def handle_play_state(
 
             if aniskip_enabled and not is_download_mode:
                 action_show = ui.ui_show_ctx or {}
-                mal_id = app_core.get_show_mal_id(action_show)
+                try:
+                    mal_id = load_mal_id()
+                except PreparationCancelled:
+                    app_core._exit_player_screen()
+                    app_core.set_action_feedback(ui.ui_show_ctx, "Loading cancelled.")
+                    return "DETAILS"
                 ep_num = episode_progress_number(ms.current_ep)
                 if mal_id:
-                    from concurrent.futures import ThreadPoolExecutor
+                    from ..core.workers import DaemonExecutor
 
                     from ..media.aniskip import fetch_skip_times
-                    _skip_pool = ThreadPoolExecutor(max_workers=1)
+                    _skip_pool = DaemonExecutor(max_workers=1)
                     aniskip_future = _skip_pool.submit(fetch_skip_times, mal_id, ep_num)
 
             if getattr(ms, "_is_downloads", False) and not is_download_mode:
                 ep_data = {"is_local": True}
             elif _cache_key == ms.ep_cache_key and ms.ep_cache_data:
-                ep_data = _with_torrent_sources(ms.ep_cache_data)
-                ms.ep_cache_data = ep_data
+                try:
+                    ep_data = _with_torrent_sources(ms.ep_cache_data, shared_loading=True)
+                except PreparationCancelled:
+                    from ..ui.player_screen import request_loading_cancel
+                    request_loading_cancel()
+                else:
+                    ms.ep_cache_data = ep_data
             else:
-                app_core.info(f"[{p_name}] Requesting {playback_mod._fmt_ep(current_ep_label)} metadata...")
-                ep_data = app_core.get_episode_data(
-                    ms.show_id,
-                    ms.current_ep,
-                    ttype,
-                    provider_id=provider_id,
-                )
-                ep_data = _with_torrent_sources(ep_data)
-                ms.ep_cache_key  = _cache_key
-                ms.ep_cache_data = ep_data
+                show_id, episode_id = ms.show_id, ms.current_ep
+
+                def fetch_episode():
+                    app_core.info(f"[{p_name}] Requesting {playback_mod._fmt_ep(current_ep_label)} metadata...")
+                    return app_core.get_episode_data(
+                        show_id, episode_id, ttype, provider_id=provider_id,
+                    )
+
+                try:
+                    if is_download_mode:
+                        ep_data = fetch_episode()
+                    else:
+                        from ..ui.player_screen import run_loading_work
+                        ep_data = run_loading_work(
+                            fetch_episode, poster_manager=getattr(app_core, "_poster_manager", None), ui=ui,
+                        )
+                    ep_data = _with_torrent_sources(ep_data, shared_loading=True)
+                except PreparationCancelled:
+                    from ..ui.player_screen import request_loading_cancel
+                    request_loading_cancel()
+                else:
+                    ms.ep_cache_key = _cache_key
+                    ms.ep_cache_data = ep_data
 
             try:
                 from ..ui.player_screen import loading_cancel_requested
@@ -702,30 +1042,33 @@ def handle_play_state(
                     cur_key = (ms.show_id, ms.current_ep, ttype, provider_id, target_quality)
                     cached_ep_data = app_core._get_cached_ep_data(cur_key)
 
-                    # Start background resolver to populate cache if not already running
-                    if not cached_ep_data:
-                        cached_ep_data = app_core.get_episode_data(ms.show_id, ms.current_ep, ttype, provider_id=provider_id)
-                    cached_ep_data = _with_torrent_sources(cached_ep_data)
+                    try:
+                        if not cached_ep_data:
+                            def fetch_resolver_episode(key=cur_key):
+                                return app_core.get_episode_data(key[0], key[1], key[2], provider_id=key[3])
 
-                    # Start background resolver to populate cache
-                    streams_mod.start_bg_resolve(cached_ep_data, set(), ms.show_id, ms.current_ep, ttype, provider_id, target_quality)
+                            if is_download_mode:
+                                cached_ep_data = fetch_resolver_episode()
+                            else:
+                                from ..ui.player_screen import run_loading_work
+                                cached_ep_data = run_loading_work(
+                                    fetch_resolver_episode,
+                                    poster_manager=getattr(app_core, "_poster_manager", None), ui=ui,
+                                )
+                        cached_ep_data = _with_torrent_sources(cached_ep_data, shared_loading=True)
 
-                    # Wait for background resolver to populate some streams
-                    import time as _time
-                    wait_start = _time.time()
-                    while _time.time() - wait_start < 5:  # Max 5 seconds wait
-                        try:
-                            from ..ui.player_screen import loading_cancel_requested
-                            if loading_cancel_requested():
-                                app_core._exit_player_screen()
-                                app_core.set_action_feedback(ui.ui_show_ctx, "Loading cancelled.")
-                                return "DETAILS"
-                        except Exception:
-                            pass
-                        cached_streams = app_core._stream_snapshot(ms.show_id, ms.current_ep, ttype, provider_id, target_quality, cached_ep_data)
-                        if cached_streams:
-                            break
-                        _time.sleep(0.15)
+                        # Only accepted preparation results may start resolution.
+                        streams_mod.start_bg_resolve(cached_ep_data, set(), ms.show_id, ms.current_ep, ttype, provider_id, target_quality)
+                        cached_streams = _wait_for_player_streams(
+                            cached_ep_data, cur_key, download=is_download_mode,
+                            poster_manager=getattr(app_core, "_poster_manager", None), ui=ui,
+                        )
+                    except PreparationCancelled:
+                        if _skip_pool:
+                            _skip_pool.shutdown(wait=False)
+                        app_core._exit_player_screen()
+                        app_core.set_action_feedback(ui.ui_show_ctx, "Loading cancelled.")
+                        return "DETAILS"
 
                     res = None
 
@@ -797,23 +1140,17 @@ def handle_play_state(
                                 if s not in candidates:
                                     candidates.append(s)
 
-                            # Bounded pre-flight check (Max 3 candidate probes)
-                            selected = None
-                            now = time.time()
-                            for cand in candidates[:3]:
-                                validated_at = float(cand.get("validated_at") or 0)
-                                if (now - validated_at) < 30:
-                                    selected = cand
-                                    break
-                                if app_core.ping_stream_liveness(cand, timeout=0.8):
-                                    cand["validated_at"] = now
-                                    selected = cand
-                                    break
-                                else:
-                                    app_core._prune_dead_stream(cur_key, cand.get("link") or cand.get("streamUrl"))
-
-                            if not selected and candidates:
-                                selected = candidates[0]
+                            try:
+                                selected = _probe_player_mirrors(
+                                    tuple(candidates), cur_key, download=is_download_mode,
+                                    poster_manager=getattr(app_core, "_poster_manager", None), ui=ui,
+                                )
+                            except PreparationCancelled:
+                                if _skip_pool:
+                                    _skip_pool.shutdown(wait=False)
+                                app_core._exit_player_screen()
+                                app_core.set_action_feedback(ui.ui_show_ctx, "Loading cancelled.")
+                                return "DETAILS"
 
                             if selected:
                                 src_name = selected.get("source_name", "Stream")
@@ -841,14 +1178,18 @@ def handle_play_state(
 
                     # Fallback: fetch episode stream if no cached stream was selected or no cached streams available
                     if res is None:
-                        res = app_core.fetch_episode_stream(
-                            ms.show_id,
-                            ms.current_ep,
-                            ttype,
-                            cfg.get("quality", "best"),
-                            provider_id=provider_id,
-                            ep_data=ep_data,
-                        )
+                        try:
+                            res = _fetch_player_fallback(
+                                ep_data, (ms.show_id, ms.current_ep, ttype, provider_id, cfg.get("quality", "best")),
+                                download=is_download_mode,
+                                poster_manager=getattr(app_core, "_poster_manager", None), ui=ui,
+                            )
+                        except PreparationCancelled:
+                            if _skip_pool:
+                                _skip_pool.shutdown(wait=False)
+                            app_core._exit_player_screen()
+                            app_core.set_action_feedback(ui.ui_show_ctx, "Loading cancelled.")
+                            return "DETAILS"
                         if ep_data:
                             app_core._set_cached_ep_data(ep_data, (ms.show_id, ms.current_ep, ttype, provider_id, target_quality))
 
@@ -866,7 +1207,14 @@ def handle_play_state(
 
             if aniskip_enabled:
                 action_show = ui.ui_show_ctx or {}
-                mal_id = app_core.get_show_mal_id(action_show)
+                try:
+                    mal_id = load_mal_id()
+                except PreparationCancelled:
+                    if _skip_pool:
+                        _skip_pool.shutdown(wait=False)
+                    app_core._exit_player_screen()
+                    app_core.set_action_feedback(ui.ui_show_ctx, "Loading cancelled.")
+                    return "DETAILS"
                 ep_num = episode_progress_number(ms.current_ep)
                 from ..media import custom_skips as custom_skip_mod
                 custom_skip = None
@@ -889,24 +1237,27 @@ def handle_play_state(
                     skip_summary = " · ".join(skip_parts)
                     skip_msg = f"\033[38;5;120m✔ Custom Skips ({custom_skip['mode']}): {skip_summary}\033[0m"
                 elif mal_id:
-                    if aniskip_future is not None:
-                        try:
-                            skips = aniskip_future.result(timeout=4.0)
-                        except Exception:
-                            skips = []
+                    try:
+                        skips = _load_player_skips(
+                            mal_id, ep_num, aniskip_future,
+                            poster_manager=getattr(app_core, "_poster_manager", None), ui=ui,
+                        )
+                    except PreparationCancelled:
+                        app_core._exit_player_screen()
+                        app_core.set_action_feedback(ui.ui_show_ctx, "Loading cancelled.")
+                        return "DETAILS"
+                    finally:
                         if _skip_pool:
                             try:
                                 _skip_pool.shutdown(wait=False)
                             except Exception:
                                 pass
-                    else:
-                        from ..media.aniskip import fetch_skip_times
-                        skips = fetch_skip_times(mal_id, ep_num)
                     if skips:
-                        from ..ui.player_screen import _fmt_time
-                        skip_parts = [f"{s['label']} ({_fmt_time(s['start'])} → {_fmt_time(s['end'])})" for s in skips]
-                        skip_summary = " · ".join(skip_parts)
-                        skip_msg = f"\033[38;5;120m✔ AniSkip: {skip_summary}\033[0m"
+                        # Desktop validates candidates; Android exports them as-is.
+                        skip_status = _pending_skip_validation_status(
+                            android=app_core.is_termux(),
+                        )
+                        skip_msg = f"\033[38;5;244m• AniSkip: {skip_status}\033[0m"
                     else:
                         skip_msg = f"\033[38;5;244m• AniSkip: No skip times found for EP {ep_num}\033[0m"
                 else:
@@ -924,38 +1275,13 @@ def handle_play_state(
 
             if app_core.is_termux() and aniskip_enabled:
                 if not cfg.get("aniskip_android_hint_dismissed", False) and not getattr(ui, "aniskip_android_hint_shown", False):
+                    try:
+                        choice = _android_skip_hint_choice(flags)
+                    except PreparationCancelled:
+                        app_core._exit_player_screen()
+                        app_core.set_action_feedback(ui.ui_show_ctx, "Loading cancelled.")
+                        return "DETAILS"
                     ui.aniskip_android_hint_shown = True
-                    try:
-                        from ..ui.player_screen import stop_loading_ticker
-                        stop_loading_ticker()
-                    except Exception:
-                        pass
-
-                    if not getattr(flags, "plain_mode", False) and sys.stdin.isatty():
-                        sys.stdout.write("\033[?1049h\033[2J\033[H\033[?25h")
-                        sys.stdout.flush()
-
-                    orig_termios = None
-                    try:
-                        if sys.stdin.isatty():
-                            import termios
-                            orig_termios = termios.tcgetattr(sys.stdin.fileno())
-                            from ..ui.display import _INITIAL_TERMIOS_ATTRS
-                            if _INITIAL_TERMIOS_ATTRS is not None:
-                                termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
-                                termios.tcsetattr(sys.stdin.fileno(), termios.TCSANOW, _INITIAL_TERMIOS_ATTRS)
-                    except Exception:
-                        pass
-
-                    print("\033[1;36mAniSkip on Android (MPV)\033[0m\n")
-                    print("  \033[38;5;250m• Auto-skip is not supported via Android intents.\033[0m")
-                    print("  \033[38;5;250m• To view chapter marks on the seekbar, add this line to /storage/emulated/0/Mpv/mpv.conf:\033[0m")
-                    print("    \033[1;33mchapters-file=/storage/emulated/0/Mpv/chapters.txt\033[0m\n")
-
-                    try:
-                        choice = input("\033[1;97m[y = Don't show again, n = Disable AniSkip, s = Skip for now] (s): \033[0m").strip().lower()
-                    except (EOFError, KeyboardInterrupt):
-                        choice = "s"
 
                     if choice in ("y", "yes"):
                         cfg["aniskip_android_hint_dismissed"] = True
@@ -967,31 +1293,21 @@ def handle_play_state(
                         app_core.save_config(cfg)
 
                     try:
-                        if sys.stdin.isatty() and orig_termios is not None:
-                            import termios
-                            termios.tcsetattr(sys.stdin.fileno(), termios.TCSANOW, orig_termios)
-                    except Exception:
-                        pass
-
-                    if not getattr(flags, "plain_mode", False) and sys.stdin.isatty():
-                        sys.stdout.write("\033[2J\033[H\033[?25l")
-                        sys.stdout.flush()
-                    try:
                         from ..ui.player_screen import render as _render
                         _render(poster_manager=getattr(app_core, "_poster_manager", None), ui=ui)
                     except Exception:
                         pass
 
                     if not is_download_mode:
-                        for sec in (3, 2, 1):
-                            _player_ui_state["countdown_message"] = f"\033[1;92m▶ Starting '{stream_name}'{res_str} in {sec}s ...\033[0m"
-                            try:
-                                from ..ui.player_screen import render as _render
-                                _render(poster_manager=getattr(app_core, "_poster_manager", None), ui=ui)
-                            except Exception:
-                                pass
-                            time.sleep(1)
-                        _player_ui_state["countdown_message"] = ""
+                        try:
+                            _wait_for_android_start(
+                                stream_name, res_str,
+                                poster_manager=getattr(app_core, "_poster_manager", None), ui=ui,
+                            )
+                        except PreparationCancelled:
+                            app_core._exit_player_screen()
+                            app_core.set_action_feedback(ui.ui_show_ctx, "Loading cancelled.")
+                            return "DETAILS"
 
 
         if getattr(args, "sources", False) and not ui.initial_sources_prompted:
@@ -1308,10 +1624,10 @@ def handle_play_state(
             return None
 
         if aniskip_enabled and mal_id:
-            from concurrent.futures import ThreadPoolExecutor
+            from ..core.workers import DaemonExecutor
 
             from ..media.aniskip import fetch_skip_times
-            with ThreadPoolExecutor(max_workers=2) as pool:
+            with DaemonExecutor(max_workers=2) as pool:
                 pool.submit(fetch_skip_times, mal_id, episode_progress_number(target_ep))
                 fut_stream = pool.submit(
                     app_core.fetch_episode_stream,
@@ -1335,29 +1651,27 @@ def handle_play_state(
     custom_skip_intervals = None
 
     if app_core.is_termux():
-        player = args.player or cfg.get("player")
-        if player == "mpvrex":
-            player = "rex"
-        if not player:
-            if app_core.pkg_installed("app.gyrolet.mpvrx") and not app_core.pkg_installed("is.xyz.mpv"):
-                player = "mpvrx"
-            elif app_core.pkg_installed("xyz.mpv.rex") and not app_core.pkg_installed("is.xyz.mpv"):
-                player = "rex"
-            else:
-                player = "mpv"
-        elif player == "mpv" and not args.player and not cfg.get("player"):
-            if not app_core.pkg_installed("is.xyz.mpv"):
-                if app_core.pkg_installed("app.gyrolet.mpvrx"):
-                    player = "mpvrx"
-                elif app_core.pkg_installed("xyz.mpv.rex"):
-                    player = "rex"
+        try:
+            player = _select_android_player(
+                args.player or cfg.get("player"),
+                poster_manager=getattr(app_core, "_poster_manager", None), ui=ui,
+            )
+        except PreparationCancelled:
+            app_core._exit_player_screen()
+            app_core.set_action_feedback(ui.ui_show_ctx, "Loading cancelled.")
+            return "DETAILS"
 
         aniskip_enabled = getattr(args, "aniskip", None)
         if aniskip_enabled is None:
             aniskip_enabled = cfg.get("aniskip", cfg.get("aniskip_enabled", True))
 
         action_show = ui.ui_show_ctx or {}
-        mal_id = app_core.get_show_mal_id(action_show)
+        try:
+            mal_id = load_mal_id()
+        except PreparationCancelled:
+            app_core._exit_player_screen()
+            app_core.set_action_feedback(ui.ui_show_ctx, "Loading cancelled.")
+            return "DETAILS"
         from ..media import custom_skips as custom_skip_mod
         custom_skip = None
         title_keys = custom_skip_mod.stable_title_keys(action_show, ms.show_id)
@@ -1374,6 +1688,13 @@ def handle_play_state(
 
         trigger_background_auto_download(action_show, ms.current_ep_index, episode_ids, ttype, cfg, ms, ms.selected_stream)
 
+        from ..playback.engine import (
+            _fetch_android_skip_times,
+            _launch_android_player,
+            _prepare_android_proxy,
+            _prepare_android_subtitles,
+        )
+
         result = app_core.play_android(
             ms.show_title,
             current_ep_label,
@@ -1389,6 +1710,10 @@ def handle_play_state(
             ttype=ttype,
             cfg=cfg,
             ep_index=ms.current_ep_index,
+            fetch_skip_times_fn=_fetch_android_skip_times,
+            prepare_subtitles_fn=_prepare_android_subtitles,
+            prepare_proxy_fn=_prepare_android_proxy,
+            launch_command_fn=_launch_android_player,
         )
 
         if first_source_name is not None and first_source_name != "Local File" and not getattr(ms, "_is_downloads", False):
@@ -1435,7 +1760,12 @@ def handle_play_state(
 
 
         action_show = ui.ui_show_ctx or {}
-        mal_id = app_core.get_show_mal_id(action_show)
+        try:
+            mal_id = load_mal_id()
+        except PreparationCancelled:
+            app_core._exit_player_screen()
+            app_core.set_action_feedback(ui.ui_show_ctx, "Loading cancelled.")
+            return "DETAILS"
         from ..media import custom_skips as custom_skip_mod
         custom_skip = custom_skip_mod.resolve_custom_skips(
             show=action_show,
@@ -1514,63 +1844,73 @@ def handle_play_state(
                 failed_mirrors.add(failed_stream.get("link") or failed_stream.get("streamUrl"))
             ms._failed_mirrors = failed_mirrors
 
-            cached_ep_data = app_core._get_cached_ep_data(cur_key)
-            cached_streams = app_core._stream_snapshot(ms.show_id, ms.current_ep, ttype, provider_id, quality, cached_ep_data)
-            remaining = [
-                s for s in cached_streams
-                if (s.get("link") or s.get("streamUrl")) not in failed_mirrors
-                and (s.get("source_name") or "") not in failed_mirrors
-                and (s.get("source_parent_name") or "") not in failed_mirrors
-            ]
-
+            from ..ui.player_screen import activate, reset_loading_cancel
+            app_core.enter_alt_screen()
+            activate(ui.ui_show_ctx, ms.current_ep, ms.total_eps)
+            _player_ui_state.update({
+                "ttype": ttype, "current_ep_label": current_ep_label,
+                "loading_provider_name": p_name, "loading_start_time": time.time(),
+            })
+            reset_loading_cancel()
             next_stream = None
-            if remaining:
-                from ..media.sources import quality_preference_key
-                target_quality = getattr(args, "quality", None) or cfg.get("quality", "best")
+            fallback_res = None
+            try:
+                cached_ep_data = app_core._get_cached_ep_data(cur_key)
+                cached_streams = _load_player_cached_streams(
+                    cached_ep_data, cur_key, poster_manager=getattr(app_core, "_poster_manager", None), ui=ui,
+                )
+                remaining = [
+                    s for s in cached_streams
+                    if (s.get("link") or s.get("streamUrl")) not in failed_mirrors
+                    and (s.get("source_name") or "") not in failed_mirrors
+                    and (s.get("source_parent_name") or "") not in failed_mirrors
+                ]
+                if remaining:
+                    from ..media.sources import quality_preference_key
+                    target_quality = getattr(args, "quality", None) or cfg.get("quality", "best")
 
-                def _failover_sort_key(s):
-                    sname = (s.get("source_name") or "").lower()
-                    res = s.get("resolution") or sname
-                    is_hard = "hardsub" in sname or "hard-sub" in sname or "hard sub" in sname
-                    is_soft = "softsub" in sname or "all sub" in sname or "multi sub" in sname
-                    is_donghua = str(provider_id or "").lower() in {"animexin", "lucifer", "animekhor"}
-                    if is_donghua:
-                        sub_rank = 0 if is_hard else (2 if is_soft else 1)
-                    else:
-                        sub_rank = 0 if is_soft else (2 if is_hard else 1)
-                    q_key = quality_preference_key(res, target_quality)
-                    return (
-                        streams_mod.torrent_fallback_sort_value(s),
-                        sub_rank,
-                        q_key,
-                        s.get("source_priority", 4),
-                        streams_mod.torrent_size_sort_value(s),
+                    def _failover_sort_key(s):
+                        sname = (s.get("source_name") or "").lower()
+                        res = s.get("resolution") or sname
+                        is_hard = "hardsub" in sname or "hard-sub" in sname or "hard sub" in sname
+                        is_soft = "softsub" in sname or "all sub" in sname or "multi sub" in sname
+                        is_donghua = str(provider_id or "").lower() in {"animexin", "lucifer", "animekhor"}
+                        if is_donghua:
+                            sub_rank = 0 if is_hard else (2 if is_soft else 1)
+                        else:
+                            sub_rank = 0 if is_soft else (2 if is_hard else 1)
+                        q_key = quality_preference_key(res, target_quality)
+                        return (
+                            streams_mod.torrent_fallback_sort_value(s),
+                            sub_rank,
+                            q_key,
+                            s.get("source_priority", 4),
+                            streams_mod.torrent_size_sort_value(s),
+                        )
+
+                    sorted_remaining = sorted(remaining, key=_failover_sort_key)
+                    next_stream = _probe_player_mirrors(
+                        tuple(sorted_remaining), cur_key, recovery=True,
+                        poster_manager=getattr(app_core, "_poster_manager", None), ui=ui,
                     )
 
-                sorted_remaining = sorted(remaining, key=_failover_sort_key)
-                for cand in sorted_remaining:
-                    if app_core.ping_stream_liveness(cand, timeout=0.8):
-                        next_stream = cand
-                        break
-                if not next_stream and sorted_remaining:
-                    next_stream = sorted_remaining[0]
-
-            # If no cached stream is viable, dynamically resolve the next mirror from the provider
-            if not next_stream:
-                if not ep_data:
-                    ep_data = app_core._get_cached_ep_data(cur_key)
-                fallback_res = app_core.fetch_episode_stream(
-                    ms.show_id,
-                    ms.current_ep,
-                    ttype,
-                    cfg.get("quality", "best"),
-                    provider_id=provider_id,
-                    exclude_sources=failed_mirrors,
-                    ep_data=ep_data,
-                )
-                if fallback_res:
-                    next_stream, fb_src_name, _, fb_streams = fallback_res
-                    app_core._extend_streams(fb_streams, key=cur_key)
+                if not next_stream:
+                    if not ep_data:
+                        ep_data = app_core._get_cached_ep_data(cur_key)
+                    fallback_res = _fetch_player_fallback(
+                        ep_data, (ms.show_id, ms.current_ep, ttype, provider_id, cfg.get("quality", "best")),
+                        exclude_sources=frozenset(failed_mirrors),
+                        poster_manager=getattr(app_core, "_poster_manager", None), ui=ui,
+                    )
+            except PreparationCancelled:
+                ms.selected_stream = None
+                app_core.set_action_feedback(ui.ui_show_ctx, "Loading cancelled.")
+                return "DETAILS"
+            finally:
+                app_core._exit_player_screen()
+            if fallback_res:
+                next_stream, fb_src_name, _, fb_streams = fallback_res
+                app_core._extend_streams(fb_streams, key=cur_key)
 
             if next_stream:
                 next_name = next_stream.get("source_name", "alternate mirror")

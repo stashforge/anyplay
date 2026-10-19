@@ -117,7 +117,8 @@ def get_show_anilist_id(show):
         return None
 
 
-def get_show_mal_id(show):
+def get_show_mal_id(show, *, fetch_missing: bool = True) -> int | None:
+    """Read a MAL ID, optionally resolving a missing one through AniList."""
     if not isinstance(show, dict):
         return None
     try:
@@ -128,6 +129,8 @@ def get_show_mal_id(show):
         match = show.get("anilistMatch")
         if isinstance(match, dict) and match.get("idMal"):
             return int(match["idMal"])
+        if not fetch_missing:
+            return None
         al_id = get_show_anilist_id(show)
         if al_id:
             results = fetch_anilist_by_ids("", anilist_ids=[int(al_id)])

@@ -43,7 +43,7 @@ def build_command_parser(search_provider=None):
         formatter_class=CommandHelpFormatter,
     ))
     _set_cli_defaults(parser)
-    commands = parser.add_subparsers(dest="command", metavar="<command>", title="Main commands")
+    commands = parser.add_subparsers(dest="command", prog=APP_NAME, metavar="<command>", title="Main commands")
     global_options = parser.add_argument_group("Global options")
     global_options.add_argument(
         "-h", "--help", action="help", help="Show this help message and exit"

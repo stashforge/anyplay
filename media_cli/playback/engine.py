@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import atexit
 import os
+import subprocess
 import sys
+from contextlib import contextmanager
 from typing import Callable
 
 from ..core.reporting import err
@@ -18,11 +20,6 @@ from ..ui.player_screen import _player_ui_state
 
 
 def _exit_player_screen(close_alt: bool = False) -> None:
-    try:
-        from media_cli.ui.player_screen import stop_loading_ticker
-        stop_loading_ticker()
-    except Exception:
-        pass
     try:
         from media_cli.ui.picker import invalidate_screen_buffer
         invalidate_screen_buffer()
@@ -115,6 +112,232 @@ def is_termux() -> bool:
             or os.path.exists("/data/data/com.termux"))
 
 
+def _prepare_owned_playback_resource(prepare, release):
+    from threading import Event, Lock
+
+    from ..ui.player_screen import run_loading_work
+
+    retired = Event()
+    lock = Lock()
+    pending = None
+
+    def work():
+        nonlocal pending
+        resource = prepare(retired.is_set)
+        with lock:
+            abandoned = retired.is_set()
+            if not abandoned:
+                pending = resource
+        if abandoned:
+            release(resource)
+        return resource
+
+    try:
+        result = run_loading_work(work)
+        with lock:
+            pending = None
+        return result
+    finally:
+        with lock:
+            retired.set()
+            unclaimed = pending
+            pending = None
+        if unclaimed is not None:
+            release(unclaimed)
+
+
+def _prepare_torrent_for_playback(stream: dict, *, progress_callback=None, cancel_check=None):
+    from copy import deepcopy
+
+    from ..core.reporting import progress
+    from ..torrents.runtime import TorrentCancelled, prepare_torrent_stream
+    from ..ui.transition import PreparationCancelled
+
+    if cancel_check and cancel_check():
+        raise TorrentCancelled("Torrent loading cancelled.")
+    snapshot = deepcopy(stream)
+    try:
+        return _prepare_owned_playback_resource(
+            lambda cancelled: prepare_torrent_stream(snapshot, progress_callback=progress, cancel_check=cancelled),
+            lambda resource: resource.close(),
+        )
+    except PreparationCancelled as exc:
+        raise TorrentCancelled("Torrent loading cancelled.") from exc
+
+
+def _prepare_proxy_for_playback(url, referer, headers=None, **kwargs):
+    from copy import deepcopy
+
+    from ..media.local_proxy import start_local_proxy, stop_local_proxy
+    from ..ui.transition import PreparationCancelled
+
+    request_headers, options = deepcopy(headers), deepcopy(kwargs)
+    try:
+        return _prepare_owned_playback_resource(
+            lambda cancelled: start_local_proxy(url, referer, request_headers, **options),
+            lambda result: stop_local_proxy(result[1]),
+        )
+    except PreparationCancelled as exc:
+        raise desktop_playback.PlaybackPreparationCancelled from exc
+
+
+def _launch_android_player(command):
+    from threading import Event
+
+    from ..ui.actions import ActionAvailability, ActionBindings, ResolvedAction
+    from ..ui.loading_model import LoadingInteraction, LoadingOwner, LoadingPlacement, LoadingTaskSpec
+    from ..ui.player_screen import check_loading_handoff_input, playback_input_scope, run_loading_work
+    from ..ui.transition import PreparationCancelled
+    from ..ui.view_model import ViewAction
+    from .android import AndroidPreparationCancelled
+
+    task = LoadingTaskSpec(
+        "player-launch", LoadingOwner("player", 0), "Opening player...",
+        LoadingInteraction.BLOCKING, LoadingPlacement.PLAYER_STATUS,
+        ActionBindings((ResolvedAction(
+            ViewAction("back", "Cancel", ("q", "Q", "ESC")), ActionAvailability.BLOCKED,
+            "Already opening the player. Ctrl+C stops Anyplay.",
+        ),)), delay=0,
+    )
+    try:
+        with playback_input_scope():
+            check_loading_handoff_input()
+            # Dispatch is irreversible: only the owning thread may start it.
+            process = subprocess.Popen(
+                tuple(command), stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            waiting = Event()
+
+            def wait():
+                waiting.set()
+                stdout, stderr = process.communicate()
+                return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+
+            try:
+                return run_loading_work(wait, task=task)
+            finally:
+                try:
+                    if process.poll() is None:
+                        try:
+                            process.kill()
+                        except ProcessLookupError:
+                            pass
+                        process.wait(timeout=1)
+                finally:
+                    if not waiting.is_set():
+                        for pipe in (process.stdout, process.stderr):
+                            if pipe is not None:
+                                pipe.close()
+    except PreparationCancelled as exc:
+        raise AndroidPreparationCancelled from exc
+
+
+def _prepare_android_proxy(start, *args, **kwargs):
+    from copy import deepcopy
+
+    from ..media.local_proxy import stop_local_proxy
+    from ..ui.transition import PreparationCancelled
+    from .android import AndroidPreparationCancelled
+
+    arguments, options = deepcopy(args), deepcopy(kwargs)
+    try:
+        return _prepare_owned_playback_resource(
+            lambda cancelled: start(*arguments, **options),
+            lambda result: stop_local_proxy(result[1]),
+        )
+    except PreparationCancelled as exc:
+        raise AndroidPreparationCancelled from exc
+
+
+def _fetch_android_skip_times(mal_id, episode, *, episode_length):
+    from ..media.aniskip import fetch_skip_times
+    from ..ui.player_screen import run_loading_work
+    from ..ui.transition import PreparationCancelled
+    from .android import AndroidPreparationCancelled
+
+    try:
+        return run_loading_work(
+            lambda: fetch_skip_times(mal_id, episode, episode_length=episode_length)
+        )
+    except PreparationCancelled as exc:
+        raise AndroidPreparationCancelled from exc
+
+
+def _prepare_subtitles_for_playback(subtitles: list[dict], *, headers=None, referer=None, video_duration_s=0.0):
+    from copy import deepcopy
+    from threading import Event
+
+    from ..media.subtitle_scorer import filter_subtitles
+    from ..ui.player_screen import run_loading_work
+    from ..ui.transition import PreparationCancelled
+
+    items, request_headers = deepcopy(subtitles), deepcopy(headers)
+    retired = Event()
+
+    def prepare():
+        return filter_subtitles(
+            items, headers=request_headers, referer=referer,
+            video_duration_s=video_duration_s, cancel_check=retired.is_set,
+        )
+
+    try:
+        return run_loading_work(prepare)
+    except PreparationCancelled as exc:
+        raise desktop_playback.PlaybackPreparationCancelled from exc
+    finally:
+        retired.set()
+
+
+def _prepare_android_subtitles(subtitles: list[dict], *, headers=None, referer=None, video_duration_s=0.0):
+    from .android import AndroidPreparationCancelled
+
+    try:
+        return _prepare_subtitles_for_playback(
+            subtitles, headers=headers, referer=referer, video_duration_s=video_duration_s,
+        )
+    except desktop_playback.PlaybackPreparationCancelled as exc:
+        raise AndroidPreparationCancelled from exc
+
+
+def _start_player_for_playback(ipc_player):
+    from ..ui.transition import PreparationCancelled
+    from .mpv import MpvStartupCancelled
+
+    if ipc_player.process is not None and ipc_player.process.poll() is None and ipc_player.client is not None:
+        return
+
+    def prepare(cancelled):
+        candidate = MpvIpc()
+        try:
+            candidate.start(cancel_check=cancelled)
+            return candidate
+        except BaseException:
+            candidate.quit()
+            raise
+
+    try:
+        candidate = _prepare_owned_playback_resource(prepare, lambda player: player.quit())
+    except (PreparationCancelled, MpvStartupCancelled) as exc:
+        raise desktop_playback.PlaybackPreparationCancelled from exc
+    try:
+        ipc_player.adopt_startup(candidate)
+    finally:
+        candidate.quit()
+
+
+@contextmanager
+def _playback_input_scope():
+    from ..ui.player_screen import playback_input_scope
+    from ..ui.transition import PreparationCancelled
+
+    try:
+        with playback_input_scope() as managed:
+            yield managed
+    except PreparationCancelled as exc:
+        raise desktop_playback.PlaybackPreparationCancelled from exc
+
+
 def play_desktop(
     title: str,
     ep: str,
@@ -163,6 +386,11 @@ def play_desktop(
         start_time_override=start_time_override,
         torrent_progress_callback=_torrent_progress,
         cancel_check=cancel_check,
+        prepare_torrent_fn=_prepare_torrent_for_playback,
+        prepare_subtitles_fn=_prepare_subtitles_for_playback,
+        prepare_proxy_fn=_prepare_proxy_for_playback,
+        start_player_fn=_start_player_for_playback,
+        playback_input_scope=_playback_input_scope,
     )
 
 

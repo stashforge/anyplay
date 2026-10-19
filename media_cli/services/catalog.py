@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import logging
-from typing import Callable
+import threading
+from collections.abc import Callable
+from copy import deepcopy
+from dataclasses import dataclass, field
 
 from ..core.api import (
     ProviderDependencyError,
@@ -12,6 +16,7 @@ from ..core.api import (
 )
 from ..core.enrichment import enrich_show_if_missing
 from ..core.reporting import debug_warn, err
+from ..core.workers import DaemonExecutor
 from ..domain.episodes import (
     is_contiguous_legacy_catalog as _is_contiguous_legacy_catalog,
 )
@@ -231,68 +236,146 @@ def _use_download_catalog_if_better(
     return saved_ids
 
 
-import concurrent.futures
-import threading
+@dataclass(frozen=True)
+class PreparedEpisodeSelection:
+    """Detached selection data; discard it to cancel, or explicitly commit it."""
+
+    show: dict
+    episode_ids: tuple[str, ...]
+    _before: dict = field(repr=False, compare=False)
+    _ttype: str = field(repr=False)
+
+
+def _apply_snapshot_delta(show: dict, before: dict, after: dict) -> None:
+    """Merge changed leaves so unrelated concurrent metadata survives."""
+    for key in before.keys() - after.keys():
+        show.pop(key, None)
+    for key, value in after.items():
+        if key in before and before[key] == value:
+            continue
+        if isinstance(value, dict):
+            if not isinstance(show.get(key), dict):
+                show[key] = {}
+            previous = before.get(key)
+            _apply_snapshot_delta(show[key], previous if isinstance(previous, dict) else {}, value)
+        else:
+            show[key] = deepcopy(value)
+
+
+def commit_episode_selection(show: dict, result: PreparedEpisodeSelection) -> None:
+    """Apply an accepted result on the caller/UI thread, copying nested data."""
+    _apply_snapshot_delta(show, result._before, result.show)
+    snapshot = result.show
+    ttype = result._ttype
+    # A shared fetch may have started with a different caller's catalog. Apply
+    # the active catalog even when some values already matched that baseline.
+    for key in (
+        "_episode_ids", "_episode_ids_ttype", "_episode_catalog_state",
+        "_episode_catalog_error", "_episode_labels", "_episodes_map", "_episodes_by_number",
+    ):
+        if key in snapshot:
+            show[key] = deepcopy(snapshot[key])
+    if snapshot.get("_episode_catalog_state") == "loaded":
+        show.pop("_episode_catalog_error", None)
+    elif snapshot.get("_episode_catalog_state") == "unavailable" and "_episode_ids" not in snapshot:
+        show.pop("_episode_ids", None)
+    for key in (
+        "availableEpisodes", "_episode_ids_by_ttype",
+        "_episodes_map_by_ttype", "_episodes_by_number_by_ttype",
+    ):
+        values = snapshot.get(key)
+        if isinstance(values, dict) and ttype in values:
+            if not isinstance(show.get(key), dict):
+                show[key] = {}
+            show[key][ttype] = deepcopy(values[ttype])
+
+
+def prepare_episode_selection(show: dict, ttype: str) -> PreparedEpisodeSelection:
+    """Prepare without live mutation or terminal exit; commit only if accepted.
+
+    The frozen result owns a mutable, deeply detached show snapshot and immutable
+    episode IDs. Provider dependency errors propagate to the UI caller.
+    """
+    snapshot = deepcopy(show)
+    before = deepcopy(snapshot)
+    ids = _ensure_episode_ids(snapshot, ttype)
+    return PreparedEpisodeSelection(snapshot, tuple(ids), before, ttype)
+
 
 _in_flight_catalog_tasks: dict[tuple[str, str], concurrent.futures.Future] = {}
 _catalog_task_lock = threading.Lock()
-_catalog_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="CatalogFetch")
+_catalog_executor = DaemonExecutor(max_workers=4)
 
 
 def _perform_catalog_fetch(show: dict, ttype: str, status_cb: Callable[[str], None] | None = None, status_msg: str | None = None) -> list[str]:
     show_id = title_provider_id(show)
-    p_key = title_provider_key(show)
-    task_key = (f"{p_key}:{show_id}" if show_id else str(id(show)), ttype)
-    try:
-        if show_id:
-            if not show.get("_title_enriched") and not show.get("aniListId") and not show.get("_anilist_score"):
-                if callable(status_cb):
-                    status_cb("Loading title info…")
-                enrich_show_if_missing(show)
+    if show_id:
+        if not show.get("_title_enriched") and not show.get("aniListId") and not show.get("_anilist_score"):
             if callable(status_cb):
-                status_cb(status_msg or f"Loading {ttype.upper()} episodes…")
-            catalog = _provider_for_title(show).episode_catalog(show_id, ttype)
-        else:
-            catalog = {
-                "state": "unavailable",
-                "ids": [],
-                "error": "This title has no provider ID for episode lookup.",
-            }
+                status_cb("Loading title info…")
+            enrich_show_if_missing(show)
+        if callable(status_cb):
+            status_cb(status_msg or f"Loading {ttype.upper()} episodes…")
+        catalog = _provider_for_title(show).episode_catalog(show_id, ttype)
+    else:
+        catalog = {
+            "state": "unavailable",
+            "ids": [],
+            "error": "This title has no provider ID for episode lookup.",
+        }
 
-        if catalog.get("state") == "loaded":
-            show["_episode_catalog_state"] = "loaded"
-            show.pop("_episode_catalog_error", None)
-            ep_map = catalog.get("episodes_map")
-            if not ep_map and catalog.get("episodes_map_by_ttype"):
-                ep_map = catalog["episodes_map_by_ttype"].get(ttype)
-            num_map = catalog.get("by_number")
-            if not num_map and catalog.get("by_number_by_ttype"):
-                num_map = catalog["by_number_by_ttype"].get(ttype)
-            update_available_count_from_episode_ids(
-                show,
-                ttype,
-                catalog["ids"],
-                catalog.get("detail"),
-                catalog.get("labels"),
-                episodes_map=ep_map,
-                by_number=num_map,
-            )
-            return _use_download_catalog_if_better(show, ttype, catalog["ids"], catalog)
+    if catalog.get("state") == "loaded":
+        show["_episode_catalog_state"] = "loaded"
+        show.pop("_episode_catalog_error", None)
+        ep_map = catalog.get("episodes_map")
+        if not ep_map and catalog.get("episodes_map_by_ttype"):
+            ep_map = catalog["episodes_map_by_ttype"].get(ttype)
+        num_map = catalog.get("by_number")
+        if not num_map and catalog.get("by_number_by_ttype"):
+            num_map = catalog["by_number_by_ttype"].get(ttype)
+        update_available_count_from_episode_ids(
+            show,
+            ttype,
+            catalog["ids"],
+            catalog.get("detail"),
+            catalog.get("labels"),
+            episodes_map=ep_map,
+            by_number=num_map,
+        )
+        return _use_download_catalog_if_better(show, ttype, catalog["ids"], catalog)
+
+    show["_episode_ids_ttype"] = ttype
+    show["_episode_catalog_error"] = catalog.get("error", "No episodes available.")
+    show.pop("_episode_ids", None)
+    show["_episode_catalog_state"] = "unavailable"
+    return []
 
 
-        show["_episode_ids_ttype"] = ttype
-        show["_episode_catalog_error"] = catalog.get("error", "No episodes available.")
-        show.pop("_episode_ids", None)
-        show["_episode_catalog_state"] = "unavailable"
-        return []
-    except ProviderDependencyError as exc:
-        fatal_terminal_exit(str(exc))
-    finally:
-        with _catalog_task_lock:
+def _fetch_catalog_snapshot(show: dict, ttype: str, status_cb: Callable[[str], None] | None, status_msg: str | None) -> PreparedEpisodeSelection:
+    before = deepcopy(show)
+    ids = _perform_catalog_fetch(show, ttype, status_cb, status_msg)
+    return PreparedEpisodeSelection(show, tuple(ids), before, ttype)
+
+
+def _forget_catalog_task(task_key: tuple[str, str], future: concurrent.futures.Future) -> None:
+    with _catalog_task_lock:
+        if _in_flight_catalog_tasks.get(task_key) is future:
             _in_flight_catalog_tasks.pop(task_key, None)
 
 
 def ensure_episode_ids(show: dict, ttype: str, status_cb: Callable[[str], None] | None = None, status_msg: str | None = None) -> list[str]:
+    """Fetch and apply on this caller, retaining noninteractive terminal errors."""
+    try:
+        return _ensure_episode_ids(show, ttype, status_cb, status_msg)
+    except ProviderDependencyError as exc:
+        from ..ui.transition import in_preparation
+        if in_preparation():
+            raise
+        fatal_terminal_exit(str(exc))
+        raise
+
+
+def _ensure_episode_ids(show: dict, ttype: str, status_cb: Callable[[str], None] | None = None, status_msg: str | None = None) -> list[str]:
     if not show:
         return []
     cached_ttype = show.get("_episode_ids_ttype")
@@ -315,6 +398,8 @@ def ensure_episode_ids(show: dict, ttype: str, status_cb: Callable[[str], None] 
                 show["_episode_ids"] = list(cached_ids)
 
     if cached_ids:
+        _logger.debug("Episode catalog reused: provider=%s title=%s translation=%s episodes=%d",
+                      title_provider_key(show), title_provider_id(show), ttype, len(cached_ids))
         show["_episode_catalog_state"] = "loaded"
         update_available_count_from_episode_ids(show, ttype, cached_ids)
         return _use_download_catalog_if_better(show, ttype, cached_ids)
@@ -327,26 +412,34 @@ def ensure_episode_ids(show: dict, ttype: str, status_cb: Callable[[str], None] 
     p_key = title_provider_key(show)
     task_key = (f"{p_key}:{show_id}" if show_id else str(id(show)), ttype)
 
+    created = False
     with _catalog_task_lock:
         fut = _in_flight_catalog_tasks.get(task_key)
-        if fut is None:
-            fut = _catalog_executor.submit(_perform_catalog_fetch, show, ttype, status_cb, status_msg)
+        if fut is None or fut.done():
+            snapshot = deepcopy(show)
+            fut = _catalog_executor.submit(_fetch_catalog_snapshot, snapshot, ttype, status_cb, status_msg)
             _in_flight_catalog_tasks[task_key] = fut
+            created = True
+    # Register outside the lock: an already-finished future runs this inline.
+    if created:
+        fut.add_done_callback(lambda completed: _forget_catalog_task(task_key, completed))
 
     try:
-        return fut.result(timeout=30)
+        result = fut.result(timeout=30)
     except concurrent.futures.TimeoutError as exc:
         debug_warn(f"Catalog fetch timed out for {task_key}", exc)
         show["_episode_catalog_state"] = "unavailable"
         show["_episode_catalog_error"] = "Episode catalog lookup timed out."
         return []
-    except ProviderDependencyError as exc:
-        fatal_terminal_exit(str(exc))
+    except ProviderDependencyError:
+        raise
     except Exception as e:
         debug_warn(f"Catalog fetch failed for {task_key}", e)
         show["_episode_catalog_state"] = "unavailable"
         show["_episode_catalog_error"] = str(e)
         return []
+    commit_episode_selection(show, result)
+    return list(result.episode_ids)
 
 
 def check_translation_switch_capability(show: dict, current_ttype: str, target_ttype: str) -> tuple[bool, str]:

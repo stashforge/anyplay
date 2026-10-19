@@ -7,6 +7,8 @@ from __future__ import annotations
 import decimal
 import os
 import time
+from copy import deepcopy
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from media_cli import app_core
@@ -25,6 +27,8 @@ from ..domain.episodes import (
 from ..domain.titles import get_show_display_title
 from ..playback.rules import should_clear_query_on_child_left
 from ..ui.help import picker_help
+from ..ui.transition import PreparationCancelled
+from .details_preparation import PreparedDetails, commit_details_transition
 from .footer import context_footer
 
 # ---------------------------------------------------------------------------
@@ -32,6 +36,15 @@ from .footer import context_footer
 # ---------------------------------------------------------------------------
 _C_HINT = "\033[38;5;244m"
 _RST    = "\033[0m"
+
+
+@dataclass(frozen=True)
+class _PreparedDetailsState:
+    show: dict
+    episode_ids: tuple[str, ...]
+    ttype: str
+    use_anilist: bool = False
+    needs_manual_match: bool = False
 
 
 def handle_details_state(
@@ -48,116 +61,132 @@ def handle_details_state(
     has_provider_link = bool((s.get("_provider") or s.get("provider")) and s.get("_has_provider_link") is not False)
     _is_dl = getattr(ms, "_is_downloads", False)
     _just_entered = bool(ms.just_picked_anime)
-    if _just_entered and has_provider_link:
-        if s.get("_id") and ui.search_prev_state in (
-            "HISTORY", "SEARCH", "ANILIST_SEARCH", "ANILIST_BROWSE", "ANILIST_AIRING"
-        ):
-            cat_state = s.get("_episode_catalog_state")
-            if cat_state not in ("loaded", "unavailable", "error"):
-                entry = {"show": s, "translation_type": ttype_local}
-                app_core.with_loading(
-                    "Loading episodes…",
-                    app_core.refresh_history_entry_provider_catalog,
-                    entry
-                )
-        if not s.get("description") or not s.get("genres"):
-            app_core.with_loading(
-                "Loading title info…",
-                app_core.enrich_show_if_missing,
-                s,
-            )
-
-    if has_provider_link or _is_dl:
-        episode_ids = app_core.with_loading(
-            "Loading episodes…",
-            app_core.ensure_episode_ids,
-            s,
-            ttype_local,
-        )
-        if not episode_ids and _is_dl:
-            episode_ids = s.get("_episode_ids") or s.get("_downloaded_episodes") or []
-        if not episode_ids and ttype_local in ("dub", "sub") and not _is_dl:
-            alt_ttype = "sub" if ttype_local == "dub" else "dub"
-            alt_ids = app_core.with_loading(
-                f"Checking {alt_ttype.upper()} episodes…",
-                app_core.ensure_episode_ids,
-                s,
-                alt_ttype,
-            )
-            if alt_ids:
-                missing_mode = ttype_local.upper()
-                ttype_local = alt_ttype
-                ui.ui_ttype_ctx = ttype_local
-                episode_ids = alt_ids
-                app_core.set_action_feedback(
-                    s,
-                    f"{missing_mode} unavailable • Switched to {ttype_local.upper()}"
-                )
-    else:
-        episode_ids = []
-    ms.total_eps = len(episode_ids) or (ms.total_eps if (has_provider_link or _is_dl) else 0)
-
-    if _just_entered and s.get("_id") and has_provider_link:
-        app_core.patch_history_entry_show(s.get("_id"), ttype_local, s)
-
-    ms.current_ep_index = episode_index_for_id(
-        episode_ids, ms.current_ep, labels=s.get("_episode_labels")
-    )
-
-    from_anilist_context = ui.search_prev_state in (
+    previous_state = ui.search_prev_state
+    from_anilist_context = previous_state in (
         "ANILIST_BROWSE", "ANILIST_SEARCH", "ANILIST_AIRING"
     )
-    s["_anilist_context"] = from_anilist_context
-
     has_token = bool(cfg.get("anilist_token")) and not flags.incognito_mode
     sync_enabled = bool((getattr(args, "sync", False) or cfg.get("sync") or cfg.get("auto_track")) and not getattr(args, "no_sync", False) and not flags.incognito_mode)
 
-    if has_token and sync_enabled and not from_anilist_context:
-        if not app_core.get_show_anilist_id(s):
-            matched = app_core.with_loading(
-                "Finding AniList match…",
-                app_core.match_provider_show_to_anilist,
-                flags,
-                ui,
-                s,
-                cfg["anilist_token"],
-                False,
+    # Workers only receive snapshots; abandoned jobs must not touch live contexts.
+    original = deepcopy(s)
+    worker_flags = deepcopy(flags)
+    worker_ui = deepcopy(ui)
+    worker_args = deepcopy(args)
+    worker_cfg = deepcopy(cfg)
+
+    def finish_preparation(show, ids, translation_type, status_cb=None):
+        show = deepcopy(show)
+        use_anilist = bool(
+            resolve_tracking_fn(previous_state, worker_args, worker_cfg, show)
+            and (app_core.get_show_anilist_id(show) or show.get("_id"))
+        )
+        has_link = bool(app_core.get_show_anilist_id(show))
+        should_sync = has_token and has_link and (from_anilist_context or use_anilist)
+        if should_sync and not show.get("_anilist_media_synced"):
+            if status_cb:
+                status_cb("Syncing AniList data…")
+            media = app_core.fetch_anilist_media(
+                worker_cfg.get("anilist_token"), app_core.get_show_anilist_id(show)
+            )
+            if media:
+                app_core.update_anime_from_anilist_media(show, media)
+            show["_anilist_media_synced"] = True
+
+        if from_anilist_context:
+            show.pop("_sync_conflict", None)
+            show["_progress_authority"] = "AL"
+        elif not use_anilist:
+            show.pop("_sync_conflict", None)
+
+        if status_cb:
+            status_cb("Preparing title details…")
+        app_core.prepare_show_display_state(
+            show, translation_type, use_anilist, prefer_watched_episodes=_is_dl
+        )
+        return _PreparedDetailsState(show, tuple(str(ep) for ep in ids), translation_type, use_anilist)
+
+    def prepare_details(status_cb=None):
+        show = deepcopy(original)
+        translation_type = ttype_local
+        if _just_entered and has_provider_link:
+            if show.get("_id") and previous_state in (
+                "HISTORY", "SEARCH", "ANILIST_SEARCH", "ANILIST_BROWSE", "ANILIST_AIRING"
+            ) and show.get("_episode_catalog_state") not in ("loaded", "unavailable", "error"):
+                app_core.refresh_history_entry_provider_catalog(
+                    {"show": show, "translation_type": translation_type}
+                )
+            if not show.get("description") or not show.get("genres"):
+                if status_cb:
+                    status_cb("Loading title info…")
+                app_core.enrich_show_if_missing(show)
+
+        ids = []
+        if has_provider_link or _is_dl:
+            if status_cb:
+                status_cb("Loading episodes…")
+            ids = app_core.ensure_episode_ids(show, translation_type)
+            if not ids and _is_dl:
+                ids = show.get("_episode_ids") or show.get("_downloaded_episodes") or []
+            if not ids and translation_type in ("dub", "sub") and not _is_dl:
+                alt_type = "sub" if translation_type == "dub" else "dub"
+                if status_cb:
+                    status_cb(f"Checking {alt_type.upper()} episodes…")
+                alt_ids = app_core.ensure_episode_ids(show, alt_type)
+                if alt_ids:
+                    missing_mode = translation_type.upper()
+                    translation_type, ids = alt_type, alt_ids
+                    app_core.set_action_feedback(
+                        show, f"{missing_mode} unavailable • Switched to {translation_type.upper()}"
+                    )
+
+        show["_anilist_context"] = from_anilist_context
+        if has_token and sync_enabled and not from_anilist_context and not app_core.get_show_anilist_id(show):
+            if status_cb:
+                status_cb("Finding AniList match…")
+            worker_ui.ui_show_ctx = show
+            matched = app_core.match_provider_show_to_anilist(
+                worker_flags, worker_ui, show, worker_cfg["anilist_token"], False
             )
             if not matched:
-                matched = app_core._run_manual_anilist_match(
-                    flags, ui, s, cfg["anilist_token"]
+                return _PreparedDetailsState(
+                    show, tuple(str(ep) for ep in ids), translation_type, needs_manual_match=True
                 )
+            show = matched
+            show["_anilist_media_synced"] = True
+        return finish_preparation(show, ids, translation_type, status_cb)
+
+    try:
+        prepared = app_core.with_loading("Loading episodes…", prepare_details)
+        if prepared.needs_manual_match:
+            # The interactive picker must keep ownership of the UI thread.
+            matched = app_core._run_manual_anilist_match(
+                flags, ui, prepared.show, cfg["anilist_token"]
+            )
+            show = matched or prepared.show
             if matched:
-                s = matched
-                ui.ui_show_ctx = s
-                s["_anilist_media_synced"] = True
+                show["_anilist_media_synced"] = True
+            prepared = app_core.with_loading(
+                "Preparing title details…", finish_preparation,
+                show, prepared.episode_ids, prepared.ttype,
+            )
+    except PreparationCancelled:
+        return previous_state or "SEARCH"
 
-    use_anilist = bool(resolve_tracking_fn(ui.search_prev_state, args, cfg, s) and (app_core.get_show_anilist_id(s) or s.get("_id")))
+    from ..ui.transition import call_on_ui_thread
+    def accept_details():
+        commit_details_transition(s, PreparedDetails(prepared.show, prepared.episode_ids, original))
+        ui.ui_ttype_ctx = prepared.ttype
+        ms.total_eps = len(prepared.episode_ids) or (ms.total_eps if (has_provider_link or _is_dl) else 0)
+        if _just_entered and s.get("_id") and has_provider_link:
+            app_core.patch_history_entry_show(s.get("_id"), prepared.ttype, s)
+    call_on_ui_thread(accept_details)
+    ttype_local = prepared.ttype
+    episode_ids = prepared.episode_ids
+    use_anilist = prepared.use_anilist
     has_anilist_link = bool(app_core.get_show_anilist_id(s))
-    should_use_anilist_data = has_token and has_anilist_link and (from_anilist_context or use_anilist)
-
-    if should_use_anilist_data and not s.get("_anilist_media_synced"):
-        media = app_core.with_loading(
-            "Syncing AniList data…",
-            app_core.fetch_anilist_media,
-            cfg.get("anilist_token"),
-            app_core.get_show_anilist_id(s),
-        )
-        if media:
-            app_core.update_anime_from_anilist_media(s, media)
-        s["_anilist_media_synced"] = True
-
-    if from_anilist_context:
-        s.pop("_sync_conflict", None)
-        s["_progress_authority"] = "AL"
-    elif not use_anilist:
-        s.pop("_sync_conflict", None)
-
-    app_core.prepare_show_display_state(
-        s,
-        ttype_local,
-        use_anilist,
-        prefer_watched_episodes=getattr(ms, "_is_downloads", False),
+    ms.current_ep_index = episode_index_for_id(
+        episode_ids, ms.current_ep, labels=s.get("_episode_labels")
     )
     ms.just_picked_anime = False
     ui.action_prev_state = ui.search_prev_state or "SEARCH"
@@ -478,14 +507,12 @@ def handle_details_state(
             ui.search_prev_state in ("SEARCH", "ANILIST_SEARCH")
             and len(ms.shows) <= 1
         )
-        nav_text = "Left=search • Esc=quit" if direct_single else "Left/Esc=back"
-        if direct_single and ui.search_prev_state == "ANILIST_SEARCH":
-            nav_text = (
-                "Left=search • Esc="
-                + ("back" if ms.anilist_search_parent != "QUIT" else "quit")
-            )
+        nav_text = "Esc=search" if direct_single else "Esc=back"
         if feedback:
-            full_nav_text = f"\033[38;5;222m{feedback}\033[0m"
+            from ..ui.footer import Footer, FooterStatus, StatusKind
+            from ..core.terminal import sanitize_terminal_text
+            full_nav_text = Footer(statuses=(FooterStatus(sanitize_terminal_text(feedback), StatusKind.WARNING),),
+                                   include_cover_status=False)
         else:
             full_nav_text = context_footer(
                 s,
@@ -534,13 +561,7 @@ def handle_details_state(
     hd5 = picker_help(
         "Select option",
         "New search" if direct_single else "Go back",
-        (
-            "Back"
-            if direct_single
-            and ui.search_prev_state == "ANILIST_SEARCH"
-            and ms.anilist_search_parent != "QUIT"
-            else "Quit"
-        ) if direct_single else "Go back",
+        "New search" if direct_single else "Go back",
         tab_label="Toggle Sub/Dub",
     )
 
@@ -558,18 +579,7 @@ def handle_details_state(
         help_dict=hd5
     )
 
-    if idx == -2:
-        previous = ui.search_prev_state
-        if direct_single:
-            ms.query_str = ""
-            return (
-                ms.anilist_search_parent
-                if previous == "ANILIST_SEARCH"
-                else "QUIT"
-            )
-        return previous
-
-    if idx == -3:
+    if idx in (-2, -3):
         previous = ui.search_prev_state
         if direct_single:
             ms.query_str = ""

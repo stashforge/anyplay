@@ -392,14 +392,18 @@ def filter_history_entries(
     ]
 
 
-def playback_ep_from_history_entry(h, ttype=None, *, ensure_episode_ids_fn=None, get_resume_time_fn=None):
+def playback_ep_from_history_entry(h, ttype=None, *, episode_ids=None, episode_labels=None,
+                                   ensure_episode_ids_fn=None, get_resume_time_fn=None):
     show = h.get("show", {})
     tt = ttype or h.get("translation_type", "sub")
-    if ensure_episode_ids_fn is None:
-        from ..services.catalog import ensure_episode_ids as ensure_episode_ids_fn
+    if episode_ids is None:
+        if ensure_episode_ids_fn is None:
+            from ..services.catalog import ensure_episode_ids as ensure_episode_ids_fn
+        episode_ids = ensure_episode_ids_fn(show, tt)
     if get_resume_time_fn is None:
         from ..core.storage import get_resume_time as get_resume_time_fn
-    episode_ids = ensure_episode_ids_fn(show, tt)
+    if episode_labels is not None:
+        h = {**h, "show": {**show, "_episode_labels": episode_labels}}
     return playback_episode(
         h,
         translation_type=tt,
@@ -496,6 +500,9 @@ def refresh_history_entry_provider_catalog(entry):
     else:
         try:
             prov = _provider_for_title(show)
+            invalidate = getattr(prov, "invalidate_title_cache", None)
+            if callable(invalidate):
+                invalidate(show_id)
             with _cached_provider_fetch(prov):
                 if hasattr(prov, "get_title"):
                     try:

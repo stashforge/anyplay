@@ -5,6 +5,7 @@ import select
 
 from ..core.terminal import sanitize_terminal_text, truncate_display
 from .fuzzy import fuzzy_highlight, fuzzy_match
+from .key_codes import decode_key_bytes
 from .spinner import spinner_frame
 
 NORMAL = "\033[38;5;252m"
@@ -24,64 +25,12 @@ def get_key(descriptor):
             second = os.read(descriptor, 1)
             if second in (b"[", b"O"):
                 third = os.read(descriptor, 1)
-                if third == b"A":
-                    return "UP"
-                if third == b"B":
-                    return "DOWN"
-                if third == b"C":
-                    return "RIGHT"
-                if third == b"D":
-                    return "LEFT"
-                if second == b"[" and third == b"Z":
-                    return "SHIFT_TAB"
-                if third == b"H":
-                    return "HOME"
-                if third == b"F":
-                    return "END"
                 rest = third
                 while not (b"\x40" <= rest[-1:] <= b"\x7e"):
                     rest += os.read(descriptor, 1)
-                if rest == b"3~":
-                    return "DELETE"
-                if rest in (b"1~", b"7~"):
-                    return "HOME"
-                if rest in (b"4~", b"8~"):
-                    return "END"
-                if rest == b"5~":
-                    return "PAGE_UP"
-                if rest == b"6~":
-                    return "PAGE_DOWN"
-                if rest == b"15~":
-                    return "F5"
-                return "UNKNOWN"
-            if second in (b"d", b"D"):
-                return "ALT_D"
-            if second in (b"r", b"R"):
-                return "ALT_R"
-            return "UNKNOWN"
-        return "ESC"
-
-    if char in (b"\r", b"\n"):
-        return "ENTER"
-    if char in (b"\x7f", b"\x08"):
-        return "BACKSPACE"
-    if char == b"\x03":
-        return "CTRL_C"
-    if char == b"\x04":
-        return "CTRL_D"
-    if char == b"\x0e":
-        return "CTRL_N"
-    if char == b"\x0f":
-        return "CTRL_O"
-    if char == b"\x10":
-        return "CTRL_P"
-    if char == b"\x12":
-        return "CTRL_R"
-    if char == b"\x15":
-        return "CTRL_U"
-    if char == b"\t":
-        return "TAB"
-    return char.decode("utf-8", errors="ignore")
+                return decode_key_bytes(char + second + rest)
+            return decode_key_bytes(char + second)
+    return decode_key_bytes(char)
 
 
 

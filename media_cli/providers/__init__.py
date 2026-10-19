@@ -6,7 +6,9 @@ import importlib
 import json
 import os
 import pkgutil
+from collections import OrderedDict
 from collections.abc import Iterable
+from threading import Lock
 from typing import Any, Dict
 
 _PROVIDER_ALIASES = {
@@ -39,6 +41,9 @@ except Exception:
 _SKIPPED_MODULES = {"shared"}
 _DISABLED_PROVIDERS = set()
 _DEFAULT_PROVIDER_ID = "miruro"
+_SESSION_PROVIDERS: OrderedDict[tuple, Any] = OrderedDict()
+_SESSION_PROVIDERS_LOCK = Lock()
+_MAX_SESSION_PROVIDERS = 16
 
 from .shared.models import (
     title_provider_id,
@@ -204,8 +209,25 @@ def get_provider(provider_id=_DEFAULT_PROVIDER_ID, request_json_fn=None):
     if request_json_fn is None:
         return PROVIDERS[key]
 
-    inst = PROVIDER_FACTORIES[key](request_json_fn)
+    factory = PROVIDER_FACTORIES[key]
     meta = PROVIDER_REGISTRY.get(key, {})
+    if getattr(factory, "reuse_session_instance", False):
+        # The instance retains its callback, so its identity cannot be recycled
+        # while cached. Other providers keep their existing instance lifecycle.
+        session_key = (key, factory, id(request_json_fn), tuple(meta.get("domains") or ()))
+        with _SESSION_PROVIDERS_LOCK:
+            inst = _SESSION_PROVIDERS.get(session_key)
+            if inst is None:
+                inst = factory(request_json_fn)
+                inst.metadata = meta
+                inst.domains = list(meta.get("domains") or ())
+                _SESSION_PROVIDERS[session_key] = inst
+            _SESSION_PROVIDERS.move_to_end(session_key)
+            while len(_SESSION_PROVIDERS) > _MAX_SESSION_PROVIDERS:
+                _SESSION_PROVIDERS.popitem(last=False)
+            return inst
+
+    inst = factory(request_json_fn)
     inst.metadata = meta
     inst.domains = meta.get("domains", [])
     return inst

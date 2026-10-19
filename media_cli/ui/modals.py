@@ -6,10 +6,11 @@ import os
 from typing import Any, Callable
 
 from ..core.terminal import truncate_display
-from ..domain.metadata import format_info_metadata_line
+from ..domain.metadata import format_info_metadata_line, title_metadata_complete
 from ..domain.titles import get_display_titles, get_show_display_title
 from .display import _get_poster, with_loading
 from .panels import render_search_header
+from .footer import FooterStatus
 from .picker import tui_pick
 
 C_TITLE = "\033[1;97m"
@@ -25,13 +26,7 @@ def _show_needs_enrichment(show: dict[str, Any] | None) -> bool:
         return False
     if show.get("_enrichment_attempted"):
         return False
-    if (
-        not show.get("description")
-        or not show.get("genres")
-        or not (show.get("aniListId") or show.get("anilistMatch"))
-    ):
-        return True
-    return False
+    return not title_metadata_complete(show)
 
 
 def make_shows_info_fn(
@@ -151,7 +146,7 @@ def search_result_header(
     query_str: str,
     ttype: str,
     get_results: Callable[[], list[dict[str, Any]]],
-    get_loading: Callable[[], str],
+    get_loading: Callable[[], str | FooterStatus],
     esc_action: str = "quit",
     get_error_fn: Callable[[], str] | None = None,
     filter_query: str = "",
@@ -259,7 +254,7 @@ def select_provider_for_match(
         context = (
             f"{C_WARN}Current: {curr_name}{R}  {C_HINT}│{R}  "
             f"{C_ACCENT}Target: {hov_name}{badge}{R}  "
-            f"{C_HINT}Enter=select  Left/Esc=cancel{R}"
+            f"{C_HINT}Enter=select  Esc=cancel{R}"
         )
         return _match_header_card(anilist_show, ttype, context, w, sync_enabled=True)
 

@@ -2,6 +2,8 @@ import re
 from types import SimpleNamespace
 
 from media_cli.app import animethemes_artist as flow
+from media_cli.app.animethemes_artist_controller import ArtistController
+from media_cli.ui.view_session import PushView, UiEvent
 from media_cli.app.animethemes import _row_show, _search_header
 from media_cli.services import animethemes as service
 
@@ -46,17 +48,21 @@ def test_sections_use_real_counts_and_skip_empty_groups(monkeypatch):
 def test_artist_headers_preserve_four_lines_and_identity():
     artist = artist_fixture()
     section = {"label": "In Group", "group": "Group", "credit": "An Akagi"}
-    header = plain(flow.artist_header(artist, section))
-    assert len(header.splitlines()) == 4
-    assert header.splitlines()[0] == "Artist: Miku Itou"
-    assert header.splitlines()[1] == "In Group • As An Akagi"
-    assert "1 direct theme • 1 group" in header
+    controller = ArtistController(artist, lambda row: None)
+    controller.artist = artist
+    section["rows"] = service.artist_theme_rows(artist)
+    from media_cli.ui.view_model import resolve_details
+    view = controller.sections_view([section])
+    details = resolve_details(view.details, view.items[0].details)
+    assert details.title == "Artist: Miku Itou"
+    assert details.secondary == "In Group • As An Akagi"
+    assert details.metadata == "1 direct theme • 1 group"
     row = service.artist_theme_rows(artist)[0]
-    header = plain(flow.artist_header(artist, section, row))
-    assert len(header.splitlines()) == 4
-    assert header.splitlines()[0] == "Song"
-    assert "Artist: Miku Itou • As An Akagi" in header
-    assert header.splitlines()[2] == "ED3 • Anime"
+    details = resolve_details(view.details, controller.song_item(row, section).details)
+    assert details.title == "Song"
+    assert "Artist: Miku Itou • As An Akagi" in details.secondary
+    assert details.metadata == "ED3 • Anime"
+    controller.close()
 
 
 def test_artist_search_uses_portrait_and_membership():
@@ -85,32 +91,28 @@ def test_song_enrichment_keeps_exact_theme_and_fetches_credits(monkeypatch):
 def test_one_performance_section_opens_directly(monkeypatch):
     artist = artist_fixture()
     section = {"label": "Song Performances", "rows": service.artist_theme_rows(artist)}
-    monkeypatch.setattr(service, "get_artist", lambda slug: artist)
-    monkeypatch.setattr(service, "artist_sections", lambda a: [section])
-    monkeypatch.setattr(flow.app_core, "with_loading", lambda msg, fn, *args: fn(*args))
-    calls = []
-    monkeypatch.setattr(flow, "_artist_songs", lambda *args: calls.append(args[-1]))
-    flow.open_artist(None, None, None, {}, None, artist)
-    assert calls == [section]
+    controller = ArtistController(artist, lambda row: None)
+    controller.install_sections([section])
+    event = controller.session.auto_event()
+    assert event.item_id == "section:direct"
+    controller.session.dispatch(event)
+    assert controller.session.current.prompt == "Select song"
+    controller.close()
 
 
 def test_group_picker_uses_standard_hints_and_back(monkeypatch):
     artist = artist_fixture()
-    sections = [{"label": name, "rows": service.artist_theme_rows(artist)} for name in ["Song Performances", "In Group"]]
-    monkeypatch.setattr(service, "get_artist", lambda slug: artist)
-    monkeypatch.setattr(service, "artist_sections", lambda a: sections)
-    monkeypatch.setattr(flow.app_core, "with_loading", lambda msg, fn, *args: fn(*args))
-    monkeypatch.setattr(flow.app_core, "make_single_show_info_fn", lambda *args: None)
-    picks = iter([1, -1])
-    def pick(*args, **kwargs):
-        assert kwargs["hints"]["In Group"] == "1 theme"
-        assert "Artist: Miku Itou" in kwargs["header_fn"](1)
-        return next(picks)
-    monkeypatch.setattr(flow, "tui_pick", pick)
-    calls = []
-    monkeypatch.setattr(flow, "_artist_songs", lambda *args: calls.append(args[-1]))
-    flow.open_artist(None, SimpleNamespace(), None, {}, None, artist)
-    assert calls == [sections[1]]
+    sections = [{"id": str(index), "label": name, "rows": service.artist_theme_rows(artist)}
+                for index, name in enumerate(["Song Performances", "In Group"])]
+    controller = ArtistController(artist, lambda row: None)
+    controller.install_sections(sections)
+    session = controller.session
+    assert session.current.items[1].hint == "1 theme"
+    session.dispatch(UiEvent("select", session.current.id, session.generation, "section:1"))
+    assert session.current.prompt == "Select song"
+    session.dispatch(UiEvent("back", session.current.id, session.generation))
+    assert session.position.selected_id == "section:1"
+    controller.close()
 
 
 def test_single_artist_auto_opens_once_and_back_stays_in_results(monkeypatch):
@@ -126,7 +128,7 @@ def test_single_artist_auto_opens_once_and_back_stays_in_results(monkeypatch):
     monkeypatch.setattr(search_flow.app_core, "enter_alt_screen", lambda: None)
     monkeypatch.setattr(search_flow.app_core, "make_info_fn", lambda *args: None)
     opened = []
-    monkeypatch.setattr(flow, "open_artist", lambda *args: opened.append(args[-1]))
+    monkeypatch.setattr(flow, "open_artist", lambda *args, **kwargs: opened.append(args[-1]))
     count = 0
     def pick(*args, **kwargs):
         nonlocal count
@@ -141,26 +143,47 @@ def test_single_artist_auto_opens_once_and_back_stays_in_results(monkeypatch):
     assert opened == [artist]
 
 
+def test_artist_quit_propagates_out_of_search(monkeypatch):
+    from media_cli.app import animethemes as search_flow
+    class ImmediateThread:
+        def __init__(self, target, **kwargs):
+            self.target = target
+        def start(self):
+            self.target()
+    monkeypatch.setattr(search_flow.threading, "Thread", ImmediateThread)
+    monkeypatch.setattr(service, "search", lambda query: {"artists": [artist_fixture()]})
+    monkeypatch.setattr(search_flow.app_core, "enter_alt_screen", lambda: None)
+    monkeypatch.setattr(search_flow.app_core, "make_info_fn", lambda *args: None)
+    monkeypatch.setattr(flow, "open_artist", lambda *args, **kwargs: "quit")
+    def pick(*args, **kwargs):
+        kwargs["live_fn"]()
+        return 0
+    monkeypatch.setattr(search_flow, "tui_pick", pick)
+    assert search_flow.handle_animethemes_search_state(
+        None, SimpleNamespace(), SimpleNamespace(query_str="miku"), {}, SimpleNamespace(query=["miku"]), "sub") == "QUIT"
+
+
 def test_song_picker_updates_poster_selection_before_rendering(monkeypatch):
     artist = artist_fixture()
     row = service.artist_theme_rows(artist)[0]
     row["raw"]["anime"]["images"] = [{"link": "https://example.test/cover.jpg"}]
-    ui = SimpleNamespace(hovered_show_id=155, hovered_show_obj={"_id": 155})
-    monkeypatch.setattr(flow.app_core, "make_info_fn", lambda *args: None)
+    from media_cli.ui.view_presentation import ViewPresentation
+    controller = ArtistController(artist, lambda row: None)
+    controller.session.apply(PushView(controller.songs_view({"id": "direct", "label": "Song Performances", "rows": [row]})))
+    observed = []
     def poster(show):
-        assert ui.hovered_show_id == show["_id"] == 11
-        assert flow.app_core._hovered_show_id == 11
-        assert ui.hovered_show_obj is show
+        observed.append(show)
         assert show["thumbnail"].endswith("cover.jpg")
         show["_poster_status"] = "loading"
         return "COVER"
-    monkeypatch.setattr(flow.app_core, "_get_poster", poster)
-    def pick(*args, **kwargs):
-        assert kwargs["top_header_fn"](0) == "COVER"
-        assert ui.hovered_show_obj["_poster_status"] == "loading"
-        return -1
-    monkeypatch.setattr(flow, "tui_pick", pick)
-    flow._artist_songs(None, ui, None, {}, None, artist, {"rows": [row]})
+    from media_cli.ui.footer import render_footer
+    manager = SimpleNamespace(enabled=lambda: True, get=poster,
+                              footer_line=lambda show, text, width, **kwargs: render_footer(text, width))
+    presentation = ViewPresentation(controller.session, manager)
+    assert presentation.poster() == "COVER"
+    presentation.details()
+    assert observed[0] is observed[1]
+    controller.close()
 
 
 def test_video_picker_updates_poster_selection(monkeypatch):
@@ -183,27 +206,17 @@ def test_video_picker_updates_poster_selection(monkeypatch):
 def test_background_cover_update_requests_redraw_even_when_metadata_is_unchanged(monkeypatch):
     artist = artist_fixture()
     row = service.artist_theme_rows(artist)[0]
-    ui = SimpleNamespace()
-    ticks = iter([0.0, 5.0])
-    monkeypatch.setattr(flow.time, "monotonic", lambda: next(ticks))
-    monkeypatch.setattr(flow.app_core, "make_info_fn", lambda *args: None)
-    redrawn = []
-    monkeypatch.setattr(flow.app_core, "_request_poster_redraw", lambda: redrawn.append(True))
+    controller = ArtistController(artist, lambda row: None)
+    controller.session.apply(PushView(controller.songs_view({"id": "direct", "label": "Song Performances", "rows": [row]})))
+    session = controller.session
+    before = session.item()
     def enrich(old):
         return {**old, "raw": {**old["raw"], "anime": {
             **old["raw"]["anime"], "images": [{"link": "https://example.test/cover.jpg"}]}}}
     monkeypatch.setattr(service, "enrich_artist_theme", enrich)
-    class ImmediateThread:
-        def __init__(self, target, args, **kwargs):
-            self.target, self.args = target, args
-        def start(self):
-            self.target(*self.args)
-    monkeypatch.setattr(flow.threading, "Thread", ImmediateThread)
-    def pick(*args, **kwargs):
-        before = kwargs["header_fn"](0)
-        kwargs["live_fn"]()
-        assert kwargs["header_fn"](0) == before
-        assert redrawn == [True]
-        return -1
-    monkeypatch.setattr(flow, "tui_pick", pick)
-    flow._artist_songs(None, ui, None, {}, None, artist, {"rows": [row]})
+    controller.enrich_item(session.current.id, session.generation, before)
+    assert session.drain_updates()
+    assert session.item().details == before.details
+    assert session.item().image.state == "available"
+    assert session.item().image.url.endswith("cover.jpg")
+    controller.close()

@@ -915,7 +915,6 @@ def test_history_selection_loads_episode_catalog_inside_picker(monkeypatch):
     selected = []
 
     def fake_tui_pick(*args, **kwargs):
-        select_messages.append(kwargs["select_loading_message_fn"](0))
         assert kwargs["select_fn"](0) is True
         return 0
 
@@ -925,6 +924,7 @@ def test_history_selection_loads_episode_catalog_inside_picker(monkeypatch):
     monkeypatch.setattr(search.app_core, "filter_history_entries", lambda entries, mode: list(entries))
     monkeypatch.setattr(search.app_core, "format_history_entry", lambda entry: "Demo")
     monkeypatch.setattr(search.app_core, "prepare_show_display_state", lambda *a, **k: None)
+    monkeypatch.setattr(search.app_core, "refresh_history_entry_provider_catalog", lambda *a, **k: None)
     monkeypatch.setattr(search.app_core, "playback_ep_from_history_entry", lambda *a, **k: "1")
 
     def fake_ensure(show_arg, ttype_arg):
@@ -932,9 +932,10 @@ def test_history_selection_loads_episode_catalog_inside_picker(monkeypatch):
         return ["1", "2"]
 
     monkeypatch.setattr(search.app_core, "ensure_episode_ids", fake_ensure)
-    monkeypatch.setattr(search.app_core, "with_loading", lambda *a, **k: (_ for _ in ()).throw(
-        AssertionError("history selection loading should be owned by the picker")
-    ))
+    def loading(message, fn, *a, **k):
+        select_messages.append(message)
+        return fn(*a, **k)
+    monkeypatch.setattr(search.app_core, "with_loading", loading)
 
     state = search.handle_history_state(
         flags,
@@ -948,7 +949,10 @@ def test_history_selection_loads_episode_catalog_inside_picker(monkeypatch):
 
     assert state == "DETAILS"
     assert select_messages == ["Checking episode list…"]
-    assert selected == [(show, "sub")]
+    assert len(selected) == 1
+    assert selected[0][0]["_id"] == show["_id"]
+    assert selected[0][1] == "sub"
+    assert selected[0][0] is not show
 
 
 def test_large_episode_menu_wraps_preparation_in_loading(monkeypatch):

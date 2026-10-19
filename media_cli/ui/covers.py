@@ -57,9 +57,10 @@ def chafa_cover_command(path):
 
 def poster_uses_native_protocol(raw):
     raw = str(raw or "")
-    return any(
+    # SIXEL's DCS introducer may include parameters (e.g. Chafa's 0;1;0).
+    return bool(re.search(r"\x1bP[0-?]*q", raw)) or any(
         marker in raw
-        for marker in ("\033_G", "\033Pq", "\033]1337;File=")
+        for marker in ("\033_G", "\033]1337;File=")
     )
 
 

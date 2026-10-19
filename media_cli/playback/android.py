@@ -1,3 +1,4 @@
+import logging
 import subprocess
 
 from ..media.dash import generate_dash_mpd
@@ -10,6 +11,8 @@ from ..media.local_proxy import (
 )
 from ..media.proxy_rules import proxy_filtered_headers
 from ..media.urls import validate_optional_referer, validate_stream_url
+
+log = logging.getLogger(__name__)
 
 PLAYERS = {
     "mpv": ("is.xyz.mpv", "is.xyz.mpv.MPVActivity"),
@@ -24,6 +27,12 @@ PLAYERS = {
 }
 
 _packages = None
+
+
+class AndroidPreparationCancelled(Exception):
+    """Preparation was cancelled before the Android player was launched."""
+
+
 def _info(message):
     return None
 def _ok(message):
@@ -71,7 +80,12 @@ def play_android(
         action_show=None,
         ttype="sub",
         cfg=None,
-        ep_index=None):
+        ep_index=None,
+        *,
+        fetch_skip_times_fn=None,
+        prepare_subtitles_fn=None,
+        prepare_proxy_fn=None,
+        launch_command_fn=None):
     del fetch_callback, total_eps, is_binge
     try:
         url = validate_stream_url(stream["link"])
@@ -198,8 +212,15 @@ def play_android(
         skip_intervals = []
         if aniskip_enabled and mal_id:
             ep_num = episode_progress_number(episode)
-            skip_intervals = fetch_skip_times(mal_id, ep_num)
+            fetch = fetch_skip_times_fn or fetch_skip_times
+            skip_intervals = fetch(mal_id, ep_num, episode_length=0.0)
+            log.debug(
+                "AniSkip Android chapter candidates: MAL=%s EP=%s intervals=%d duration_matching=False",
+                mal_id, ep_num, len(skip_intervals),
+            )
         generate_chapters_file(skip_intervals, chapters_path)
+    except AndroidPreparationCancelled:
+        return False
     except Exception:
         pass
 
@@ -230,14 +251,22 @@ def play_android(
     if subtitles:
         try:
             from ..media.subtitle_scorer import filter_subtitles
-            subtitles = filter_subtitles(
+            prepare_subtitles = prepare_subtitles_fn or filter_subtitles
+            subtitles = prepare_subtitles(
                 subtitles,
                 headers=headers,
                 referer=referer,
                 video_duration_s=float(stream.get("duration") or 0),
             )
+        except AndroidPreparationCancelled:
+            return False
         except Exception:
             pass
+
+    def prepare_proxy(start, *args, **kwargs):
+        if prepare_proxy_fn is not None:
+            return prepare_proxy_fn(start, *args, **kwargs)
+        return start(*args, **kwargs)
 
     cleanup_active_local_proxy()
     if stream.get("dash_video") and stream.get("dash_audio"):
@@ -248,13 +277,16 @@ def play_android(
                 stream["dash_audio"],
                 stream.get("dash_duration"),
             )
-            url, proxy_server = start_local_content_server(
+            url, proxy_server = prepare_proxy(
+                start_local_content_server,
                 manifest,
                 "stream.mpd",
                 "application/dash+xml",
             )
             replace_active_local_proxy(proxy_server)
             intent_type = "application/dash+xml"
+        except AndroidPreparationCancelled:
+            return False
         except Exception as exc:
             _error(f"Could not prepare DASH stream: {exc}")
             return False
@@ -267,7 +299,8 @@ def play_android(
             bw = float(stream.get("split_bandwidth") or 2400)
             if bw < 100_000:
                 bw *= 1000
-            url, proxy_server = start_local_dual_proxy(
+            url, proxy_server = prepare_proxy(
+                start_local_dual_proxy,
                 stream["split_video_url"],
                 stream["split_audio_url"],
                 referer,
@@ -288,6 +321,8 @@ def play_android(
             )
             replace_active_local_proxy(proxy_server)
             intent_type = "video/*"
+        except AndroidPreparationCancelled:
+            return False
         except Exception as exc:
             _error(f"Could not prepare split audio stream: {exc}")
             return False
@@ -297,7 +332,8 @@ def play_android(
             bw = float(stream.get("dailymotion_bandwidth") or 2400)
             if bw < 100_000:
                 bw *= 1000
-            url, proxy_server = start_local_dual_proxy(
+            url, proxy_server = prepare_proxy(
+                start_local_dual_proxy,
                 stream["dailymotion_video"],
                 stream["dailymotion_audio"],
                 referer,
@@ -316,6 +352,8 @@ def play_android(
             )
             replace_active_local_proxy(proxy_server)
             intent_type = "video/*"
+        except AndroidPreparationCancelled:
+            return False
         except Exception as exc:
             _error(f"Could not prepare Dailymotion stream: {exc}")
             return False
@@ -325,7 +363,8 @@ def play_android(
             or (stream.get("dailymotion_video") and stream.get("dailymotion_audio"))):
         _info(f"{player}: starting local HTTP proxy...")
         try:
-            url, proxy_server = start_local_proxy(
+            url, proxy_server = prepare_proxy(
+                start_local_proxy,
                 url,
                 referer,
                 headers,
@@ -340,6 +379,8 @@ def play_android(
             )
             replace_active_local_proxy(proxy_server)
             intent_type = "video/*"
+        except AndroidPreparationCancelled:
+            return False
         except Exception as exc:
             _error(f"Could not start local stream proxy: {exc}")
             return False
@@ -381,12 +422,25 @@ def play_android(
         command.extend(["--esa", "headers", ",".join(hdr_list)])
 
     launched = False
-    try:
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
+    launch_attempt = 0
+
+    def launch(command):
+        nonlocal launch_attempt
+        launch_attempt += 1
+        if launch_command_fn is not None:
+            result = launch_command_fn(command)
+        else:
+            result = subprocess.run(command, capture_output=True, text=True)
+        log.debug(
+            "Android player launch result: player=%s attempt=%d returncode=%s starting_intent=%s stderr_present=%s",
+            player, launch_attempt, getattr(result, "returncode", None),
+            "Starting: Intent" in (getattr(result, "stdout", None) or ""),
+            bool(getattr(result, "stderr", None)),
         )
+        return result
+
+    try:
+        result = launch(command)
         # On Android 14+, termux-am outputs "Starting: Intent" to stdout upon
         # successfully dispatching the intent, but can return exit code 1
         # due to an AppOps null-pointer reflection exception in reading the return.
@@ -418,19 +472,18 @@ def play_android(
                 ])
             if hdr_list:
                 fallback_cmd.extend(["--esa", "headers", ",".join(hdr_list)])
-            r2 = subprocess.run(
-                fallback_cmd,
-                capture_output=True,
-                text=True,
-            )
+            r2 = launch(fallback_cmd)
             if r2.returncode == 0 or "Starting: Intent" in (r2.stdout or ""):
                 _ok(f"{player} opened.")
                 launched = True
 
         if not launched:
             _error(f"Could not open {player}.")
+    except AndroidPreparationCancelled:
+        return False
     except Exception as exc:
         _error(f"Could not open {player}: {exc}")
-    if not launched and proxy_server is not None:
-        cleanup_active_local_proxy()
+    finally:
+        if not launched and proxy_server is not None:
+            cleanup_active_local_proxy()
     return launched

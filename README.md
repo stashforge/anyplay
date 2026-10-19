@@ -19,6 +19,8 @@ It is built for people who like a fast keyboard-first workflow. Search a title, 
 
 ## Install
 
+Python 3.10 or newer is required.
+
 The recommended install method is `pipx`.
 
 ```bash

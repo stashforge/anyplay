@@ -1,8 +1,12 @@
 import json
 import logging
 import re
+import unicodedata
+import urllib.error
 import urllib.parse
 import urllib.request
+from http.client import HTTPException
+from threading import RLock
 from typing import Any
 
 from bs4 import BeautifulSoup
@@ -18,6 +22,14 @@ from .shared.models import (
 )
 
 _logger = logging.getLogger(__name__)
+_MAX_IDENTITY_QUERIES = 6
+_MAX_NATIVE_ID_PROBES = 4
+_PUBLIC_MEDIA_FIELDS = frozenset({
+    "id", "idMal", "title", "synonyms", "format", "type", "status", "episodes",
+    "duration", "season", "seasonYear", "startDate", "endDate", "countryOfOrigin",
+    "isAdult", "averageScore", "meanScore", "popularity", "genres", "description",
+    "coverImage", "bannerImage", "nextAiringEpisode",
+})
 
 _MEGAPLAY_KEY = b"i?LMTAx0Q6,:}50U".ljust(32, b"\x00")
 _MEGAPLAY_IV = b"W0;27ToaUpl_P%'c"
@@ -37,14 +49,104 @@ def _slug_title_from_watch_href(href: str) -> str:
     return slug.replace("-", " ").strip()
 
 
-def _season_from_title(title: str) -> int:
-    s_m = re.search(r'season\s*(\d+)|(\d+)(?:nd|rd|th)\s*season', title, re.I)
+def _explicit_season(title: str) -> int | None:
+    title = unicodedata.normalize("NFKC", title)
+    s_m = re.search(r'season\s*(\d+)|(\d+)(?:st|nd|rd|th)\s*season|第\s*(\d+)\s*[期季]', title, re.I)
     if s_m:
-        return int(s_m.group(1) or s_m.group(2))
-    trailing = re.search(r'\b([2-9])\s*$', title.strip())
+        return int(next(group for group in s_m.groups() if group is not None))
+    trailing = re.search(r'\s([2-9]|[1-9]\d)\s*$', title.strip())
     if trailing:
         return int(trailing.group(1))
-    return 1
+    return None
+
+
+def _season_from_title(title: str) -> int:
+    return _explicit_season(title) or 1
+
+
+def _title_identity(title: str) -> str:
+    title = unicodedata.normalize("NFKC", title).casefold()
+    title = title.replace("\u2019", "'").replace("\u2018", "'")
+    title = re.sub(r"(\d+)(?:st|nd|rd|th)\s*season", r"season\1", title)
+    title = re.sub(r"season\s+(\d+)", r"season\1", title)
+    title = re.sub(r"第\s*(\d+)\s*[期季]", r"season\1", title)
+    title = re.sub(r"\s([2-9]|[1-9]\d)\s*$", r" season\1", title)
+    title = re.sub(r"\bseason1\b", "", title)
+    return "".join(char for char in title if char.isalnum() or char in "!?'")
+
+
+def _matching_titles(
+    expected: tuple[str, ...], actual: tuple[str, ...], season: int, media_format: str = "",
+    primary_titles: tuple[str, ...] = (),
+) -> bool:
+    if not actual:
+        return False
+    explicit = {_explicit_season(title) for title in actual} - {None}
+    if explicit and explicit != {season}:
+        return False
+    for mark in "!?":
+        if max(title.count(mark) for title in actual) != max(title.count(mark) for title in expected):
+            return False
+    markers = {"movie", "special", "ova", "oad", "ona"}
+    def kinds(titles: tuple[str, ...]) -> set[str]:
+        return {word.removesuffix("s") for title in titles
+                for word in re.findall(r"\w+", title.casefold())
+                if word.removesuffix("s") in markers}
+    allowed = kinds(expected) | {media_format.casefold()}
+    if media_format == "SPECIAL":
+        allowed.add("special")
+    if kinds(actual) - allowed:
+        return False
+    # Retain non-Latin names. Stripping them to ASCII made season digits match
+    # completely unrelated shows. Do not interpret a partial word match as ID proof.
+    expected_keys = {_title_identity(title) for title in expected}
+    actual_keys = {_title_identity(title) for title in actual}
+    primary_keys = {_title_identity(title) for title in primary_titles}
+    if season > 1 and not explicit and not (primary_keys & actual_keys):
+        return False
+    return bool((expected_keys - {""}) & actual_keys)
+
+
+def _watch_url(base_url: str, href: str) -> str | None:
+    url = urllib.parse.urljoin(base_url + "/", href)
+    parsed = urllib.parse.urlsplit(url)
+    base = urllib.parse.urlsplit(base_url)
+    if parsed.scheme != base.scheme or parsed.netloc.lower() != base.netloc.lower():
+        return None
+    if not parsed.path.startswith("/watch/"):
+        return None
+    return urllib.parse.urlunsplit(parsed._replace(fragment=""))
+
+
+def _page_titles(soup: BeautifulSoup) -> tuple[str, ...]:
+    heading = soup.select_one("#watch-main h1, main h1, h1")
+    if heading is None:
+        return ()
+    return tuple(dict.fromkeys(value for value in (
+        heading.get_text(" ", strip=True), heading.get("data-jp"), heading.get("title"),
+    ) if isinstance(value, str) and value.strip()))
+
+
+def _page_id(soup: BeautifulSoup) -> str | None:
+    primary = soup.select_one("#watch-main[data-id], main[data-id]")
+    value = primary.get("data-id") if primary else None
+    return value if isinstance(value, str) and value.isdigit() else None
+
+
+def _same_site_response(response: Any, base_url: str) -> bool:
+    final_url = response.geturl() if callable(getattr(response, "geturl", None)) else None
+    if not isinstance(final_url, str):
+        return True
+    final, base = urllib.parse.urlsplit(final_url), urllib.parse.urlsplit(base_url)
+    return final.scheme == base.scheme and final.netloc.lower() == base.netloc.lower()
+
+
+def _catalog_mal_matches(soup: BeautifulSoup, media: dict[str, Any] | None) -> bool:
+    expected = str((media or {}).get("idMal") or "")
+    if not expected.isdigit():
+        return True
+    ids = {a.get("data-mal") for a in soup.select("a[data-num], a[data-number], a[data-slug]")}
+    return ids == {expected}
 
 
 def _rc4(key: bytes, data: bytes) -> bytes:
@@ -140,6 +242,7 @@ def _decrypt_megaplay_enc(enc: str) -> dict | None:
 class AnikotoProvider:
     id = "anikoto"
     audio_mode = "separate_catalogs"
+    reuse_session_instance = True
 
     def __init__(self, request_json_fn=None):
         self._request_json = request_json_fn
@@ -151,8 +254,11 @@ class AnikotoProvider:
         self.headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
         }
-        self._anime_page_cache = {}
-        self._media_cache = {}
+        self._cache_lock = RLock()
+        self._cache_generation = 0
+        self._anime_page_cache: dict[str, tuple[str, str]] = {}
+        self._media_cache: dict[str, dict[str, Any]] = {}
+        self._cache_scope = (self.anikoto_url, self.base_url, self._request_json)
 
     @property
     def base_url(self) -> str:
@@ -162,10 +268,121 @@ class AnikotoProvider:
     def name(self) -> str:
         return self.metadata.get("name", "Anikoto")
 
+    def _ensure_cache_scope(self) -> None:
+        with self._cache_lock:
+            scope = (self.anikoto_url, self.base_url, self._request_json)
+            if scope[:2] != self._cache_scope[:2] or scope[2] is not self._cache_scope[2]:
+                self._cache_generation += 1
+                self._anime_page_cache.clear()
+                self._media_cache.clear()
+                self._cache_scope = scope
+
+    def _cache_epoch(self) -> int:
+        with self._cache_lock:
+            self._ensure_cache_scope()
+            return self._cache_generation
+
+    def _remember_media(
+        self, provider_id: str, media: dict[str, Any], *, generation: int | None = None,
+    ) -> dict[str, Any]:
+        # Only public fields survive session reuse, including across auth changes.
+        public = {key: value for key, value in media.items() if key in _PUBLIC_MEDIA_FIELDS}
+        with self._cache_lock:
+            self._ensure_cache_scope()
+            if generation is None or generation == self._cache_generation:
+                self._media_cache[provider_id] = public
+                if "id" in public:
+                    self._media_cache[str(public["id"])] = public
+        return public
+
+    def _remember_anime_page(
+        self, provider_id: str, anime_id: str, watch_url: str, generation: int,
+        media: dict[str, Any] | None = None,
+    ) -> None:
+        with self._cache_lock:
+            self._ensure_cache_scope()
+            if generation == self._cache_generation:
+                self._anime_page_cache[provider_id] = (anime_id, watch_url)
+                if media is not None and "id" in media:
+                    self._anime_page_cache[str(media["id"])] = (anime_id, watch_url)
+
+    def _invalidate_anime_page(self, anime_id: str, *, generation: int | None = None) -> None:
+        with self._cache_lock:
+            self._ensure_cache_scope()
+            if generation is not None and generation != self._cache_generation:
+                return
+            keys = [key for key, mapping in self._anime_page_cache.items() if mapping[0] == anime_id]
+            if keys:
+                self._cache_generation += 1
+            for key in keys:
+                self._anime_page_cache.pop(key, None)
+
+    def invalidate_title_cache(self, provider_id: str) -> None:
+        """Discard one title's public metadata and identity before a refresh."""
+        with self._cache_lock:
+            self._ensure_cache_scope()
+            # Even a first lookup with no cached entry must not refill the cache
+            # after a refresh has begun. Existing unrelated entries stay intact.
+            self._cache_generation += 1
+            keys = {str(provider_id).strip()}
+            mapping = self._anime_page_cache.get(str(provider_id).strip())
+            if mapping:
+                keys.update(key for key, value in self._anime_page_cache.items() if value[0] == mapping[0])
+            media_ids = {
+                str(media["id"]) for key, media in self._media_cache.items()
+                if key in keys and "id" in media
+            }
+            keys.update(key for key, media in self._media_cache.items() if str(media.get("id")) in media_ids)
+            site_ids = {value[0] for key, value in self._anime_page_cache.items() if key in keys}
+            keys.update(key for key, value in self._anime_page_cache.items() if value[0] in site_ids)
+            for key in keys:
+                self._media_cache.pop(key, None)
+                self._anime_page_cache.pop(key, None)
+
+    def _episode_page(
+        self, anime_id: str, watch_url: str, media: dict[str, Any] | None, *, generation: int | None = None,
+    ) -> BeautifulSoup | None:
+        generation = self._cache_epoch() if generation is None else generation
+        try:
+            soup = self._request_episode_page(anime_id, watch_url, media)
+        except Exception:
+            self._invalidate_anime_page(anime_id, generation=generation)
+            raise
+        if soup is None:
+            self._invalidate_anime_page(anime_id, generation=generation)
+        return soup
+
+    def _request_episode_page(self, anime_id: str, watch_url: str, media: dict[str, Any] | None) -> BeautifulSoup | None:
+        ep_url = f"{self.anikoto_url}/ajax/episode/list/{anime_id}?vrf={_vrf_encrypt(anime_id)}"
+        request = urllib.request.Request(ep_url, headers={**self.headers, "Referer": watch_url,
+                                                          "X-Requested-With": "XMLHttpRequest"})
+        response = urllib.request.urlopen(request, timeout=6)
+        if not _same_site_response(response, self.anikoto_url):
+            _logger.warning("Anikoto rejected off-site episode catalog redirect: site_id=%s", anime_id)
+            return None
+        data = json.loads(response.read().decode("utf-8"))
+        html = data.get("result") if isinstance(data, dict) else None
+        if not isinstance(html, str):
+            _logger.warning("Anikoto malformed episode catalog: site_id=%s", anime_id)
+            return None
+        soup = BeautifulSoup(html, "html.parser")
+        if not soup.select("a[data-num], a[data-number], a[data-slug]"):
+            _logger.warning("Anikoto empty episode catalog: site_id=%s", anime_id)
+            return None
+        if not _catalog_mal_matches(soup, media):
+            _logger.warning("Anikoto rejected MAL identity: AniList=%s expected_MAL=%s site_id=%s",
+                            (media or {}).get("id"), (media or {}).get("idMal"), anime_id)
+            return None
+        return soup
+
     def _fetch_media(self, provider_id: str) -> dict[str, Any] | None:
         pid_clean = str(provider_id).strip()
-        if pid_clean in self._media_cache:
-            return self._media_cache[pid_clean]
+        with self._cache_lock:
+            self._ensure_cache_scope()
+            generation = self._cache_generation
+            cached = self._media_cache.get(pid_clean)
+            if cached is not None:
+                return cached
 
         token = ""
         try:
@@ -181,16 +398,14 @@ class AnikotoProvider:
                 try:
                     res = anilist.fetch_one(urllib.request.urlopen, json.load, token, anilist_id=int(pid_clean))
                     if res:
-                        self._media_cache[pid_clean] = res
-                        return res
+                        return self._remember_media(pid_clean, res, generation=generation)
                 except Exception as e:
                     _logger.debug("Anikoto fetch_one with token failed (likely expired/invalid): %s", e)
 
             try:
                 res = anilist.fetch_one(urllib.request.urlopen, json.load, "", anilist_id=int(pid_clean))
                 if res:
-                    self._media_cache[pid_clean] = res
-                    return res
+                    return self._remember_media(pid_clean, res, generation=generation)
             except Exception as e:
                 _logger.debug("Anikoto fetch_one unauthenticated failed: %s", e)
         else:
@@ -201,162 +416,181 @@ class AnikotoProvider:
                 media_list = fallback_res.get("data", {}).get("Page", {}).get("media", [])
                 if media_list:
                     res = media_list[0]
-                    self._media_cache[pid_clean] = res
-                    if "id" in res:
-                        self._media_cache[str(res["id"])] = res
-                    return res
+                    return self._remember_media(pid_clean, res, generation=generation)
             except Exception as e:
                 _logger.debug("Anikoto fallback title search failed: %s", e)
 
-        return self._media_cache.get(pid_clean)
+        with self._cache_lock:
+            self._ensure_cache_scope()
+            return self._media_cache.get(pid_clean)
 
-    def _get_anime_page(self, provider_id: str) -> tuple[str | None, str | None]:
+    def _get_anime_page(
+        self, provider_id: str, *,
+        _verified_catalogs: dict[tuple[str, str], BeautifulSoup] | None = None,
+    ) -> tuple[str | None, str | None]:
         pid_clean = str(provider_id).strip()
-        if pid_clean in self._anime_page_cache:
-            return self._anime_page_cache[pid_clean]
+        with self._cache_lock:
+            self._ensure_cache_scope()
+            generation = self._cache_generation
+            cached = self._anime_page_cache.get(pid_clean)
+            if cached is not None:
+                return cached
 
-        # If provider_id is already a direct watch URL or path
+        # An explicit site URL is already a selection, not an AniList-ID guess.
         if pid_clean.startswith("/watch/") or pid_clean.startswith("http"):
-            watch_url = pid_clean if pid_clean.startswith("http") else f"{self.anikoto_url}{pid_clean}"
+            watch_url = _watch_url(self.anikoto_url, pid_clean)
+            if not watch_url:
+                return None, None
             try:
                 req_watch = urllib.request.Request(watch_url, headers={**self.headers, "Referer": f"{self.anikoto_url}/"})
-                w_html = urllib.request.urlopen(req_watch, timeout=6).read().decode("utf-8", errors="ignore")
+                response = urllib.request.urlopen(req_watch, timeout=6)
+                if not _same_site_response(response, self.anikoto_url):
+                    _logger.warning("Anikoto rejected off-site watch redirect: %s", watch_url)
+                    return None, None
+                w_html = response.read().decode("utf-8", errors="ignore")
                 w_soup = BeautifulSoup(w_html, "html.parser")
-                main_div = w_soup.find(id="watch-main")
-                anime_id = (
-                    (main_div.get("data-id") if main_div else None)
-                    or (w_soup.select_one("[data-id]").get("data-id") if w_soup.select_one("[data-id]") else None)
-                    or (w_soup.select_one("[data-tip]").get("data-tip") if w_soup.select_one("[data-tip]") else None)
-                )
-                if anime_id and watch_url:
-                    self._anime_page_cache[pid_clean] = (anime_id, watch_url)
+                anime_id = _page_id(w_soup)
+                if anime_id:
+                    self._remember_anime_page(pid_clean, anime_id, watch_url, generation)
                     return anime_id, watch_url
-            except Exception as e:
+            except (urllib.error.URLError, OSError, HTTPException) as e:
                 _logger.debug("Anikoto direct watch_url resolve failed: %s", e)
+            return None, None
 
         media = self._fetch_media(provider_id)
         if not media:
             return None, None
 
-        titles = [
-            media.get("title", {}).get(k)
-            for k in ["english", "romaji", "native", "userPreferred"]
-            if media.get("title", {}).get(k)
-        ]
-        if not titles and isinstance(media.get("title"), str):
-            titles = [media["title"]]
-        for alt in media.get("synonyms") or []:
-            if alt and alt not in titles:
-                titles.append(alt)
-
-        main_title = titles[0] if titles else pid_clean
-        try:
-            query_terms = []
-            for title in titles or [main_title]:
-                if not title:
-                    continue
-                if re.search(r"[A-Za-z0-9]", title):
-                    clean_q = re.sub(r'[^a-zA-Z0-9\s]', ' ', title)
-                    short_q = ' '.join(clean_q.split()[:4])
-                else:
-                    short_q = str(title).strip()
-                if short_q and short_q not in query_terms:
-                    query_terms.append(short_q)
-
-            search_urls = []
-            for short_q in query_terms:
-                base_search_url = f"{self.anikoto_url}/filter?keyword={urllib.parse.quote_plus(short_q)}"
-                vrf_q = _vrf_encrypt(short_q)
-                if vrf_q:
-                    search_urls.append(f"{base_search_url}&vrf={vrf_q}")
-                search_urls.append(base_search_url)
-
+        names = media.get("title") or {}
+        primary_titles = tuple(value for value in (
+            (names.get(k) for k in ("english", "romaji", "native", "userPreferred"))
+            if isinstance(names, dict) else (names,)
+        ) if isinstance(value, str) and value.strip())
+        titles = tuple(dict.fromkeys((*primary_titles, *(alt for alt in media.get("synonyms") or ()
+                                                        if isinstance(alt, str) and alt.strip()))))
+        if not titles:
+            return None, None
+        season = max(_season_from_title(title) for title in titles)
+        queries: dict[str, str] = {}
+        for title in titles:
+            query = " ".join(re.sub(r"[^\w\s]", " ", title).split())
+            if query:
+                queries.setdefault(query.casefold(), query)
+        # Exhausting every synonym can delay playback for minutes on no match.
+        query_terms = tuple(queries.values())[:_MAX_IDENTITY_QUERIES]
+        native_query = " ".join(re.sub(r"[^\w\s]", " ", names.get("native") or "").split()) if isinstance(names, dict) else ""
+        checked_pages = set()
+        for query in query_terms:
+            if not query:
+                continue
+            search_url = f"{self.anikoto_url}/filter?keyword={urllib.parse.quote_plus(query)}"
+            vrf = _vrf_encrypt(query)
+            urls = (f"{search_url}&vrf={vrf}", search_url) if vrf else (search_url,)
             html_search = ""
-            for search_url in search_urls:
+            for url in urls:
                 try:
-                    req_search = urllib.request.Request(search_url, headers={**self.headers, "Referer": f"{self.anikoto_url}/"})
-                    html_search = urllib.request.urlopen(req_search, timeout=6).read().decode('utf-8', errors='ignore')
+                    req_search = urllib.request.Request(url, headers={**self.headers, "Referer": f"{self.anikoto_url}/"})
+                    response = urllib.request.urlopen(req_search, timeout=6)
+                    if not _same_site_response(response, self.anikoto_url):
+                        _logger.warning("Anikoto rejected off-site search redirect: %s", url)
+                        continue
+                    html_search = response.read().decode('utf-8', errors='ignore')
                     break
-                except Exception as search_err:
-                    _logger.debug("Anikoto search URL failed (%s): %s", search_url, search_err)
+                except (urllib.error.URLError, OSError, HTTPException) as search_err:
+                    _logger.debug("Anikoto search URL failed (%s): %s", url, search_err)
             if not html_search:
-                return None, None
+                continue
             soup_search = BeautifulSoup(html_search, "html.parser")
-
-            candidates = []
-            seen_candidates = set()
+            candidates: dict[str, tuple[set[str], str, str | None]] = {}
             for a in soup_search.find_all("a", href=True):
-                if "/watch/" in a["href"] and a.text.strip():
-                    txt = a.text.strip()
-                    candidate_text = " ".join(
-                        part for part in [
-                            a.get("title") or "",
-                            txt,
-                            _slug_title_from_watch_href(a["href"]),
-                        ]
-                        if part
-                    )
-                    if not re.match(r'^\d+(\.\d+)?\s+(TV|Movie|Special|OVA|ONA)', txt) and not re.match(r'^\d+\s+\d+', txt):
-                        if a["href"] not in seen_candidates:
-                            seen_candidates.add(a["href"])
-                            candidates.append((candidate_text, a["href"]))
-                    elif a["href"] not in seen_candidates and _slug_title_from_watch_href(a["href"]):
-                        seen_candidates.add(a["href"])
-                        candidates.append((candidate_text, a["href"]))
-
-            def _score_match(c_title: str, t_title: str, t_season: int) -> float:
-                c_norm = re.sub(r'[^a-z0-9]', '', c_title.lower())
-                t_norm = re.sub(r'[^a-z0-9]', '', t_title.lower())
-                if c_norm == t_norm:
-                    return 100.0
-                if t_season:
-                    if f'season{t_season}' in c_norm or f'{t_season}ndseason' in c_norm or f'{t_season}rdseason' in c_norm:
-                        pass
-                    elif t_season == 1 and not any(f'season{i}' in c_norm for i in range(2, 10)):
-                        pass
-                    else:
-                        return 0.0
-                c_words = set(re.findall(r'[a-z0-9]+', c_title.lower()))
-                t_words = set(re.findall(r'[a-z0-9]+', t_title.lower()))
-                if not t_words:
-                    return 0.0
-                overlap = len(c_words & t_words) / len(t_words)
-                extra_penalty = 0.0
-                for unwanted in ['special', 'specials', 'movie', 'oad', 'ova', 'reawakening']:
-                    if unwanted in c_words and unwanted not in t_words:
-                        extra_penalty += 0.3
-                return max(0.0, overlap - extra_penalty)
-
-            scored = [
-                (max(_score_match(c_txt, t, _season_from_title(t)) for t in titles), c_txt, c_href)
-                for c_txt, c_href in candidates
-            ]
-            scored.sort(key=lambda x: x[0], reverse=True)
-
-            if scored and scored[0][0] > 0.1:
-                best_href = scored[0][2]
-                watch_url = f"{self.anikoto_url}{best_href}" if best_href.startswith("/") else best_href
-
+                href = a.get("href")
+                if not isinstance(href, str):
+                    continue
+                watch_url = _watch_url(self.anikoto_url, href)
+                if not watch_url:
+                    continue
+                # Poster and name anchors point to the same show. Merge their
+                # aliases instead of discarding the original title on the latter.
+                series_key = watch_url.split("/ep-", 1)[0].rstrip("/")
+                aliases, first_url, site_id = candidates.get(series_key, (set(), watch_url, None))
+                container = a.find_parent(class_="inner")
+                poster = a.find_parent(class_="poster") or (container.select_one(".poster[data-tip]") if container else None)
+                card_id = poster.get("data-tip") if poster else None
+                if isinstance(card_id, str) and card_id.isdigit():
+                    site_id = card_id
+                candidates[series_key] = (aliases, first_url, site_id)
+                image = a.find("img")
+                visible = a.get_text(" ", strip=True)
+                if re.match(r"^\d+(?:\s+\d+)*\s+(?:TV|Movie|Special|OVA|ONA)\b", visible, re.I):
+                    visible = ""
+                values = (a.get("data-jp"), a.get("title"),
+                          image.get("alt") if image else visible,
+                          _slug_title_from_watch_href(watch_url))
+                aliases.update(value for value in values if isinstance(value, str) and value.strip())
+            matches = [(url, tuple(aliases)) for aliases, url, _ in candidates.values()
+                       if _matching_titles(titles, tuple(aliases), season, media.get("format") or "", primary_titles)]
+            _logger.debug("Anikoto identity search: AniList=%s query=%r candidates=%d exact_matches=%d",
+                          pid_clean, query, len(candidates), len(matches))
+            if len(matches) > 1:
+                _logger.warning("Anikoto ambiguous identity for AniList %s: %s", pid_clean,
+                                tuple(url for url, _ in matches))
+                return None, None
+            verified_site_id = None
+            verified_catalog = None
+            if not matches and media.get("idMal") and query.casefold() == native_query.casefold():
+                # Site translations can omit every AniList alias. A small native
+                # search probe may establish identity by MAL ID, never word overlap.
+                for aliases, candidate_url, candidate_id in tuple(candidates.values())[:_MAX_NATIVE_ID_PROBES]:
+                    if not candidate_id:
+                        continue
+                    try:
+                        soup = self._episode_page(candidate_id, candidate_url, media, generation=generation)
+                    except (urllib.error.URLError, OSError, HTTPException, json.JSONDecodeError) as exc:
+                        _logger.debug("Anikoto native identity probe failed: %s", exc)
+                        continue
+                    if soup is not None:
+                        matches = [(candidate_url, tuple(aliases))]
+                        verified_site_id = candidate_id
+                        verified_catalog = soup
+                        break
+            if not matches:
+                continue
+            watch_url, matched_titles = matches[0]
+            if watch_url in checked_pages:
+                continue
+            checked_pages.add(watch_url)
+            try:
                 req_watch = urllib.request.Request(watch_url, headers={**self.headers, "Referer": f"{self.anikoto_url}/"})
-                w_html = urllib.request.urlopen(req_watch, timeout=6).read().decode('utf-8', errors='ignore')
+                response = urllib.request.urlopen(req_watch, timeout=6)
+                if not _same_site_response(response, self.anikoto_url):
+                    _logger.warning("Anikoto rejected off-site watch redirect: %s", watch_url)
+                    continue
+                w_html = response.read().decode('utf-8', errors='ignore')
                 w_soup = BeautifulSoup(w_html, "html.parser")
-                main_div = w_soup.find(id="watch-main")
-                anime_id = (
-                    (main_div.get("data-id") if main_div else None)
-                    or (w_soup.select_one("[data-id]").get("data-id") if w_soup.select_one("[data-id]") else None)
-                    or (w_soup.select_one("[data-tip]").get("data-tip") if w_soup.select_one("[data-tip]") else None)
-                )
-                if anime_id and watch_url:
-                    self._anime_page_cache[pid_clean] = (anime_id, watch_url)
-                    if "id" in media:
-                        self._anime_page_cache[str(media["id"])] = (anime_id, watch_url)
+                anime_id = _page_id(w_soup)
+                title_matches = _matching_titles(titles, _page_titles(w_soup), season, media.get("format") or "", primary_titles)
+                if anime_id and (title_matches or anime_id == verified_site_id):
+                    if verified_site_id is not None and anime_id != verified_site_id:
+                        continue
+                    if media.get("idMal") and verified_site_id is None:
+                        verified_catalog = self._episode_page(anime_id, watch_url, media, generation=generation)
+                        if verified_catalog is None:
+                            continue
+                    self._remember_anime_page(pid_clean, anime_id, watch_url, generation, media)
+                    if _verified_catalogs is not None and verified_catalog is not None:
+                        _verified_catalogs[(anime_id, watch_url)] = verified_catalog
+                    _logger.debug("Anikoto verified identity: AniList=%s MAL=%s site_id=%s page=%s titles=%r",
+                                  pid_clean, media.get("idMal"), anime_id, watch_url, _page_titles(w_soup))
                     return anime_id, watch_url
-        except Exception as e:
-            _logger.debug("Anikoto _get_anime_page error: %s", e)
-
+                _logger.warning("Anikoto rejected watch identity: AniList=%s site_id=%s page=%s titles=%r",
+                                pid_clean, anime_id, watch_url, _page_titles(w_soup))
+            except (urllib.error.URLError, OSError, HTTPException, json.JSONDecodeError) as exc:
+                _logger.debug("Anikoto watch identity request failed: %s", exc)
+        _logger.warning("Anikoto could not verify a website identity for AniList %s; not guessing", pid_clean)
         return None, None
 
     def search(self, query: str, ttype: str = "sub") -> list[dict[str, Any]]:
+        generation = self._cache_epoch()
         try:
             from ..core.anilist_fallback import search_anilist_with_fallback
             res = search_anilist_with_fallback(query)
@@ -364,7 +598,7 @@ class AnikotoProvider:
             results = []
             for media in media_list:
                 if "id" in media:
-                    self._media_cache[str(media["id"])] = media
+                    self._remember_media(str(media["id"]), media, generation=generation)
                 titles = media.get("title") or {}
                 main_name = titles.get("romaji") or titles.get("english") or "Unknown"
                 ep_count = media.get("episodes") or 0
@@ -386,6 +620,7 @@ class AnikotoProvider:
                     "score": media.get("averageScore"),
                     "genres": media.get("genres", []),
                     "description": media.get("description", ""),
+                    "_metadata_fields_loaded": tuple(key for key in ("description", "genres") if key in media),
                     "availableEpisodes": {
                         "sub": ep_count,
                         "dub": ep_count if ttype == "dub" else 0,
@@ -408,23 +643,49 @@ class AnikotoProvider:
                 return None
             title_data = anilist_normalize.normalize_media(media)
             if title_data:
+                title_data["aniListId"] = str(media["id"])
                 eps = title_data.get("availableEpisodes", {})
                 eps["dub"] = eps.get("sub", 0)
+                loaded = tuple(key for key in ("description", "genres") if key in media)
+                if loaded:
+                    title_data["_metadata_fields_loaded"] = loaded
             return normalize_title(title_data, provider_id=self.id, provider_name=self.name, id_key="_id")
         except Exception as e:
             _logger.debug("Anikoto get_title error: %s", e)
             return None
 
+    def _episode_identity(
+        self, provider_id: str,
+        verified_catalogs: dict[tuple[str, str], BeautifulSoup] | None = None,
+    ) -> tuple[str | None, str | None, dict[str, Any] | None]:
+        direct = str(provider_id).strip().startswith(("/watch/", "http"))
+        media = None if direct else self._fetch_media(provider_id)
+        if media is None and not direct:
+            self.invalidate_title_cache(provider_id)
+            return None, None, None
+        # Retain identity fields for this operation even if a concurrent refresh
+        # removes or replaces the session's cached media before the response.
+        media = dict(media) if media is not None else None
+        if verified_catalogs is None:
+            anime_id, watch_url = self._get_anime_page(provider_id)
+        else:
+            anime_id, watch_url = self._get_anime_page(provider_id, _verified_catalogs=verified_catalogs)
+        return anime_id, watch_url, media
+
     def episode_catalog(self, provider_id: str, ttype: str = "sub") -> dict[str, Any]:
         try:
             # 1. Try resolving actual episode catalog from Anikoto website
-            anime_id, watch_url = self._get_anime_page(provider_id)
+            verified_catalogs: dict[tuple[str, str], BeautifulSoup] = {}
+            anime_id, watch_url, media = self._episode_identity(provider_id, verified_catalogs)
             if anime_id and watch_url:
-                vrf_param = f"?vrf={_vrf_encrypt(anime_id)}"
-                ep_url = f"{self.anikoto_url}/ajax/episode/list/{anime_id}{vrf_param}"
-                req_ep = urllib.request.Request(ep_url, headers={**self.headers, "Referer": watch_url, "X-Requested-With": "XMLHttpRequest"})
-                ep_res = json.loads(urllib.request.urlopen(req_ep, timeout=6).read().decode('utf-8'))
-                ep_soup = BeautifulSoup(ep_res.get("result", ""), "html.parser")
+                # This handoff lives only for this call. Later catalog/source
+                # requests must fetch and validate their own episode response.
+                ep_soup = verified_catalogs.get((anime_id, watch_url))
+                if ep_soup is None:
+                    ep_soup = self._episode_page(anime_id, watch_url, media)
+                if ep_soup is None:
+                    # Continue through the existing metadata fallback, not an unverified catalog.
+                    ep_soup = BeautifulSoup("", "html.parser")
 
                 sub_ids = []
                 dub_ids = []
@@ -732,29 +993,20 @@ class AnikotoProvider:
 
         # 1. Multi-Server Extraction via anikototv.to
         try:
-            anime_id, watch_url = self._get_anime_page(provider_id)
+            anime_id, watch_url, media = self._episode_identity(provider_id)
 
             if anime_id and watch_url:
-                vrf_param = f"?vrf={_vrf_encrypt(anime_id)}"
-                ep_url = f"{self.anikoto_url}/ajax/episode/list/{anime_id}{vrf_param}"
-                req_ep = urllib.request.Request(ep_url, headers={**self.headers, "Referer": watch_url, "X-Requested-With": "XMLHttpRequest"})
-                ep_res = json.loads(urllib.request.urlopen(req_ep, timeout=6).read().decode('utf-8'))
-                ep_soup = BeautifulSoup(ep_res.get("result", ""), "html.parser")
+                ep_soup = self._episode_page(anime_id, watch_url, media)
+                if ep_soup is None:
+                    ep_soup = BeautifulSoup("", "html.parser")
 
                 target_a = None
                 for a in ep_soup.find_all("a"):
                     if a.get("data-number") == str(episode) or a.get("data-num") == str(episode) or a.get("data-slug") == str(episode):
                         target_a = a
                         break
-                if not target_a:
-                    all_a = ep_soup.find_all("a")
-                    try:
-                        ep_idx = int(episode) - 1
-                        if 0 <= ep_idx < len(all_a):
-                            target_a = all_a[ep_idx]
-                    except Exception:
-                        pass
-
+                # List position is not an episode identity. Unlabelled links may
+                # be controls or other content, so use the ID-based fallback.
                 if target_a and target_a.get("data-ids"):
                     data_ids = target_a.get("data-ids")
                     sv_url = f"{self.anikoto_url}/ajax/server/list?servers={urllib.parse.quote(data_ids)}"

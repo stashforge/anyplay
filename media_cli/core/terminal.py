@@ -10,7 +10,7 @@ _TERMINAL_STRING_RE = re.compile(
 )
 
 
-def sanitize_terminal_text(value):
+def sanitize_terminal_text(value: object) -> str:
     text = str(value or "")
     text = _TERMINAL_STRING_RE.sub("", text)
     text = _ANSI_RE.sub("", text)
@@ -21,23 +21,23 @@ def sanitize_terminal_text(value):
     return re.sub(r"\s+", " ", text).strip()
 
 
-def strip_ansi(value):
+def strip_ansi(value: object) -> str:
     text = str(value or "")
     text = _TERMINAL_STRING_RE.sub("", text)
     return _ANSI_RE.sub("", text)
 
 
-def char_width(char):
+def char_width(char: str) -> int:
     if unicodedata.combining(char):
         return 0
     return 2 if unicodedata.east_asian_width(char) in ("F", "W") else 1
 
 
-def display_width(value):
+def display_width(value: object) -> int:
     return sum(char_width(char) for char in strip_ansi(str(value or "")))
 
 
-def truncate_display(value, max_width):
+def truncate_display(value: object, max_width: int) -> str:
     value = str(value or "")
     if max_width <= 0 or display_width(value) <= max_width:
         return value
@@ -78,7 +78,7 @@ def split_display_prefix(value, max_width):
     return "".join(output), ""
 
 
-def fit_terminal_line(line, columns):
+def fit_terminal_line(line: object, columns: int) -> str:
     """Keep a trusted ANSI-styled TUI line from triggering terminal autowrap."""
     return truncate_display(str(line or ""), max(1, int(columns) - 1))
 

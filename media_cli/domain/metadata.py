@@ -387,7 +387,7 @@ def anilist_status_label(anime, local_only=False, hide_status=None):
     ) or anime_status_label(anime)
 
 
-def format_info_metadata_line(
+def _info_metadata_fields(
     anime,
     ttype="sub",
     now=None,
@@ -447,29 +447,82 @@ def format_info_metadata_line(
     score_text = f"★ {score}" if score else "★ -"
 
     if anilist_label:
-        details.append(anilist_label)
+        status_role = {
+            "CURRENT": "anilist.watching", "COMPLETED": "anilist.completed",
+            "PLANNING": "anilist.planning", "DROPPED": "anilist.dropped",
+            "PAUSED": "anilist.paused", "REPEATING": "anilist.rewatching",
+        }[normalize_anilist_list_status(anime.get("_anilist_list"))]
+        details.append((status_role, anilist_label))
     try:
         from media_cli.core.network import is_confirmed_offline
         if is_confirmed_offline():
-            details.append("\033[38;2;230;80;80mOFFLINE\033[0m")
+            details.append(("metadata.offline", "\033[38;2;230;80;80mOFFLINE\033[0m"))
     except Exception:
         pass
     if media_status_label:
-        details.append(media_status_label)
+        details.append(("metadata.status", media_status_label))
     if anime_type:
-        details.append(anime_type)
+        details.append(("details", anime_type))
     if sub_dub_label:
-        details.append(sub_dub_label)
+        details.append(("details", sub_dub_label))
     if progress:
-        details.append(progress)
+        details.append(("progress", progress))
     if available and (not progress or str(available).split()[-1] not in str(progress)):
-        details.append(available)
+        details.append(("details", available))
     if next_airing:
-        details.append(f"\033[38;5;117m{next_airing}{DIM}")
+        details.append(("metadata.airing", f"\033[38;5;117m{next_airing}{DIM}"))
     if years:
-        details.append(years)
-    details.append(score_text)
-    return " • ".join(details)
+        details.append(("details", years))
+    details.append(("details", score_text))
+    return tuple(details)
+
+
+def format_info_metadata_line(
+    anime, ttype="sub", now=None, override_ep_str=None, local_only=False, hide_anilist_status=None,
+):
+    """Compatibility formatter; preserve existing string callers and colors."""
+    fields = _info_metadata_fields(anime, ttype, now, override_ep_str, local_only, hide_anilist_status)
+    return " • ".join(text for _role, text in fields)
+
+
+def format_info_metadata_parts(
+    anime, ttype="sub", now=None, override_ep_str=None, local_only=False, hide_anilist_status=None,
+) -> tuple[tuple[str, str], ...]:
+    """Return plain (text, role) pairs using the same metadata decisions.
+
+    This temporary domain adapter removes styling from known legacy producers.
+    Roles come from field provenance, never from ANSI colors or UI text guessing.
+    Progress producers have a fixed label/value shape, including local totals.
+    """
+    from ..core.terminal import sanitize_terminal_text, strip_ansi
+
+    fields = _info_metadata_fields(anime, ttype, now, override_ep_str, local_only, hide_anilist_status)
+    parts = []
+    for index, (role, legacy_text) in enumerate(fields):
+        if index:
+            parts.append((" • ", "metadata.separator"))
+        if role == "progress":
+            for position, progress in enumerate(strip_ansi(legacy_text).split(" • ")):
+                if position:
+                    parts.append((" • ", "metadata.separator"))
+                label, space, value = progress.partition(" ")
+                if label:
+                    parts.append((sanitize_terminal_text(label), "muted"))
+                if space:
+                    parts.append((" " + sanitize_terminal_text(value), "details"))
+        else:
+            parts.append((sanitize_terminal_text(legacy_text), role))
+    return tuple(parts)
+
+
+def title_metadata_complete(show: dict | None) -> bool:
+    """Distinguish authoritative empty fields from details not yet requested."""
+    if not show or not (show.get("aniListId") or show.get("anilistMatch")):
+        return False
+    loaded = show.get("_metadata_fields_loaded") or ()
+    if not isinstance(loaded, (tuple, list)):
+        loaded = ()
+    return all(show.get(field) or field in loaded for field in ("description", "genres"))
 
 
 def prepare_show_display_state(show, ttype="sub", sync_enabled=None, prefer_watched_episodes=False):
@@ -706,6 +759,13 @@ def batch_prepare_shows_display_state(shows, ttype="sub"):
 
 def apply_provider_metadata_to_history_show(show, provider_show):
     changed = False
+
+    if provider_show.get("_metadata_fields_loaded"):
+        loaded = tuple(sorted(set(show.get("_metadata_fields_loaded") or ()) |
+                              set(provider_show["_metadata_fields_loaded"])))
+        if tuple(show.get("_metadata_fields_loaded") or ()) != loaded:
+            show["_metadata_fields_loaded"] = loaded
+            changed = True
 
     for key in ("status", "episodeCount", "airedStart", "score", "type", "season"):
         val = provider_show.get(key)

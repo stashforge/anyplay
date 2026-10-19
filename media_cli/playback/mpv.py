@@ -30,6 +30,10 @@ from .rules import (
 _logger = logging.getLogger(__name__)
 
 
+class MpvStartupCancelled(Exception):
+    """The caller retired startup before its IPC connection was ready."""
+
+
 class MpvIpc:
     def __init__(self, redraw_callback=None):
         self.redraw_callback = redraw_callback
@@ -55,8 +59,15 @@ class MpvIpc:
         self._pending_audio_url = ""
         self._pending_audio_tracks = []
         self._pending_subtitle_url = ""
+        self._remote_skip_lookup = None
+        self._remote_skips_enabled = False
 
-    def start(self):
+    def start(self, *, cancel_check=None):
+        def check_cancelled():
+            if cancel_check and cancel_check():
+                raise MpvStartupCancelled
+
+        check_cancelled()
         if self.process and self.process.poll() is None:
             if self.client:
                 self.running = True
@@ -67,19 +78,22 @@ class MpvIpc:
             self.process = subprocess.Popen([
                 "mpv", "--idle=yes", "--keep-open=no", f"--input-ipc-server={self.socket_path}",
                 f"--input-conf={self.conf_path}", f"--chapters-file={self.chapters_path}",
-                f"--script={self.lua_path}", "--force-window=yes", "--no-ytdl",
+                f"--script={self.lua_path}", "--force-window=yes", "--no-ytdl", "--input-terminal=no",
                 "--autoload-files=no", "--osd-shadow-offset=2", "--osd-shadow-color=#B0000000",
-            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            ], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
             for _ in range(20):
+                check_cancelled()
                 if os.path.exists(self.socket_path): break
                 time.sleep(0.1)
 
+            check_cancelled()
             self.client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             self.client.connect(self.socket_path)
             self.client.setblocking(False)
             self.running = True
-        except Exception:
+            check_cancelled()
+        except BaseException:
             self.quit()
             raise
 
@@ -90,6 +104,19 @@ class MpvIpc:
         self.send_cmd("observe_property", 5, "paused-for-cache")
         self.send_cmd("observe_property", 6, "cache-buffering-state")
         self.send_cmd("observe_property", 7, "demuxer-cache-duration")
+
+    def adopt_startup(self, prepared):
+        """Move an accepted startup's process/socket into the persistent player."""
+        if prepared is self or not prepared.running or prepared.process is None or prepared.client is None:
+            raise ValueError("Startup has no ready mpv process and IPC connection")
+        if self.process is not None and self.process.poll() is None:
+            raise RuntimeError("Cannot replace an active mpv process")
+        self.quit()
+        for name in ("runtime_dir", "socket_path", "conf_path", "chapters_path", "lua_path", "process", "client"):
+            setattr(self, name, getattr(prepared, name, None))
+            setattr(prepared, name, None)
+        self.running = True
+        prepared.running = False
 
     def send_cmd(self, *args):
         if not self.running and not (self.process and self.process.poll() is None and self.client):
@@ -104,7 +131,7 @@ class MpvIpc:
     def load(
             self, url, title, headers, referer, start_time=0, osd_msg="",
             audio_url="", subtitle_url="", subtitles=None, skip_intervals=None, aniskip_auto=True, audio_tracks=None,
-            suppress_chapters=False):
+            suppress_chapters=False, skip_lookup=None):
         self.start()
         self.running = True
         if self.client:
@@ -123,7 +150,16 @@ class MpvIpc:
         self.props["percent-pos"] = 0
         self.max_playback_time = float(start_time or 0.0)
         self.file_loaded = False
-        self.skip_intervals = skip_intervals or []
+        self._remote_skips_enabled = skip_lookup is not None
+        if self._remote_skip_lookup is not None:
+            self._remote_skip_lookup.reset(None, None)
+        if self._remote_skips_enabled:
+            if self._remote_skip_lookup is None:
+                from .skip_lookup import SkipLookup
+                self._remote_skip_lookup = SkipLookup()
+            self._remote_skip_lookup.reset(*skip_lookup, skip_intervals or ())
+        self.skip_intervals = [] if self._remote_skips_enabled else (skip_intervals or [])
+        self._suppress_skip_chapters = suppress_chapters
         self.aniskip_auto = aniskip_auto
         self.skipped_intervals = set()
         self.active_skip_prompt = None
@@ -193,6 +229,23 @@ class MpvIpc:
             msg_parts.append(osd_msg)
         self.initial_osd_msg = "\n".join(msg_parts)
 
+    def _refresh_remote_skips(self):
+        if not self._remote_skips_enabled:
+            return
+        intervals = list(self._remote_skip_lookup.poll(self.props.get("duration", 0)))
+        if intervals == self.skip_intervals:
+            return
+        self.skip_intervals = intervals
+        self.skipped_intervals = set()
+        self.active_skip_prompt = None
+        self.send_cmd(
+            "script-message", "set_skip_intervals", json.dumps(intervals),
+            "yes" if self.aniskip_auto else "no",
+            "clear" if self._suppress_skip_chapters or not intervals else "keep",
+        )
+        _logger.debug("AniSkip activated %d validated interval(s), duration=%r",
+                      len(intervals), self.props.get("duration"))
+
     def _attach_pending_external_tracks(self):
         if getattr(self, "_pending_audio_tracks", None):
             has_selected = False
@@ -230,6 +283,10 @@ class MpvIpc:
 
 
     def quit(self):
+        if self._remote_skip_lookup is not None:
+            self._remote_skip_lookup.close()
+            self._remote_skip_lookup = None
+        self._remote_skips_enabled = False
         self.send_cmd("quit")
         if self.client:
             try: self.client.close()
@@ -254,9 +311,9 @@ class MpvIpc:
         self.socket_path = None
         self.conf_path = None
 
-    def wait_for_playback(self, ui_info, current_ep, total_eps, fetch_callback, is_binge=False):
+    def wait_for_playback(self, ui_info, current_ep, total_eps, fetch_callback, is_binge=False, *, terminal_managed=False):
         tty_fd = sys.stdin.fileno()
-        if os.isatty(tty_fd):
+        if not terminal_managed and os.isatty(tty_fd):
             old_attrs = termios.tcgetattr(tty_fd)
             tty.setcbreak(tty_fd)
         else:
@@ -336,6 +393,7 @@ class MpvIpc:
                 now = time.monotonic()
                 elapsed = max(0.0, now - last_playback_tick)
                 last_playback_tick = now
+                self._refresh_remote_skips()
                 if playback_is_actively_advancing(
                     self.props, initial_osd_shown
                 ):
@@ -546,6 +604,8 @@ class MpvIpc:
                                     if name in self.props:
                                         if val is not None:
                                             self.props[name] = val
+                                        if name == "duration":
+                                            self._refresh_remote_skips()
                                         redraw()
 
                                         if name == "playback-time" and val is not None:

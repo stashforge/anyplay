@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from urllib.parse import quote, urlencode
-from concurrent.futures import ThreadPoolExecutor
+from ..core.workers import DaemonExecutor
+from threading import Lock, Thread
 
 from .http import request_json
 
@@ -161,7 +162,7 @@ def search(query: str) -> dict:
                 return {**item, **get_artist(item.get("slug", ""), summary=True)}
             except Exception:
                 return item
-        with ThreadPoolExecutor(max_workers=2) as pool:
+        with DaemonExecutor(max_workers=2) as pool:
             result["artists"] = list(pool.map(enrich_artist, result.get("artists") or []))
         return result
     return {}
@@ -210,8 +211,34 @@ def artist_sections(artist: dict) -> list[dict]:
                 "credit": _text((group.get("artistmember") or {}).get("as")),
                 "group": group["name"]}
 
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        sections.extend(section for section in pool.map(group_section, artist.get("groups") or []) if section["rows"])
+    groups = artist.get("groups") or []
+    results = [None] * len(groups)
+    pending = iter(enumerate(groups))
+    lock = Lock()
+    errors = []
+
+    def worker():
+        while True:
+            with lock:
+                try:
+                    index, group = next(pending)
+                except StopIteration:
+                    return
+            try:
+                results[index] = group_section(group)
+            except Exception as error:
+                with lock:
+                    errors.append(error)
+
+    # Group requests belong to a cancellable browsing session, not process exit.
+    workers = [Thread(target=worker, daemon=True, name="artist-group") for _ in range(min(2, len(groups)))]
+    for thread in workers:
+        thread.start()
+    for thread in workers:
+        thread.join()
+    if errors:
+        raise errors[0]
+    sections.extend(section for section in results if section and section["rows"])
     return sections
 
 

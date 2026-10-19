@@ -4,10 +4,13 @@ import os
 import shutil
 import subprocess
 import urllib.request
+from contextlib import nullcontext
 
+from ..ui.terminal_runtime import current_runtime, terminal_application
 from .android import PLAYERS
 
 
+@terminal_application
 def play_local_video(path, player, *, termux, error):
     path = os.path.abspath(os.path.expanduser(path))
     if not os.path.exists(path):
@@ -42,7 +45,9 @@ def play_local_video(path, player, *, termux, error):
         command = [chosen, path]
 
     try:
-        subprocess.run(command, check=False)
+        runtime = current_runtime()
+        with runtime.suspend() if runtime is not None else nullcontext():
+            subprocess.run(command, check=False)
         return True
     except Exception as exc:
         error(f"Could not open downloaded file: {exc}")

@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-import re
 import os
 import shlex
 import shutil
 import subprocess
 import tempfile
+from contextlib import nullcontext
 from typing import Any
+
+from ..ui.terminal_runtime import current_runtime, terminal_application
 
 
 class SkipFormError(ValueError):
@@ -238,6 +240,7 @@ def resolve_editor(config: dict | None = None) -> list[str]:
     raise SkipEditorError("No editor found. Set editor in config, or set VISUAL/EDITOR.")
 
 
+@terminal_application
 def edit_skip_form(
     *,
     title: str,
@@ -253,7 +256,17 @@ def edit_skip_form(
         while True:
             with open(path, "w", encoding="utf-8") as handle:
                 handle.write(content)
-            result = subprocess.run(editor_cmd + [path], check=False)
+            runtime = current_runtime()
+            from ..ui import display
+            was_alt_screen = display.is_alt_screen_active()
+            try:
+                if was_alt_screen:
+                    display.exit_alt_screen()
+                with runtime.suspend() if runtime is not None else nullcontext():
+                    result = subprocess.run(editor_cmd + [path], check=False)
+            finally:
+                if was_alt_screen:
+                    display.enter_alt_screen()
             if result.returncode != 0:
                 raise SkipEditorError(f"Editor exited with code {result.returncode}")
             with open(path, encoding="utf-8") as handle:

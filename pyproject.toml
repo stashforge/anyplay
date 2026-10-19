@@ -3,7 +3,7 @@ name = "anyplay"
 version = "0.9.2"
 description = "Terminal media stream player"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
     "requests",
     "curl-cffi",
@@ -15,6 +15,13 @@ dependencies = [
 anyplay = "media_cli.cli.main:run"
 
 [project.optional-dependencies]
+dev = [
+    "mypy==1.19.1",
+    "ruff==0.16.8",
+    "pytest>=7",
+    "cryptography>=41.0.0",
+    "tomli>=1; python_version < '3.11'",
+]
 allanime = [
     "cryptography>=41.0.0",
 ]
@@ -42,7 +49,7 @@ include = ["media_cli*"]
 "*" = ["*.json"]
 
 [tool.ruff]
-target-version = "py39"
+target-version = "py310"
 line-length = 120
 indent-width = 4
 
@@ -68,27 +75,46 @@ exclude = ["web/", "scratch/", "*.pyc", "__pycache__/"]
 "tests/*" = ["T201", "S101"]  # allow print/assert in tests
 
 [tool.mypy]
-python_version = "3.9"
+python_version = "3.10"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = false
 disallow_incomplete_defs = false
 check_untyped_defs = false
 disallow_untyped_decorators = false
-no_implicit_optional = false
 warn_redundant_casts = true
+strict_bytes = true
 warn_unused_ignores = true
 warn_no_return = true
 strict_optional = false
 implicit_optional = false
-ignore_missing_imports = true
+ignore_missing_imports = false
 namespace_packages = true
 explicit_package_bases = true
 files = ["media_cli"]
 
 [[tool.mypy.overrides]]
-module = ["media_cli.*"]
-ignore_missing_imports = true
+module = [
+    "media_cli.ui.footer", "media_cli.ui.fuzzy", "media_cli.core.network", "media_cli.core.workers",
+    "media_cli.ui.view_model", "media_cli.ui.picker_state", "media_cli.ui.view_session",
+    "media_cli.ui.terminal_runtime", "media_cli.ui.transition",
+]
+# Spell out mypy 1.19.1 strict flags: `strict = true` here leaks globally.
+disallow_any_generics = true
+disallow_subclassing_any = true
+disallow_untyped_calls = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+warn_unused_ignores = true
+warn_return_any = true
+implicit_reexport = false
+strict_equality = true
+extra_checks = true
+strict_optional = true
+implicit_optional = false
+ignore_missing_imports = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

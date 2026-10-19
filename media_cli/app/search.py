@@ -7,7 +7,8 @@ from __future__ import annotations
 import os
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import as_completed
+from ..core.workers import DaemonExecutor
 from typing import TYPE_CHECKING, Any
 
 from media_cli import app_core
@@ -21,7 +22,12 @@ from ..domain.episodes import episode_id_at, episode_index_for_id
 from ..domain.titles import get_show_display_title
 from ..ui import picker as _picker_mod
 from ..ui.help import picker_help, search_input_help
-from ..ui.spinner import spinner_frame, spinner_from_config
+from ..ui.actions import ActionBindings
+from ..ui.background_loading import BackgroundLoadingStatus
+from ..ui.footer import Footer
+from ..ui.loading_model import LoadingInteraction, LoadingOwner, LoadingPlacement, LoadingTaskSpec
+from ..core.terminal import sanitize_terminal_text
+from ..ui.spinner import spinner_from_config
 from . import playback as playback_mod
 from .footer import context_footer, context_prefix
 
@@ -46,6 +52,28 @@ def _session_badges(flags, args, *, search_context=False):
     return badges
 
 
+def prompt_search_query(flags, ui, *, provider_name, search_title="Search Anime"):
+    """Use the existing query-entry screen for any provider's new search."""
+    def header(_index):
+        parts = [""]
+        message = "Search & watch history is paused." if flags.incognito_mode else "Use Up/Down to browse previous searches."
+        parts.append(f"{_C_HINT}{message}{_RST}")
+        parts.append(f"\033[38;5;250mProvider: \033[1;97m{provider_name}{_RST}")
+        nav = "Enter=search  ? = Help  Esc=quit"
+        if flags.incognito_mode:
+            nav = f"\033[38;2;155;125;185mINCOGNITO\033[0m | {nav}"
+        parts.append(f"{_C_HINT}{ui.search_error + '  |  Esc=quit' if ui.search_error else nav}{_RST}")
+        return "\n".join(parts)
+
+    return tui_pick(
+        flags, ui, search_title, [], header_fn=header,
+        return_query_on_enter=True,
+        query_history=[] if flags.incognito_mode else app_core.load_search_history(),
+        delete_fn=None if flags.incognito_mode else app_core.delete_search_history_entry,
+        is_search=True, help_dict=search_input_help("Quit"),
+    )
+
+
 # ---------------------------------------------------------------------------
 # HISTORY
 # ---------------------------------------------------------------------------
@@ -64,6 +92,15 @@ def handle_history_state(
     if not hist:
         app_core.warn("Watch history is empty.")
         return "QUIT"
+
+    history_loading = BackgroundLoadingStatus(
+        LoadingTaskSpec(
+            "refresh", LoadingOwner("history", 0), "Updating",
+            LoadingInteraction.BACKGROUND, LoadingPlacement.FOOTER,
+            ActionBindings(()), delay=0,
+        ),
+        spinner_from_config(cfg),
+    )
 
     # Pre-warm all history shows display state in RAM immediately
     shows = [h.get("show") for h in hist if isinstance(h.get("show"), dict)]
@@ -149,7 +186,7 @@ def handle_history_state(
                     except Exception:
                         return entry, False
 
-                with ThreadPoolExecutor(max_workers=4) as executor:
+                with DaemonExecutor(max_workers=4, max_pending=max(4, len(provider_entries) + 1)) as executor:
                     anilist_future = executor.submit(
                         app_core.refresh_history_anilist_airing_batch,
                         entries,
@@ -244,25 +281,16 @@ def handle_history_state(
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _history_footer(entry, width):
+    def _history_footer(entry, width, statuses=()):
         updated = app_core.format_history_updated_time(entry)
-        incog_badge = "\033[38;2;155;125;185mINCOGNITO (READ-ONLY)\033[0m" if flags.incognito_mode else ""
+        incog_badge = "INCOGNITO (READ-ONLY)" if flags.incognito_mode else ""
         show = entry.get("show", {}) if isinstance(entry, dict) else {}
-        default = context_footer(
-            show,
-            ui,
-            ms,
-            incog_badge,
-            f"Updated {updated}" if updated else "",
-            "Enter/Right open",
-            "Left search",
-            "Tab/Ctrl+N next",
-            "Ctrl+R refresh title",
-            "F5/Alt+R refresh view",
-            "Del/Ctrl+D delete",
-            "Esc quit",
-            mode="History",
-        )
+        context = (context_prefix(show, ui, ms, mode="History"), incog_badge, f"Updated {updated}" if updated else "")
+        default = Footer(statuses=tuple(statuses),
+                         context=tuple(sanitize_terminal_text(part) for part in context if part),
+                         actions=("Enter open", "Tab/Ctrl+N next", "Ctrl+R refresh title",
+                                  "F5/Alt+R refresh view", "Del/Ctrl+D delete", "Esc quit"),
+                         status_separator=" • ")
         return app_core._poster_footer_line(show, default, width)
 
     def _hist_top_hdr(si):
@@ -310,22 +338,8 @@ def handle_history_state(
 
         status_msg = history_refresh_status.get("BATCH") or history_refresh_status.get("SINGLE")
 
-        if status_msg:
-            spinner = spinner_frame(spinner_from_config(cfg))
-            loading_footer = _footer_parts(
-                f"\033[36m{spinner} Updating\033[0m\033[38;5;244m",
-                context_prefix(selected_show, ui, ms, mode="History"),
-                "Enter/Right open",
-                "Left search",
-                "Tab/Ctrl+N next",
-                "Ctrl+R refresh title",
-                "F5/Alt+R refresh view",
-                "Del/Ctrl+D delete",
-                "Esc quit",
-            )
-            parts.append(app_core._poster_footer_line(selected_show, loading_footer, w))
-        else:
-            parts.append(_history_footer(selected_entry, w))
+        status = history_loading.read(bool(status_msg))
+        parts.append(_history_footer(selected_entry, w, (status,) if status is not None else ()))
 
         return "\n".join(parts)
 
@@ -406,24 +420,28 @@ def handle_history_state(
 
     selected_history_episode_ids = {}
 
-    def _hist_select_loading_message(selected):
-        return "Checking episode list…"
-
     def _hist_select(selected):
         if selected is None or not (0 <= selected < len(filtered_hist)):
             return True
         entry = filtered_hist[selected]
-        selected_show = entry.get("show", {})
         selected_ttype = entry.get("translation_type", "sub")
-        if history_domain.history_entry_refresh_is_stale(entry, now=time.time()):
-            try:
-                app_core.refresh_history_entry_provider_catalog(entry)
-            except Exception:
-                pass
-        selected_history_episode_ids[selected] = app_core.ensure_episode_ids(
-            selected_show,
-            selected_ttype,
-        )
+        from copy import deepcopy
+        from ..ui.transition import PreparationCancelled
+
+        detached = deepcopy(entry)
+        def prepare():
+            if history_domain.history_entry_refresh_is_stale(detached, now=time.time()):
+                app_core.refresh_history_entry_provider_catalog(detached)
+            ids = app_core.ensure_episode_ids(detached.get("show", {}), selected_ttype)
+            app_core.prepare_show_display_state(detached.get("show", {}), selected_ttype)
+            return ids
+
+        try:
+            ids = app_core.with_loading("Checking episode list…", prepare)
+        except PreparationCancelled:
+            return False
+        entry.update(detached)
+        selected_history_episode_ids[selected] = ids
         _persist_history_entry_state(entry)
         return True
 
@@ -445,25 +463,27 @@ def handle_history_state(
     hist_help["Alt+R"] = "Refresh visible titles"
     hist_help["F5"] = "Refresh visible titles"
 
-    hidx = tui_pick(
-        flags, ui,
-        _hist_prompt, hopts,
-        header_fn=_hist_hdr,
-        top_header_fn=_hist_top_hdr,
-        tab_fn=_hist_tab,
-        reverse_fn=_hist_refresh,
-        alt_reverse_fn=_hist_refresh_visible,
-        delete_fn=_hist_delete,
-        live_fn=lambda _query: (list(hopts), "", False),
-        info_fn=app_core.make_info_fn(lambda: [e.get("show", {}) for e in filtered_hist], ui),
-        help_dict=hist_help,
-        keep_cursor_hidden_on_select=True,
-        count_total=lambda: len(hist),
-        tick_fn=_hist_tick,
-        item_prefix_fn=_hist_item_prefix,
-        select_fn=_hist_select,
-        select_loading_message_fn=_hist_select_loading_message,
-    )
+    try:
+        hidx = tui_pick(
+            flags, ui,
+            _hist_prompt, hopts,
+            header_fn=_hist_hdr,
+            top_header_fn=_hist_top_hdr,
+            tab_fn=_hist_tab,
+            reverse_fn=_hist_refresh,
+            alt_reverse_fn=_hist_refresh_visible,
+            delete_fn=_hist_delete,
+            live_fn=lambda _query: (list(hopts), "", False),
+            info_fn=app_core.make_info_fn(lambda: [e.get("show", {}) for e in filtered_hist], ui),
+            help_dict=hist_help,
+            keep_cursor_hidden_on_select=True,
+            count_total=lambda: len(hist),
+            tick_fn=_hist_tick,
+            item_prefix_fn=_hist_item_prefix,
+            select_fn=_hist_select,
+        )
+    finally:
+        history_loading.read(False)
     if hidx == -2:
         return "QUIT"
     if hidx == -3:
@@ -477,11 +497,13 @@ def handle_history_state(
         ms.show_id = show.get("_id")
         ms.show_title = get_show_display_title(show)
         ms.total_eps = show.get("availableEpisodes", {}).get(ttype_hist, 1)
-        ms.current_ep = app_core.playback_ep_from_history_entry(h, ttype_hist)
-
         episode_ids = selected_history_episode_ids.get(hidx)
         if episode_ids is None:
             episode_ids = app_core.ensure_episode_ids(show, ttype_hist)
+
+        ms.current_ep = app_core.playback_ep_from_history_entry(
+            h, ttype_hist, episode_ids=episode_ids, episode_labels=show.get("_episode_labels") or {},
+        )
 
         ms.total_eps = len(episode_ids) or ms.total_eps
         ms.current_ep_index = episode_index_for_id(episode_ids, ms.current_ep, labels=show.get("_episode_labels"))
@@ -534,27 +556,6 @@ def handle_search_state(
 
     search_title = f"Search {category}"
 
-    def _search_input_header(provider_name, esc_action="quit"):
-        def _hdr(si):
-            C_K = "\033[38;5;244m"
-            R = "\033[0m"
-            parts = [""]
-            if flags.incognito_mode:
-                parts.append(f"{C_K}Search & watch history is paused.{R}")
-            else:
-                parts.append(f"{C_K}Use Up/Down to browse previous searches.{R}")
-            if provider_name:
-                parts.append(f"\033[38;5;250mProvider: \033[1;97m{provider_name}{R}")
-            nav = f"Enter=search  ? = Help  Esc={esc_action}"
-            if flags.incognito_mode:
-                nav = f"\033[38;2;155;125;185mINCOGNITO\033[0m | {nav}"
-            if ui.search_error:
-                parts.append(f"{C_K}{ui.search_error}  │  Esc={esc_action}{R}")
-            else:
-                parts.append(f"{C_K}{nav}{R}")
-            return "\n".join(parts)
-        return _hdr
-
     def _search_cover_header(get_results_fn):
         def _hdr(si):
             shows_local = get_results_fn()
@@ -586,18 +587,7 @@ def handle_search_state(
 
     # Step 1: Input Page
     if not ms.query_str:
-        hd1 = search_input_help("Quit")
-        q_history = [] if flags.incognito_mode else app_core.load_search_history()
-        res = tui_pick(
-            flags, ui,
-            search_title, [],
-            header_fn=_search_input_header(provider_name),
-            return_query_on_enter=True,
-            query_history=q_history,
-            delete_fn=app_core.delete_search_history_entry if not flags.incognito_mode else None,
-            is_search=True,
-            help_dict=hd1
-        )
+        res = prompt_search_query(flags, ui, provider_name=provider_name, search_title=search_title)
         ui.search_error = ""
         if res == -2:
             return "QUIT"
@@ -636,7 +626,7 @@ def handle_search_state(
         if hasattr(app_core, "_poster_manager") and hasattr(app_core._poster_manager, "prewarm_shows"):
             app_core._poster_manager.prewarm_shows(shows_list)
     initial_opts = [f"{app_core.get_show_display_title(s)}" for s in shows_list]
-    hd2 = picker_help("Select anime", "New search", "Quit")
+    hd2 = picker_help("Select anime", "New search", "New search")
 
     # Pre-compute headers for all shows (0-delay cursor navigation)
     _precomputed_headers: dict[int, str] = {}
@@ -650,7 +640,7 @@ def handle_search_state(
                 get_results,
                 get_loading,
                 selected_idx=i,
-                esc_action="quit",
+                esc_action="search",
                 get_error_fn=_get_error_fn,
                 filter_query="",
                 badges=_session_badges(flags, args, search_context=True),
@@ -668,7 +658,7 @@ def handle_search_state(
                 get_results,
                 get_loading,
                 selected_idx=si,
-                esc_action="quit",
+                esc_action="search",
                 get_error_fn=_get_error_fn,
                 filter_query=ui.active_picker_query or "",
                 badges=_session_badges(flags, args, search_context=True),
@@ -682,7 +672,7 @@ def handle_search_state(
                 get_results,
                 get_loading,
                 selected_idx=si,
-                esc_action="quit",
+                esc_action="search",
                 get_error_fn=_get_error_fn,
                 filter_query=ui.active_picker_query or "",
                 badges=_session_badges(flags, args, search_context=True),
@@ -711,7 +701,7 @@ def handle_search_state(
                 get_results,
                 get_loading,
                 selected_idx=si,
-                esc_action="quit",
+                esc_action="search",
                 get_error_fn=_get_error_fn,
                 filter_query="",
                 badges=_session_badges(flags, args, search_context=True),
@@ -735,16 +725,25 @@ def handle_search_state(
         if not shows or not (0 <= idx < len(shows)):
             return False
         s = shows[idx]
+        from .details_preparation import prepare_details_transition, commit_details_transition
+        from ..ui.transition import PreparationCancelled
+        try:
+            prepared = app_core.with_loading(
+                f"Loading {ttype.upper()} episodes…", prepare_details_transition, s, ttype
+            )
+        except PreparationCancelled:
+            return False
+        ep_ids = list(prepared.episode_ids)
+        if not ep_ids:
+            err_msg = app_core.episode_catalog_error(prepared.show)
+            app_core.set_action_feedback(s, err_msg)
+            ui.search_error = err_msg
+            return False
+        commit_details_transition(s, prepared)
         ui.ui_show_ctx = s
         ui.ui_ttype_ctx = ttype
         ui.hovered_show_obj = s
         app_core._hovered_show_id = s.get("_id") or s.get("id")
-        ep_ids = app_core.load_episode_ids_for_selection(s, ttype)
-        if not ep_ids:
-            err_msg = app_core.episode_catalog_error(s)
-            app_core.set_action_feedback(s, err_msg)
-            ui.search_error = err_msg
-            return False
         loaded_episodes_map[str(s.get("_id") or idx)] = ep_ids
         return True
 
@@ -768,9 +767,7 @@ def handle_search_state(
     ms.last_aa_query_str = ms.query_str
     ms.last_aa_shows = shows
 
-    if idx == -2:
-        return "QUIT"
-    elif idx == -3:
+    if idx in (-2, -3):
         ms.query_str = ""
         return "SEARCH"
     elif idx == -4:
@@ -824,7 +821,9 @@ def handle_search_state(
             ms.current_ep = episode_id_at(episode_ids, 0) if episode_ids else requested_ep
             requested_episode_missing = True
         elif (h := app_core.get_history_entry(s, ttype)):
-            ms.current_ep = app_core.playback_ep_from_history_entry(h, ttype)
+            ms.current_ep = app_core.playback_ep_from_history_entry(
+                h, ttype, episode_ids=episode_ids, episode_labels=s.get("_episode_labels") or {},
+            )
         else:
             ms.current_ep = episode_id_at(episode_ids, 0)
 

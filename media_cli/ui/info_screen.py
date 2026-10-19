@@ -16,13 +16,14 @@ from __future__ import annotations
 import os
 import re
 import sys
-import termios
-import tty
+from copy import deepcopy
 from typing import TYPE_CHECKING
 
 from ..core.terminal import fit_terminal_line as _fit
 from ..domain.metadata import positive_int as _positive_int
 from ..domain.titles import wrap_title as _wrap_title
+from .terminal_runtime import borrow_terminal, terminal_application
+from .transition import PreparationCancelled
 
 if TYPE_CHECKING:
     from ..context import UiState
@@ -237,6 +238,7 @@ def _build_content(show: dict, w: int) -> list[str]:
 # Public entry point
 # ---------------------------------------------------------------------------
 
+@terminal_application
 def show_info_screen(
     show: dict | None,
     *,
@@ -249,26 +251,35 @@ def show_info_screen(
     if (not show.get("description") or not show.get("genres")) and not show.get("_enrichment_attempted"):
         try:
             from ..core.enrichment import enrich_show_if_missing
-            enrich_show_if_missing(show)
+            from .display import with_loading
+
+            enriched = deepcopy(show)
+            with_loading("Loading info...", enrich_show_if_missing, enriched)
+        except PreparationCancelled:
+            return
         except Exception:
             pass
+        else:
+            show.update(enriched)
 
-    tty_fd = -1
-    tty_file = None
+    with borrow_terminal() as runtime:
+        if runtime is None:
+            return
+        runtime.assert_owner_thread()
+        _show_info_screen(show, runtime.fileno(), poster_manager=poster_manager, ui=ui)
+
+
+def _show_info_screen(
+    show: dict,
+    tty_fd: int,
+    *,
+    poster_manager: PosterManager | None,
+    ui: UiState | None,
+) -> None:
+    from . import terminal_images
+
+    first_frame_pending = True
     try:
-        tty_fd   = os.open("/dev/tty", os.O_RDWR)
-        tty_file = os.fdopen(tty_fd, "rb+", buffering=0)
-        tty_fd   = tty_file.fileno()
-        old_attrs = termios.tcgetattr(tty_fd)
-    except Exception:
-        return
-
-    # Clear current screen in-place (we are already inside the picker's alt-screen)
-    sys.stdout.write("\033[2J\033[H\033[?25l")
-    sys.stdout.flush()
-
-    try:
-        tty.setraw(tty_fd)
         scroll = 0
 
         # fetch poster once (may be empty string if unavailable)
@@ -277,7 +288,6 @@ def show_info_screen(
             ui.hovered_show_obj = show
         poster_raw = (poster_manager.get(show) if poster_manager else None) or ""
 
-        from . import terminal_images
         from .covers import (
             POSTER_HEIGHT,
         )
@@ -294,7 +304,7 @@ def show_info_screen(
             except Exception:
                 w, h = 80, 24
 
-            nonlocal poster_raw
+            nonlocal poster_raw, first_frame_pending
             # Refresh poster in case it just finished downloading
             if poster_manager and not poster_raw:
                 poster_raw = poster_manager.get(show) or ""
@@ -335,13 +345,15 @@ def show_info_screen(
                 out.append("\033[2K")
             out.append(f"\033[2K{footer}")
 
-            clear_sig = terminal_images.clear_if_active() if native else ""
+            clear_sig = terminal_images.replace_for_frame(has_image=bool(native))
             overlay   = f"\033[1;1H{native}" if native else ""
             sys.stdout.write(
-                clear_sig + "\033[H" + "\r\n".join(out)
+                clear_sig + ("\033[2J" if first_frame_pending else "")
+                + "\033[H" + "\r\n".join(out)
                 + overlay + "\033[?25l"
             )
             sys.stdout.flush()
+            first_frame_pending = False
             return clamped
 
         scroll = _render(scroll)
@@ -360,7 +372,6 @@ def show_info_screen(
                 break
 
     finally:
-        termios.tcsetattr(tty_fd, termios.TCSADRAIN, old_attrs)
         try:
             from .picker import invalidate_screen_buffer
             invalidate_screen_buffer()
@@ -370,7 +381,3 @@ def show_info_screen(
         # so the picker can render its own image on the next redraw.
         sys.stdout.write(terminal_images.clear_now() + "\033[?25h")
         sys.stdout.flush()
-        try:
-            tty_file.close()
-        except Exception:
-            pass

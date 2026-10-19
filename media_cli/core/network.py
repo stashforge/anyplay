@@ -34,7 +34,7 @@ def is_online(timeout: float = 1.5, cache_ttl: float = 15.0) -> bool:
             s.close()
             status = True
             break
-        except (OSError, socket.timeout):
+        except OSError:
             continue
 
     with _lock:

@@ -27,3 +27,14 @@ def clear_if_active() -> str:
         return ""
     _active = False
     return clear_terminal_images()
+
+
+def replace_for_frame(*, has_image: bool) -> str:
+    """Prepare deletion of the old image and ownership for the frame being written.
+
+    Emit the returned prefix together with the ready frame and its native image.
+    """
+    global _active
+    clear = clear_if_active()
+    _active = has_image
+    return clear

@@ -29,6 +29,7 @@ query ($search: String, $page: Int, $perPage: Int) {
             id
             idMal
             title { romaji english native }
+            synonyms
             description(asHtml: false)
             coverImage { large }
             bannerImage
@@ -37,6 +38,7 @@ query ($search: String, $page: Int, $perPage: Int) {
             season
             seasonYear
             episodes
+            nextAiringEpisode { episode airingAt timeUntilAiring }
             averageScore
             genres
         }

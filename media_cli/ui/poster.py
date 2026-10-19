@@ -8,13 +8,20 @@ import subprocess
 import tempfile
 import threading
 import time
+from dataclasses import replace
 
-from ..core.terminal import display_width, fit_terminal_line, truncate_display
+from ..core.terminal import sanitize_terminal_text
+from .actions import ActionBindings
+from .background_loading import BackgroundLoadingStatus
 from .covers import (
     chafa_cover_command,
     enforce_cache_limits,
     fetch_cover_bytes,
 )
+from .footer import Footer, FooterStatus, StatusKind, render_footer, render_legacy_footer, render_legacy_overlay
+from .loading_model import LoadingInteraction, LoadingOwner, LoadingPlacement, LoadingTaskSpec
+
+COVER_DOWNLOAD_DWELL_SECONDS = 0.25
 
 
 class PosterManager:
@@ -37,6 +44,7 @@ class PosterManager:
         self.download_lock = threading.Lock()
         self.active_downloads = set()
         self._raw_cache = {}
+        self._cover_loading = None
 
     def _mark_download(self, url_hash):
         with self.download_lock:
@@ -59,36 +67,52 @@ class PosterManager:
                 show["_poster_status"] = status
                 show["_poster_status_time"] = time.time()
 
-    def footer_line(self, show, default_text, width):
-        reset = "\033[0m"
-        hint = "\033[38;5;244m"
-        max_width = max(1, int(width) - 1)
+    def footer_line(self, show, default_text, width, *, persistent=False):
+        if isinstance(default_text, Footer):
+            status = self.footer_status(show, persistent=persistent) if default_text.include_cover_status else None
+            if status is not None and not any(existing.message == status.message for existing in default_text.statuses):
+                default_text = replace(default_text, statuses=default_text.statuses + (status,))
+            return render_footer(default_text, width)
 
-        def trim(value):
-            return truncate_display(value, max_width)
-
-        def split_replaced_footer(value):
-            if "\u2502" in default_text:
-                _, right = default_text.split("\u2502", 1)
-                return value, f"  \u2502{right}"
-            if default_text:
-                return value, f"  \u2502  {default_text}"
-            return value, ""
-
-        def status_line(value, color, loading=False):
-            left, right = split_replaced_footer(value)
-            if loading:
-                left = f"{self.loading_frame()} {left}"
-            right_width = max(0, max_width - display_width(left))
-            right = truncate_display(right, right_width)
-            return fit_terminal_line(f"{color}{left}{reset}{hint}{right}{reset}", width)
-
-        default_line = fit_terminal_line(f"{hint}{trim(default_text)}{reset}", width)
+        # Remaining string callers are a compatibility boundary only.
+        default_line = render_legacy_footer(default_text, width)
         if not self.enabled() or not show:
             return default_line
         clean_default = re.sub(r'\033\[[0-9;]*m', '', str(default_text or "")).strip()
         if clean_default.startswith('*') or clean_default.startswith('✓') or clean_default.startswith('✔'):
             return default_line
+        status = self.footer_status(show, persistent=persistent)
+        if status is None:
+            return default_line
+        navigation = default_text.split("\u2502", 1)[-1].strip()
+        return render_legacy_overlay(status, navigation, width)
+
+    def _cover_loading_status(self, show, active):
+        identity = (self._get_cover_url(show), show.get("_poster_status_time")) if active else None
+        previous = self._cover_loading
+        if previous is not None and (
+            not active or previous[0] is not show or previous[1] != identity
+        ):
+            previous[2].read(False)
+            self._cover_loading = None
+        if not active:
+            return None
+        if self._cover_loading is None:
+            spec = LoadingTaskSpec(
+                "cover-download-render", LoadingOwner("poster-cover", 0), "Loading cover",
+                LoadingInteraction.BACKGROUND, LoadingPlacement.FOOTER,
+                ActionBindings(()), delay=0,
+            )
+            self._cover_loading = (
+                show, identity, BackgroundLoadingStatus(spec, None, frame=self.loading_frame),
+            )
+        return self._cover_loading[2].read(True)
+
+    def footer_status(self, show, *, persistent=False):
+        """Expose cover state as semantic status, never as pre-colored text."""
+        if not self.enabled() or not show:
+            self._cover_loading_status(None, False)
+            return None
         with self.poster_lock:
             status = show.get("_poster_status")
             status_time = float(show.get("_poster_status_time", 0) or 0)
@@ -104,20 +128,29 @@ class PosterManager:
                         status = "ready"
 
         if has_raw or status == "ready":
-            return default_line
+            self._cover_loading_status(None, False)
+            return None
+        detail = sanitize_terminal_text(show.get("_image_message"))
+
+        def described(label):
+            return f"{label}: {detail}" if detail else label
+
         if status == "loading":
-            if status_time and time.time() - status_time > 4:
-                return default_line
-            return status_line("Loading cover", "\033[36m", loading=True)
-        if status_time and time.time() - status_time > 3:
-            return default_line
+            if not persistent and status_time and time.time() - status_time > 4:
+                self._cover_loading_status(None, False)
+                return None
+            loading = self._cover_loading_status(show, True)
+            return replace(loading, message=described("Loading cover")) if loading is not None else None
+        self._cover_loading_status(None, False)
+        if not persistent and status_time and time.time() - status_time > 3:
+            return None
         if status == "failed":
-            return status_line("Cover failed", "\033[38;5;203m")
+            return FooterStatus(described("Cover failed"), StatusKind.ERROR)
         if status == "missing":
-            return status_line("Cover unavailable", "\033[38;5;214m")
+            return FooterStatus(described("Cover unavailable"), StatusKind.WARNING)
         if status == "no_chafa":
-            return status_line("Cover needs chafa", "\033[38;5;214m")
-        return default_line
+            return FooterStatus(described("Cover needs chafa"), StatusKind.WARNING)
+        return None
 
     def needs_tick(self, show):
         if not self.enabled() or not show:
@@ -272,7 +305,7 @@ class PosterManager:
         threading.Thread(target=_worker, daemon=True).start()
 
     def _download(self, show, url, url_hash, cache_dir, cached_path):
-        time.sleep(0.15)
+        time.sleep(COVER_DOWNLOAD_DWELL_SECONDS)
         hovered = self.hovered_show_id()
         target_id = show.get("_id") or show.get("id") or show.get("title") or show.get("name")
         if hovered and target_id and str(hovered) != str(target_id):

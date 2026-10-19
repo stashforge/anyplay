@@ -14,9 +14,14 @@ focused, typed objects, each with a clear responsibility boundary:
 
 from __future__ import annotations
 
+from __future__ import annotations
+
 import sys
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .ui.picker_state import PickerState
 
 # ---------------------------------------------------------------------------
 # CliFlags
@@ -91,6 +96,9 @@ class UiState:
     # Active search query text inside the picker
     active_picker_query: str = ""
     """The live filter query string typed inside the current picker."""
+
+    _last_picker_position: tuple[str, PickerState] | None = None
+    _resume_picker_position: tuple[str, PickerState] | None = None
 
     # Error message shown in the search-input header
     search_error: str = ""

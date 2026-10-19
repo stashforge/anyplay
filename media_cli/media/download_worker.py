@@ -46,7 +46,7 @@ _PROGRESS_LOG_PREFIXES = ("yt-dlp:", "aria2c:", "ffmpeg:")
 _MAX_PROGRESS_LOG_LINES = 20
 
 
-def _append_progress_log(item: DownloadItem, message: str) -> None:
+def _append_progress_log(item: "DownloadItem", message: str) -> None:
     """Append a progress tick without discarding setup/error history."""
     item.logs.append(message)
     progress_indices = [

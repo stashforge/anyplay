@@ -27,6 +27,7 @@ import time
 from typing import Any
 
 try:
+    from .layout import MIN_TUI_COLUMNS
     from ..media.download_worker import (
         DownloadWorker,
         DownloadItem,
@@ -37,6 +38,7 @@ try:
         stop_global_worker,
     )
 except (ImportError, ValueError):
+    from media_cli.ui.layout import MIN_TUI_COLUMNS
     from media_cli.media.download_worker import (
         DownloadWorker,
         DownloadItem,
@@ -1077,6 +1079,10 @@ def show_download_exit_dialog(stdscr, active_count: int, queued_count: int) -> s
             return "CANCEL"
 
 
+from .terminal_runtime import terminal_application
+
+
+@terminal_application
 def prompt_download_exit_cli(active_count: int, queued_count: int, tty_fd: int | None = None) -> str:
     """Prompt the user in terminal cooked/raw mode when exiting CLI with downloads in progress.
 
@@ -1282,7 +1288,7 @@ def _curses_download_manager(stdscr, worker, standalone: bool = False, resize_pe
         table_w = width
         max_rows = 1
 
-        if height < 10 or width < 32:
+        if height < 10 or width < MIN_TUI_COLUMNS:
             safe_addstr(stdscr, 0, 0, "Terminal window too small!", curses.A_NORMAL)
             stdscr.refresh()
             ch = stdscr.getch()
@@ -1769,7 +1775,7 @@ def _curses_download_manager(stdscr, worker, standalone: bool = False, resize_pe
         elif show_logs_view:
             footer_text = " [↑/↓] Scroll Logs   [← / Esc / q] Back to Downloads"
         elif not is_wide:
-            footer_text = " [Space] Pause/Resume  [s] Stop  [r] Retry  [Enter/→] Logs  [Esc] Deselect  [q] Quit"
+            footer_text = " [Space] Pause/Resume  [s] Stop  [r] Retry  [Enter] Logs  [Esc] Deselect  [q] Quit"
         else:
             footer_text = " [Space] Pause/Resume  [s] Stop  [r] Retry  [+/-] Slots  [a] Add Ep  [Esc] Deselect  [q] Quit"
         safe_addstr(stdscr, footer_y, 0, footer_text[:width - 1], curses.A_DIM)
@@ -2076,6 +2082,7 @@ def _curses_download_manager(stdscr, worker, standalone: bool = False, resize_pe
     return "BACK"
 
 
+@terminal_application
 def run_download_manager(worker: DownloadWorker | None = None, standalone: bool = False, auto_quit: bool = False) -> str:
     """Launches the Download Manager curses TUI.
 
@@ -2109,6 +2116,11 @@ def run_download_manager(worker: DownloadWorker | None = None, standalone: bool 
             signal.signal(signal.SIGWINCH, _handle_download_manager_resize)
         except (AttributeError, OSError, ValueError):
             pass
+        from . import terminal_images
+        clear_images = terminal_images.replace_for_frame(has_image=False)
+        if clear_images:
+            sys.stdout.write(clear_images)
+            sys.stdout.flush()
         res = curses.wrapper(_runner)
     except curses.error:
         if standalone:
@@ -2124,6 +2136,10 @@ def run_download_manager(worker: DownloadWorker | None = None, standalone: bool 
             except (AttributeError, OSError, ValueError):
                 pass
         _restore_terminal_input_modes()
+        from .terminal_runtime import current_runtime
+        runtime = current_runtime()
+        if runtime is not None:
+            runtime.ensure_raw()
 
     if not standalone:
         try:

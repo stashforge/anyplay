@@ -2,7 +2,7 @@
 
 Owns the terminal-presentation state that used to live in app_core: the
 alt-screen flag, the configured spinner style, the PosterManager instance,
-and the threaded loading overlays drawn while blocking work runs.
+and presentation adapters for the shared blocking-work loading driver.
 
 Dependencies point downward only:
 
@@ -26,8 +26,8 @@ import os
 import re
 import sys
 import termios
-import threading
 import time
+from itertools import count
 
 from ..context import FLAGS
 from ..core.storage import cover_cache_dir, cover_read_cache_dirs
@@ -39,6 +39,7 @@ from .picker_render import (
 from .poster import PosterManager
 from .spinner import DEFAULT_SPINNER, spinner_from_config
 from .spinner import loading_line as _loading_line
+from .terminal_runtime import terminal_application
 
 _hovered_show_id_fn = None
 
@@ -59,6 +60,7 @@ def _hovered_show_id():
 # ---------------------------------------------------------------------------
 
 _spinner_style = DEFAULT_SPINNER
+_loading_activations = count(1)
 
 
 class suppress_terminal_echo:
@@ -126,6 +128,11 @@ def clear_terminal_images():
 
 
 def _poster_footer_line(show, default_text, width):
+    from .footer import Footer
+
+    if isinstance(default_text, Footer):
+        return _poster_manager.footer_line(show, default_text, width)
+
     # If default_text is a toast feedback message (not navigation shortcuts), show only the message
     clean_text = re.sub(r'\033\[[0-9;]*m', '', str(default_text or "")).strip()
     is_nav_footer = any(k in clean_text.lower() for k in ("enter", "left", "esc", "tab", "result"))
@@ -170,19 +177,17 @@ def is_alt_screen_active():
     return bool(_alt_screen_active)
 
 
+@terminal_application
 def enter_alt_screen():
     from ..context import FLAGS
-    if getattr(FLAGS, "plain_mode", False) or not sys.stdin.isatty():
+    if getattr(FLAGS, "plain_mode", False) or not sys.stdin.isatty() or not sys.stdout.isatty():
         return
     global _alt_screen_active
-    pending_image_clear = terminal_images.clear_if_active()
     if not _alt_screen_active:
+        pending_image_clear = terminal_images.clear_if_active()
         sys.stdout.write(pending_image_clear + "\033[?1049h\033[2J\033[?25l")
         sys.stdout.flush()
         _alt_screen_active = True
-    elif pending_image_clear:
-        sys.stdout.write(pending_image_clear)
-        sys.stdout.flush()
 
 
 _INITIAL_TERMIOS_ATTRS = None
@@ -193,9 +198,10 @@ except Exception:
     pass
 
 
+@terminal_application
 def exit_alt_screen():
     from ..context import FLAGS
-    if getattr(FLAGS, "plain_mode", False) or not sys.stdin.isatty():
+    if getattr(FLAGS, "plain_mode", False) or not sys.stdin.isatty() or not sys.stdout.isatty():
         return
     global _alt_screen_active
     if _alt_screen_active:
@@ -209,13 +215,9 @@ def exit_alt_screen():
         _alt_screen_active = False
 
 
+@terminal_application
 def restore_terminal():
     """Fully restore terminal echo, canonical mode, cursor, alt screen, and clear active terminal images."""
-    try:
-        from .player_screen import stop_loading_ticker
-        stop_loading_ticker()
-    except Exception:
-        pass
     try:
         terminal_images.clear_if_active()
     except Exception:
@@ -298,93 +300,123 @@ atexit.register(restore_terminal)
 # Loading overlays
 # ---------------------------------------------------------------------------
 
-def with_loading(msg, fn, *args, **kwargs):
-    from ..context import FLAGS
-    if getattr(FLAGS, "plain_mode", False) or not sys.stdin.isatty():
-        return fn(*args, **kwargs)
+def _invoke_loading_work(fn, args, kwargs, status_cb, *, preserve_callback=False):
+    import inspect
+    from ..core.terminal import sanitize_terminal_text
+
+    def status(message):
+        # Legacy callbacks are permissive; typed task records remain strict.
+        if isinstance(message, (list, tuple)):
+            status_cb(message)
+        elif message:
+            clean = sanitize_terminal_text(str(message)).strip()
+            if clean:
+                status_cb(clean)
+
+    work_kwargs = dict(kwargs)
+    try:
+        if "status_cb" in inspect.signature(fn).parameters:
+            if preserve_callback:
+                work_kwargs.setdefault("status_cb", status)
+            else:
+                work_kwargs["status_cb"] = status
+    except (TypeError, ValueError):
+        pass
+    return fn(*args, **work_kwargs)
+
+
+def _run_loading_helper(msg, fn, args, kwargs, paint, *, preserve_callback=False):
+    from .loading_model import LoadingInteraction, LoadingOwner, LoadingPlacement, LoadingTaskSpec
+    from .loading_preparation import LoadingPreparation
+    from .picker_actions import picker_bindings
+    from .terminal_runtime import borrow_terminal
+    from .transition import in_preparation, set_preparation_status
 
     spinner_style = kwargs.pop("_spinner_style", _spinner_style)
-    try:
-        ts = os.get_terminal_size()
-        w, h = ts.columns, ts.lines
-    except OSError:
-        w, h = 80, 24
+    if in_preparation():
+        set_preparation_status(msg)
+        return _invoke_loading_work(fn, args, kwargs, set_preparation_status, preserve_callback=True)
+    if getattr(FLAGS, "plain_mode", False) or not sys.stdin.isatty() or not sys.stdout.isatty():
+        return fn(*args, **kwargs)
 
     from ..core import reporting
     from ..core.terminal import sanitize_terminal_text
 
-    current_msg = [str(msg)]
+    with borrow_terminal() as runtime:
+        if runtime is None:
+            return fn(*args, **kwargs)
+        runtime.assert_owner_thread()
+        enter_alt_screen()
+        painted_rows = set()
 
-    def set_status(new_msg):
-        if new_msg:
-            current_msg[0] = str(new_msg)
+        def bindings():
+            return runtime.input_bindings or picker_bindings()
 
-    def _with_loading_sink(formatted_message, ansi_color):
-        clean_text = sanitize_terminal_text(formatted_message)
-        if clean_text:
-            clean_sub = (
-                clean_text
-                .replace("[INFO] ", "")
-                .replace("[OK] ", "")
-                .replace("[WARN] ", "")
-                .replace("[ERR] ", "")
-                .strip()
-            )
-            if clean_sub:
-                current_msg[0] = f"{msg} ({clean_sub})"
-        return True
+        def render(snapshot):
+            row = paint(snapshot, runtime.fileno(), spinner_style)
+            if row is not None:
+                painted_rows.add(row)
 
-    old_sink = reporting._status_sink
-    reporting.set_status_sink(_with_loading_sink)
+        spec = LoadingTaskSpec(
+            "work", LoadingOwner("preparation", next(_loading_activations)), msg,
+            LoadingInteraction.BLOCKING, LoadingPlacement.FOOTER, bindings(),
+        )
+        driver = LoadingPreparation(
+            spec, fd=runtime.fileno(), render=render,
+            active=is_alt_screen_active, bindings=bindings,
+        )
 
-    fd = sys.stdin.fileno()
-    old = termios.tcgetattr(fd)
-    result = {}
+        def status_sink(formatted_message, ansi_color):
+            clean_text = sanitize_terminal_text(formatted_message)
+            for prefix in ("[INFO] ", "[OK] ", "[WARN] ", "[ERR] "):
+                clean_text = clean_text.replace(prefix, "")
+            if clean_text.strip():
+                from .message_choices import MAX_MESSAGE_LENGTH
+                # Reports are legacy log text, not caller-supplied message choices.
+                message = f"{msg} ({clean_text.strip()})" if isinstance(msg, str) else clean_text.strip()
+                if len(message) > MAX_MESSAGE_LENGTH:
+                    message = message[:MAX_MESSAGE_LENGTH - 3] + "..."
+                driver.update(message)
+            return True
 
-    def _runner():
+        old_sink = reporting._status_sink
+        reporting.set_status_sink(status_sink)
+
+        def prepare(status):
+            # Scope only the worker; child UI must be free to install its own sink.
+            with reporting.status_sink_scope(status_sink):
+                return _invoke_loading_work(
+                    fn, args, kwargs, status, preserve_callback=preserve_callback,
+                )
+
         try:
-            import inspect
-            try:
-                sig = inspect.signature(fn)
-                if "status_cb" in sig.parameters:
-                    kwargs["status_cb"] = set_status
-            except Exception:
-                pass
-            result["value"] = fn(*args, **kwargs)
-        except BaseException as exc:
-            result["error"] = exc
-
-    try:
-        termios.tcflush(fd, termios.TCIFLUSH)
-        cbreak_attr = termios.tcgetattr(fd)
-        cbreak_attr[3] = cbreak_attr[3] & ~(termios.ECHO | termios.ICANON)
-        termios.tcsetattr(fd, termios.TCSANOW, cbreak_attr)
-
-        thread = threading.Thread(target=_runner, daemon=True)
-        thread.start()
-        while thread.is_alive():
-            sys.stdout.write(
-                f"\033[{h};1H\033[2K"
-                f"{_loading_line(current_msg[0], w, spinner_style)}"
-                "\033[?25l"
-            )
-            sys.stdout.flush()
-            thread.join(0.1)
-        if "error" in result:
-            raise result["error"]
-        return result.get("value")
-    finally:
-        if not _alt_screen_active:
-            sys.stdout.write(f"\033[{h};1H\033[2K")
-        try:
+            return driver.run(prepare)
+        finally:
+            reporting.set_status_sink(old_sink)
             from .picker import invalidate_screen_row
-            invalidate_screen_row(h)
-        except Exception:
-            pass
-        reporting.set_status_sink(old_sink)
-        termios.tcsetattr(fd, termios.TCSADRAIN, old)
-        termios.tcflush(fd, termios.TCIFLUSH)
-        sys.stdout.flush()
+            for row in painted_rows:
+                invalidate_screen_row(row)
+            sys.stdout.flush()
+
+
+def _paint_footer_loading(snapshot, fd, spinner_style):
+    try:
+        size = os.get_terminal_size(fd)
+        w, h = size.columns, size.lines
+    except OSError:
+        w, h = 80, 24
+    os.write(fd, (
+        f"\033[{h};1H\033[2K"
+        f"{_loading_line(snapshot.message, w, spinner_style)}"
+        "\033[?25l"
+    ).encode())
+    from .picker import invalidate_screen_row
+    invalidate_screen_row(h)
+    return h
+
+
+def with_loading(msg, fn, *args, **kwargs):
+    return _run_loading_helper(msg, fn, args, kwargs, _paint_footer_loading)
 
 
 def render_anilist_menu_loading(status, loading_text=""):
@@ -403,55 +435,15 @@ def render_anilist_menu_loading(status, loading_text=""):
 
 
 def with_anilist_menu_loading(status, msg, fn, *args, **kwargs):
-    result = {}
-
-    def _runner():
+    def paint(snapshot, fd, spinner_style):
         try:
-            result["value"] = fn(*args, **kwargs)
-        except BaseException as exc:
-            result["error"] = exc
-
-    thread = threading.Thread(target=_runner, daemon=True)
-    thread.start()
-    while thread.is_alive():
-        try:
-            width = os.get_terminal_size().columns
+            width = os.get_terminal_size(fd).columns
         except OSError:
             width = 80
-        render_anilist_menu_loading(
-            status,
-            _loading_line(msg, width, _spinner_style),
-        )
-        thread.join(0.1)
-    if "error" in result:
-        raise result["error"]
-    return result.get("value")
+        render_anilist_menu_loading(status, _loading_line(snapshot.message, width, spinner_style))
+
+    return _run_loading_helper(msg, fn, args, kwargs, paint, preserve_callback=True)
 
 
 def with_footer_loading(msg, fn, *args, **kwargs):
-    result = {}
-
-    def _runner():
-        try:
-            result["value"] = fn(*args, **kwargs)
-        except BaseException as exc:
-            result["error"] = exc
-
-    thread = threading.Thread(target=_runner, daemon=True)
-    thread.start()
-    while thread.is_alive():
-        try:
-            size = os.get_terminal_size()
-            columns, rows = size.columns, size.lines
-        except OSError:
-            columns, rows = 80, 24
-        sys.stdout.write(
-            f"\033[{rows};1H\033[2K"
-            f"{_loading_line(msg, columns, _spinner_style)}"
-            "\033[?25l"
-        )
-        sys.stdout.flush()
-        thread.join(0.1)
-    if "error" in result:
-        raise result["error"]
-    return result.get("value")
+    return with_loading(msg, fn, *args, **kwargs)

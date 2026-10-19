@@ -240,6 +240,8 @@ def filter_subtitles(
     referer: str | None = None,
     video_duration_s: float = 0.0,
     timeout: float = 3.0,
+    *,
+    cancel_check=None,
 ) -> list[dict]:
     """Filter out JUNK subtitles (e.g. AI hallucination loops) and demote SUSPICIOUS tracks."""
     import urllib.parse
@@ -250,6 +252,8 @@ def filter_subtitles(
 
     filtered = []
     for sub in subtitles:
+        if cancel_check and cancel_check():
+            return []
         url = sub.get("url") or sub.get("file")
         if not url:
             continue
@@ -269,6 +273,8 @@ def filter_subtitles(
                 req = urllib.request.Request(actual_url, headers=req_hdrs)
                 with urllib.request.urlopen(req, timeout=timeout) as resp:
                     data = resp.read()
+                if cancel_check and cancel_check():
+                    return []
 
                 # If m3u8 playlist, follow to first segment
                 if ".m3u8" in actual_url.lower():
@@ -282,6 +288,8 @@ def filter_subtitles(
                                 data = s_resp.read()
                             break
 
+                if cancel_check and cancel_check():
+                    return []
                 res = evaluate_subtitle_content(data, video_duration_s=video_duration_s, cache_key=url)
             except Exception:
                 res = {"label": "VALID", "score": 0.0}

@@ -2,8 +2,8 @@ import logging
 
 from media_cli.core.anilist import fetch_anilist_by_ids
 from media_cli.core.storage import get_source_anilist_matches, save_source_anilist_matches
-from media_cli.domain.metadata import provider_status_is_authoritative
 from media_cli.domain.matching import choose_confident_match, reset_title_cache
+from media_cli.domain.metadata import provider_status_is_authoritative, title_metadata_complete
 
 
 def _merge_anilist_into_provider(provider_show, anilist_show):
@@ -70,6 +70,10 @@ def _merge_anilist_into_provider(provider_show, anilist_show):
     if (not provider_val or provider_val == []) and alt_names:
         provider_show["altNames"] = alt_names
 
+    loaded = set(provider_show.get("_metadata_fields_loaded") or ())
+    loaded.update(field for field in ("description", "genres") if field in anilist_show)
+    provider_show["_metadata_fields_loaded"] = tuple(sorted(loaded))
+
     return provider_show
 
 def enrich_provider_results_fast(results, fuzzy_anilist_results=None):
@@ -102,7 +106,7 @@ def enrich_provider_results_fast(results, fuzzy_anilist_results=None):
 
         if matched:
             pending[id(s)] = matched
-        else:
+        elif not title_metadata_complete(s):
             unmatched_ids.add(id(s))
             if s.get("aniListId") or s.get("malId"):
                 unmatched_shows_with_ids.append(s)
@@ -149,6 +153,7 @@ def enrich_provider_results_background(unmatched_shows, token="", on_updated_cal
     Background worker that quietly backfills AniList metadata for shows whose IDs
     were not present in the initial query results.
     """
+    unmatched_shows = [show for show in (unmatched_shows or ()) if not title_metadata_complete(show)]
     if not unmatched_shows:
         return
 
@@ -191,7 +196,7 @@ def enrich_provider_results_background(unmatched_shows, token="", on_updated_cal
 
 
 def _persist_enrichment_state(show: dict):
-    """Persist enrichment flags (_title_enriched, _enrichment_attempted) to history."""
+    """Persist enrichment attempts and known field coverage to history."""
     if not show:
         return
     # Try multiple ID fields for matching
@@ -209,7 +214,8 @@ def _persist_enrichment_state(show: dict):
             # Match by any ID field
             entry_id = str(s.get("_id") or s.get("_provider_id") or s.get("id") or "")
             if entry_id and entry_id == show_id:
-                for k in ("_title_enriched", "_enrichment_attempted", "_enrichment_in_progress"):
+                for k in ("_title_enriched", "_enrichment_attempted", "_enrichment_in_progress",
+                          "_metadata_fields_loaded"):
                     v = show.get(k)
                     if v is not None:
                         s[k] = v
@@ -245,11 +251,13 @@ def enrich_show_if_missing(show: dict) -> bool:
     has_genres = bool(show.get("genres"))
     has_al = bool(show.get("aniListId") or show.get("anilistMatch"))
 
-    if has_desc and has_genres and has_al:
+    if title_metadata_complete(show):
+        already_recorded = show.get("_title_enriched") and show.get("_enrichment_attempted")
         show["_title_enriched"] = True
         show["_enrichment_attempted"] = True
         # Persist the enriched state to history
-        _persist_enrichment_state(show)
+        if not already_recorded:
+            _persist_enrichment_state(show)
         return False
 
     # Don't re-attempt enrichment if we already tried and failed (no data to show for it)
@@ -285,7 +293,12 @@ def enrich_show_if_missing(show: dict) -> bool:
                     title_data = get_title_fn(show_id)
                     if title_data and isinstance(title_data, dict):
                         for k, v in title_data.items():
-                            if k in ("status", "episodeCount", "_next_airing_ep", "_next_airing_at", "_next_airing_time", "aniListId", "malId", "format", "score") and v:
+                            if k == "_metadata_fields_loaded":
+                                loaded = tuple(sorted(set(show.get(k) or ()) | set(v or ())))
+                                if show.get(k) != loaded:
+                                    show[k] = loaded
+                                    updated = True
+                            elif k in ("status", "episodeCount", "_next_airing_ep", "_next_airing_at", "_next_airing_time", "aniListId", "malId", "format", "score") and v:
                                 if show.get(k) != v:
                                     show[k] = v
                                     updated = True
@@ -313,7 +326,7 @@ def enrich_show_if_missing(show: dict) -> bool:
         except Exception:
             pass
 
-        if al_id or mal_id:
+        if (al_id or mal_id) and not title_metadata_complete(show):
             try:
                 al_ids = [int(al_id)] if al_id else None
                 mal_ids = [int(mal_id)] if mal_id else None
@@ -325,7 +338,9 @@ def enrich_show_if_missing(show: dict) -> bool:
                 debug_warn("AniList ID enrichment failed", e)
 
         # 3. Fallback AniList search if description or ID is still missing
-        if not show.get("description") or not (show.get("aniListId") or show.get("anilistMatch")):
+        if not title_metadata_complete(show) and (
+            not show.get("description") or not (show.get("aniListId") or show.get("anilistMatch"))
+        ):
             titles_to_try = []
             for t in (
                 show.get("name"),
@@ -376,10 +391,7 @@ def enrich_show_if_missing(show: dict) -> bool:
 
         # 5. Persist to history.json if this show is present in history
         # Only mark as enriched if we actually got useful data
-        has_desc = bool(show.get("description"))
-        has_genres = bool(show.get("genres"))
-        has_al = bool(show.get("aniListId") or show.get("anilistMatch"))
-        if has_desc and has_genres and has_al:
+        if title_metadata_complete(show):
             show["_title_enriched"] = True
 
         if show_id:
@@ -395,7 +407,8 @@ def enrich_show_if_missing(show: dict) -> bool:
                             "status", "season", "airedStart", "airedEnd", "thumbnail",
                             "englishName", "nativeName", "altNames", "aniListId", "malId",
                             "anilistMatch", "_next_airing_ep", "_next_airing_at", "_next_airing_time",
-                            "_anilist_score", "_title_enriched", "_enrichment_attempted"
+                            "_anilist_score", "_title_enriched", "_enrichment_attempted",
+                            "_metadata_fields_loaded",
                         ):
                             v = show.get(k)
                             if v is not None:

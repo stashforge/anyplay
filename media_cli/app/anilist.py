@@ -322,7 +322,7 @@ def handle_anilist_airing_state(
             )
         footer_text = _footer_parts(
             *_anilist_badges(flags, args),
-            "Enter/Right open",
+            "Enter open",
             "Tab/Ctrl+N next tab",
             "Shift+Tab/Ctrl+P prev tab",
             "Ctrl+R refresh",
@@ -451,7 +451,7 @@ def handle_anilist_browse_state(
                 selected_show,
                 _footer_parts(
                     *_anilist_badges(flags, args),
-                    "Enter/Right open",
+                    "Enter open",
                     "Tab/Ctrl+N next sort",
                     "Shift+Tab/Ctrl+P prev sort",
                     "Ctrl+R reverse",
@@ -641,11 +641,11 @@ def handle_anilist_search_state(
         ):
             app_core._poster_manager.prewarm_shows(shows_list)
     initial_opts = [f"{app_core.get_show_display_title(s)}" for s in shows_list]
-    esc_action = "back" if ms.anilist_search_parent != "QUIT" else "quit"
+    esc_action = "search"
     hd4 = picker_help(
         "Select anime",
         "New search",
-        "Back" if ms.anilist_search_parent != "QUIT" else "Quit",
+        "New search",
     )
 
     # Pre-compute headers for all shows (0-delay cursor navigation)
@@ -758,9 +758,7 @@ def handle_anilist_search_state(
     ms.last_al_query_str = ms.query_str
     ms.last_al_shows = shows
 
-    if idx == -2:
-        return ms.anilist_search_parent
-    elif idx == -3:
+    if idx in (-2, -3):
         ms.query_str = ""
         return "ANILIST_SEARCH"
     elif idx == -4:

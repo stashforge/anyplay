@@ -16,11 +16,13 @@ import hashlib
 import logging
 import os
 import re
-import select
 import sys
 import threading
 import time
-from typing import TYPE_CHECKING
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from dataclasses import replace
+from typing import TYPE_CHECKING, TypeVar
 
 from ..core.terminal import fit_terminal_line as _fit_terminal_line
 from ..domain.metadata import (
@@ -40,6 +42,7 @@ from ..domain.titles import (
     wrap_title as _wrap_title,
 )
 from . import terminal_images
+from .actions import ActionBindings
 from .covers import (
     POSTER_HEIGHT,
 )
@@ -49,10 +52,13 @@ from .covers import (
 from .covers import (
     poster_uses_native_protocol as _poster_uses_native_protocol,
 )
+from .loading_model import LoadingInteraction, LoadingOwner, LoadingPlacement, LoadingSnapshot, LoadingTaskSpec
 from .poster import PosterManager
 from .spinner import spinner_frame
+from .transition import LoadingInput
 
 _logger = logging.getLogger(__name__)
+T = TypeVar("T")
 
 if TYPE_CHECKING:
     from ..context import UiState
@@ -170,24 +176,14 @@ def activate(show: dict, current_ep: object, total_eps: int) -> None:
         pass
 
 
-_ticker_thread: threading.Thread | None = None
-_ticker_stop_event: threading.Event = threading.Event()
 _loading_cancel_event: threading.Event = threading.Event()
-_loading_input_lock: threading.Lock = threading.Lock()
-_loading_tty_file = None
-_loading_tty_fd: int | None = None
-_loading_tty_old_term = None
-_loading_tty_old_blocking: bool | None = None
-_loading_stdin_fd: int | None = None
-_loading_stdin_old_term = None
-_loading_stdin_old_blocking: bool | None = None
-_loading_input_thread: threading.Thread | None = None
-_loading_input_stop_event: threading.Event = threading.Event()
+_loading_quit_event: threading.Event = threading.Event()
 
 
 def reset_loading_cancel() -> None:
     """Clear any previous loading cancellation request."""
     _loading_cancel_event.clear()
+    _loading_quit_event.clear()
     _player_ui_state["loading_cancel_requested"] = False
 
 
@@ -197,281 +193,182 @@ def request_loading_cancel() -> None:
     _loading_cancel_event.set()
 
 
-def _handle_loading_cancel_bytes(key: bytes) -> bool:
-    if b"q" in key or b"Q" in key or b"\x1b" in key:
+def _handle_loading_key(key: str) -> bool:
+    if key in ("q", "Q", "ESC"):
         _logger.debug("Player loading cancel requested key=%r", key)
         request_loading_cancel()
         return True
     return False
 
 
-def _open_loading_input() -> None:
-    global _loading_tty_file, _loading_tty_fd, _loading_tty_old_term, _loading_tty_old_blocking
-    if _loading_tty_fd is not None:
-        return
-    try:
-        import termios
-
-        fd = os.open("/dev/tty", os.O_RDWR)
-        old_blocking = os.get_blocking(fd)
-        os.set_blocking(fd, False)
-        tty_file = os.fdopen(fd, "rb+", buffering=0)
-        old_term = termios.tcgetattr(fd)
-        _apply_loading_termios(fd, termios)
-    except Exception:
-        _logger.debug("Player loading cancel input unavailable", exc_info=True)
-        try:
-            tty_file.close()  # type: ignore[name-defined]
-        except Exception:
-            pass
-        return
-    _loading_tty_file = tty_file
-    _loading_tty_fd = fd
-    _loading_tty_old_term = old_term
-    _loading_tty_old_blocking = old_blocking
-    _logger.debug("Player loading cancel input using /dev/tty fd=%s", fd)
-
-
-def _apply_loading_termios(fd: int, termios_module) -> None:
-    new_term = termios_module.tcgetattr(fd)
-    new_term[3] = new_term[3] & ~(termios_module.ECHO | termios_module.ICANON)
-    new_term[6][termios_module.VMIN] = 0
-    new_term[6][termios_module.VTIME] = 0
-    termios_module.tcsetattr(fd, termios_module.TCSANOW, new_term)
-
-
-def _open_loading_stdin_input() -> int | None:
-    global _loading_stdin_fd, _loading_stdin_old_term, _loading_stdin_old_blocking
-    try:
-        import termios
-
-        fd = sys.stdin.fileno()
-        if not sys.stdin.isatty():
-            return None
-        if _loading_stdin_fd is None:
-            old_term = termios.tcgetattr(fd)
-            old_blocking = os.get_blocking(fd)
-            os.set_blocking(fd, False)
-            _loading_stdin_fd = fd
-            _loading_stdin_old_term = old_term
-            _loading_stdin_old_blocking = old_blocking
-            _logger.debug("Player loading cancel input using stdin fd=%s", fd)
-        _apply_loading_termios(fd, termios)
-    except Exception:
-        _logger.debug("Player loading stdin cancel input unavailable", exc_info=True)
-        return None
-    return fd
-
-
-def _close_loading_stdin_input() -> None:
-    global _loading_stdin_fd, _loading_stdin_old_term, _loading_stdin_old_blocking
-    fd = _loading_stdin_fd
-    old_term = _loading_stdin_old_term
-    old_blocking = _loading_stdin_old_blocking
-    _loading_stdin_fd = None
-    _loading_stdin_old_term = None
-    _loading_stdin_old_blocking = None
-    if fd is None:
-        return
-    try:
-        if old_term is not None:
-            import termios
-            termios.tcsetattr(fd, termios.TCSANOW, old_term)
-    except Exception:
-        pass
-    try:
-        if old_blocking is not None:
-            os.set_blocking(fd, old_blocking)
-    except Exception:
-        pass
-
-
-def _close_loading_input() -> None:
-    global _loading_tty_file, _loading_tty_fd, _loading_tty_old_term, _loading_tty_old_blocking
-    fd = _loading_tty_fd
-    old_term = _loading_tty_old_term
-    old_blocking = _loading_tty_old_blocking
-    tty_file = _loading_tty_file
-    _loading_tty_file = None
-    _loading_tty_fd = None
-    _loading_tty_old_term = None
-    _loading_tty_old_blocking = None
-    if fd is not None and old_term is not None:
-        try:
-            import termios
-            termios.tcsetattr(fd, termios.TCSADRAIN, old_term)
-        except Exception:
-            pass
-    if fd is not None and old_blocking is not None:
-        try:
-            os.set_blocking(fd, old_blocking)
-        except Exception:
-            pass
-    if tty_file is not None:
-        try:
-            tty_file.close()
-        except Exception:
-            pass
-
-
-def _poll_loading_cancel_input() -> None:
-    stdin_fd = _open_loading_stdin_input()
-    fds = [stdin_fd] if stdin_fd is not None else []
-    if not fds:
-        if _loading_tty_fd is None and sys.stdout.isatty():
-            _open_loading_input()
-        if _loading_tty_fd is not None:
-            fds = [_loading_tty_fd]
-    if not fds:
-        return
-    with _loading_input_lock:
-        try:
-            import select
-            readable, _, _ = select.select(fds, [], [], 0)
-            if not readable:
-                return
-            chunks = []
-            for fd in readable:
-                try:
-                    chunks.append(os.read(fd, 32))
-                except BlockingIOError:
-                    pass
-                except Exception:
-                    pass
-            key = b"".join(chunks)
-        except Exception:
-            _logger.debug("Player loading cancel input poll failed", exc_info=True)
-            return
-    _handle_loading_cancel_bytes(key)
-
-
-def _start_loading_input_thread() -> None:
-    """Start a dedicated loading-screen key reader for q/Esc cancellation."""
-    global _loading_input_thread
-    if _loading_input_thread and _loading_input_thread.is_alive():
-        return
-    _loading_input_stop_event.clear()
-
-    def _loop() -> None:
-        while not _loading_input_stop_event.is_set():
-            stdin_fd = _open_loading_stdin_input()
-            fds = [stdin_fd] if stdin_fd is not None else []
-            if not fds:
-                if _loading_tty_fd is None and sys.stdout.isatty():
-                    _open_loading_input()
-                if _loading_tty_fd is not None:
-                    fds = [_loading_tty_fd]
-            if not fds:
-                _loading_input_stop_event.wait(0.1)
-                continue
-            with _loading_input_lock:
-                try:
-                    readable, _, _ = select.select(fds, [], [], 0.1)
-                    if not readable:
-                        continue
-                    chunks = []
-                    for fd in readable:
-                        try:
-                            chunks.append(os.read(fd, 32))
-                        except BlockingIOError:
-                            pass
-                    key = b"".join(chunks)
-                except Exception:
-                    _logger.debug("Player loading cancel input listener failed", exc_info=True)
-                    _loading_input_stop_event.wait(0.1)
-                    continue
-            _handle_loading_cancel_bytes(key)
-
-    _loading_input_thread = threading.Thread(target=_loop, daemon=True)
-    _loading_input_thread.start()
-    _logger.debug("Player loading cancel input listener started")
-
-
-def _stop_loading_input_thread() -> None:
-    _loading_input_stop_event.set()
-    if (
-        _loading_input_thread
-        and _loading_input_thread.is_alive()
-        and threading.current_thread() is not _loading_input_thread
-    ):
-        _loading_input_thread.join(timeout=0.3)
-    _close_loading_stdin_input()
-
-
 def loading_cancel_requested() -> bool:
-    """Return whether the user cancelled the active loading screen."""
-    _poll_loading_cancel_input()
+    """Inspect cancellation state only; input belongs to the active UI owner."""
+    if _loading_quit_event.is_set():
+        raise KeyboardInterrupt
     requested = bool(_player_ui_state.get("loading_cancel_requested")) or _loading_cancel_event.is_set()
     if requested:
         _logger.debug("Player loading cancel flag observed")
     return requested
 
 
-def start_loading_ticker(poster_manager=None, ui=None) -> None:
-    """Start background ticker thread that smoothly animates the spinner and timer."""
-    global _ticker_thread
+def _loading_attempt(state: dict) -> tuple[object, object]:
+    return state.get("loading_provider_name", ""), state.get("loading_start_time")
+
+
+def _loading_message(state: dict) -> str:
+    provider = state.get("loading_provider_name", "")
+    provider_text = f" from {provider}" if provider else ""
+    return f"Loading stream{provider_text}..."
+
+
+def _loading_cancel_hint(snapshot: LoadingSnapshot | None) -> str:
+    from .actions import ActionAvailability
+
+    if snapshot is None:
+        return "q/Esc cancel and return to details"
+    back = next((item for item in snapshot.actions.items
+                 if item.action.id == "back" and item.availability is ActionAvailability.AVAILABLE), None)
+    if back is not None:
+        return f"{'/'.join(back.key_labels)} cancel and return to details"
+    return "Ctrl+C stops Anyplay"
+
+
+def _loading_status_line(state: dict, snapshot: LoadingSnapshot | None = None) -> str:
+    """Render the current pump's snapshot without retaining task state."""
+    message = _loading_message(state)
+    started = state.get("loading_start_time")
+    elapsed = f" ({int(time.time() - started)}s)" if started else ""
+    if snapshot is not None:
+        message = snapshot.message
+        elapsed = f" ({int(snapshot.elapsed)}s)" if started else ""
+    try:
+        from .display import _spinner_style
+        indicator = spinner_frame(_spinner_style)
+    except Exception:
+        indicator = spinner_frame()
+    return f"\033[1;36m{indicator} {message}{elapsed}\033[0m"
+
+
+@contextmanager
+def playback_input_scope() -> Iterator[bool]:
     from ..context import FLAGS
-    if getattr(FLAGS, "plain_mode", False) or not sys.stdout.isatty():
+    from .terminal_runtime import borrow_terminal
+    from .transition import PreparationCancelled
+
+    if threading.current_thread() is not threading.main_thread():
+        raise RuntimeError("Player handoff requires the main UI thread")
+    if loading_cancel_requested():
+        raise PreparationCancelled
+    if getattr(FLAGS, "plain_mode", False) or not sys.stdin.isatty() or not sys.stdout.isatty():
+        yield False
         return
-    _ticker_stop_event.clear()
-    _start_loading_input_thread()
-    if _ticker_thread and _ticker_thread.is_alive():
+    with borrow_terminal() as runtime:
+        yield runtime is not None
+
+
+@contextmanager
+def prompt_input_scope() -> Iterator[None]:
+    from .terminal_runtime import current_runtime
+
+    with playback_input_scope() as managed:
+        if not managed:
+            yield
+            return
+        check_loading_handoff_input()
+        runtime = current_runtime()
+        if runtime is None:
+            raise RuntimeError("Prompt handoff requires the active terminal owner")
+        with runtime.line_input():
+            yield
+
+
+def check_loading_handoff_input() -> None:
+    """Honor queued loading keys before a caller commits an external action."""
+    from .terminal_runtime import current_runtime
+    from .transition import PreparationCancelled
+
+    runtime = current_runtime()
+    if runtime is None:
         return
-
-    def _loop():
-        try:
-            while not _ticker_stop_event.is_set():
-                s = _player_ui_state
-                if not s.get("active") or s.get("mpv_props"):
-                    break
-                row_spinner = s.get("_row_loading_spinner")
-                w = s.get("_cached_w", 0)
-                if row_spinner and w:
-                    try:
-                        cur_w, cur_h = os.get_terminal_size(sys.stdin.fileno())
-                    except Exception:
-                        cur_w, cur_h = w, s.get("_cached_h", 0)
-
-                    if cur_w == w and cur_h == s.get("_cached_h", 0):
-                        p_name = s.get("loading_provider_name", "")
-                        p_str = f" from {p_name}" if p_name else ""
-                        start_t = s.get("loading_start_time")
-                        elapsed = f" ({int(time.time() - start_t)}s)" if start_t else ""
-                        try:
-                            from .display import _spinner_style
-                            spin = spinner_frame(_spinner_style)
-                        except Exception:
-                            spin = spinner_frame()
-                        spin_line = f"\033[1;36m{spin} Loading stream{p_str}...{elapsed}\033[0m"
-                        _safe_stdout_write(
-                            f"\033[{row_spinner};1H\033[2K{_fit_terminal_line(spin_line, w)}\033[?25l"
-                        )
-                    else:
-                        try:
-                            render(poster_manager=poster_manager, ui=ui)
-                        except Exception:
-                            pass
-                else:
-                    try:
-                        render(poster_manager=poster_manager, ui=ui)
-                    except Exception:
-                        pass
-                _ticker_stop_event.wait(0.1)
-        finally:
-            _stop_loading_input_thread()
-            _close_loading_input()
-
-    _ticker_thread = threading.Thread(target=_loop, daemon=True)
-    _ticker_thread.start()
+    runtime.assert_owner_thread()
+    keys = LoadingInput(runtime.fileno(), on_key=_handle_loading_key, cancel_keys=())
+    deadline = time.monotonic() + 0.15
+    while True:
+        action = keys.poll()
+        if action == "quit":
+            raise KeyboardInterrupt
+        if loading_cancel_requested():
+            raise PreparationCancelled
+        if not keys.has_pending_sequence or time.monotonic() >= deadline:
+            return
+        time.sleep(0.01)
 
 
-def stop_loading_ticker() -> None:
-    """Stop the background loading ticker thread."""
-    _ticker_stop_event.set()
-    _stop_loading_input_thread()
-    if _ticker_thread and _ticker_thread.is_alive() and threading.current_thread() is not _ticker_thread:
-        _ticker_thread.join(timeout=0.3)
-    _close_loading_input()
+def run_loading_work(
+    prepare: Callable[[], T], *, poster_manager=None, ui=None,
+    task: LoadingTaskSpec | None = None,
+) -> T:
+    """Borrow the shared UI pump for one blocking player preparation step."""
+    from ..context import FLAGS
+    from .actions import ResolvedAction
+    from .display import is_alt_screen_active
+    from .player_preparation import run_player_preparation
+    from .terminal_runtime import borrow_terminal
+    from .transition import PreparationCancelled
+    from .view_model import ViewAction
+
+    if task is not None:
+        if not isinstance(task, LoadingTaskSpec):
+            raise TypeError("Player preparation task requires LoadingTaskSpec")
+        if task.placement is not LoadingPlacement.PLAYER_STATUS or task.interaction is not LoadingInteraction.BLOCKING or task.transition:
+            raise ValueError("Player preparation requires a blocking player status task")
+    if getattr(FLAGS, "plain_mode", False) or not sys.stdin.isatty() or not sys.stdout.isatty():
+        return prepare()
+    if threading.current_thread() is not threading.main_thread():
+        raise RuntimeError("Player preparation requires the main UI thread")
+
+    if loading_cancel_requested():
+        raise PreparationCancelled
+    state = _player_ui_state
+    identity = _loading_attempt(state)
+    started = state.get("loading_start_time")
+    elapsed_offset = max(0.0, time.time() - started) if started else 0.0
+
+    def active() -> bool:
+        return bool(
+            state is _player_ui_state and state.get("active") and not state.get("mpv_props")
+            and _loading_attempt(state) == identity and is_alt_screen_active()
+        )
+
+    def paint(snapshot: LoadingSnapshot) -> None:
+        render(
+            poster_manager=poster_manager, ui=ui,
+            loading_snapshot=replace(snapshot, elapsed=snapshot.elapsed + elapsed_offset),
+        )
+
+    def report(message: str, color: str) -> None:
+        state["status_lines"].append(f"{color}{message}\033[0m")
+        del state["status_lines"][:-8]
+
+    spec = task if task is not None else LoadingTaskSpec(
+        "episode-data", LoadingOwner("player", 0), _loading_message(state),
+        LoadingInteraction.BLOCKING, LoadingPlacement.PLAYER_STATUS,
+        ActionBindings((ResolvedAction(ViewAction("back", "Cancel", ("q", "Q", "ESC"))),)),
+        delay=0,
+    )
+    try:
+        with borrow_terminal() as runtime:
+            if runtime is None:
+                result = prepare()
+            else:
+                result = run_player_preparation(
+                    spec, lambda status: prepare(), fd=runtime.fileno(),
+                    render=paint, report=report, active=active,
+                )
+    except PreparationCancelled:
+        request_loading_cancel()
+        raise
+    return result
 
 
 def deactivate(close_alt: bool = False) -> None:
@@ -484,14 +381,14 @@ def deactivate(close_alt: bool = False) -> None:
         alt-screen mode).  Pass ``True`` when fully leaving the player,
         ``False`` when transitioning to the action menu.
     """
-    stop_loading_ticker()
     try:
         from .picker import invalidate_screen_buffer
         invalidate_screen_buffer()
     except Exception:
         pass
+    clear_images = ""
     try:
-        terminal_images.clear_now()
+        clear_images = terminal_images.clear_now()
     except Exception:
         pass
     from ..context import FLAGS
@@ -500,9 +397,9 @@ def deactivate(close_alt: bool = False) -> None:
         return
     if close_alt:
         # Exit alt screen
-        _safe_stdout_write("\033[?1049l\033[?25h")
+        _safe_stdout_write(clear_images + "\033[?1049l\033[?25h")
     else:
-        _safe_stdout_write("\033[2J\033[H\033[?25l")
+        _safe_stdout_write(clear_images + "\033[2J\033[H\033[?25l")
     _player_ui_state["active"] = False
 
 
@@ -573,6 +470,8 @@ def render(
     poster_manager: PosterManager | None = None,
     ui: UiState | None = None,
     enter_alt_screen_fn=None,
+    *,
+    loading_snapshot: LoadingSnapshot | None = None,
 ) -> None:
     """Render (or refresh) the player overlay on the terminal.
 
@@ -710,9 +609,6 @@ def render(
         else None
     )
     poster_changed = poster_key != s.get("_last_poster_key")
-    s["_last_poster_key"] = poster_key
-    if native_poster and poster_changed:
-        terminal_images.mark_active()
 
     content = []
 
@@ -802,25 +698,12 @@ def render(
     else:
         content.append("")
         content.append(f"{SECTION_LABEL}Status{RESET}")
-        p_name = s.get("loading_provider_name", "")
-        p_str = f" from {p_name}" if p_name else ""
-        start_t = s.get("loading_start_time")
-        elapsed = f" ({int(time.time() - start_t)}s)" if start_t else ""
-        try:
-            from .display import _spinner_style
-            spin = spinner_frame(_spinner_style)
-        except Exception:
-            spin = spinner_frame()
-        _idx_loading_spinner = len(content)
 
-        content.append(f"\033[1;36m{spin} Loading stream{p_str}...{elapsed}\033[0m")
-        content.append("\033[38;5;244mq/Esc cancel and return to details\033[0m")
+        content.append(_loading_status_line(s, loading_snapshot))
+        content.append(f"\033[38;5;244m{_loading_cancel_hint(loading_snapshot)}\033[0m")
         content.append("")
         for sl in s["status_lines"]:
             content.append(sl)
-        if s.get("countdown_message"):
-            content.append("")
-            content.append(s["countdown_message"])
 
     out = []
     if poster_raw:
@@ -839,9 +722,10 @@ def render(
 
     if out:
         clear_images = ""
-        if not s.get("_cleared_terminal_image"):
-            clear_images = terminal_images.clear_if_active()
+        if not s.get("_cleared_terminal_image") or poster_changed:
+            clear_images = terminal_images.replace_for_frame(has_image=bool(native_poster))
             s["_cleared_terminal_image"] = True
+        s["_last_poster_key"] = poster_key
         overlay = f"\033[1;1H{native_poster}" if native_poster and poster_changed else ""
         _safe_stdout_write(
             clear_images + "\033[H" + "\r\n".join(out) + "\033[J"
@@ -857,12 +741,10 @@ def render(
         s["_row_state"] = content_start + _idx_state
         s["_row_bar"]   = content_start + _idx_bar
         s["_row_time"]  = content_start + _idx_time
-        s["_row_loading_spinner"] = None
     else:
         s["_row_state"] = None
         s["_row_bar"]   = None
         s["_row_time"]  = None
-        s["_row_loading_spinner"] = content_start + _idx_loading_spinner
 
 
 def update_mpv_props(props: dict | None) -> None:

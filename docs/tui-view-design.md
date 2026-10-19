@@ -1,6 +1,7 @@
 # Shared Terminal UI Design
 
-Status: proposed for review; application implementation has not started.
+Status: shared foundation implemented; Artist is the first migrated consumer.
+Existing non-migrated callers retain the compatibility picker interface.
 
 ## Intent
 
@@ -60,6 +61,57 @@ they must not independently search a provider for missing metadata.
 
 Use small typed Python data objects, with adapters for domain dictionaries.
 Do not require providers to return UI-specific objects.
+
+### Strict Presentation And Navigation Follow-Up
+
+The user approved explicit presentation choices after an incomplete Artist
+loading destination replaced a valid search screen. Keep the visual layout
+unchanged; enforce the following contract at the shared boundary:
+
+- Every screen supplies `DetailLines`, and every item explicitly supplies its
+  details policy. Every `DetailLines` field is required.
+- `Content(*parts)` supplies immutable content, `Inherit` uses the corresponding
+  screen field, and `Blank` deliberately suppresses it. Missing fields, plain
+  strings in place of policies, and unresolved screen-level inheritance are
+  programming errors, not invitations to guess.
+- Content supports ordinary strings, `LabelValue`, and `Count`. Formatting,
+  separators, sanitizing, colors and truncation belong to presentation.
+- Screen-level details are stored once. Items can inherit the whole block or
+  override individual fields. Existing optional image descriptors retain their
+  explicit resolving/available/unavailable/failed lifecycle.
+- Fixed content parts, items, tabs, contexts and command snapshots are tuples.
+  Mutable selection, caches and producer queues remain mutable intentionally.
+- `BeginNavigation` leaves the complete source view active. A matching
+  `CompleteNavigation` installs one ready/empty destination atomically;
+  `FailNavigation` reports an error without replacing source content.
+- Back cancels pending navigation before leaving the source. A different
+  selection, query, tab or focused item invalidates the pending request. Late
+  responses must match the source generation and request identity.
+- Initial loading without a previous screen remains supported. Pushing a
+  loading child is rejected; callers must use pending navigation instead.
+- Navigation start, completion, cancellation, failure and stale completions
+  are written to the normal debug log. Provider failures retain tracebacks.
+
+The legacy AnimeThemes search-to-Artist boundary projects the current search
+into the same shared model using the same metadata helper as legacy search.
+It preserves the selected result, search tab, filter, scroll and rendered cover
+while fetching. It does not introduce a second provider-specific renderer.
+
+### Footer Roles
+
+`ui/footer.py` owns immutable `Footer` and `FooterStatus` values with
+`StatusKind` roles. Status, context and action segments are rendered separately;
+context/actions establish their muted color independently of status resets.
+Semantic values reject ANSI/control characters. The remaining string callers
+use a centralized legacy reset guard rather than per-screen color repairs.
+Search workers return semantic statuses; picker boundaries still receive
+rendered strings.
+
+`ViewSpec.message_kind` is independent of the screen lifecycle state. A failed
+navigation keeps the valid source ready while its message receives the error
+role. `UpdateStatus` supplies/resets that role explicitly. Cover status preserves
+sanitized diagnostic details, and legacy overlays preserve trusted badge colors.
+Typed footer context is explicit; the renderer does not guess provider labels.
 
 ### View
 
@@ -198,3 +250,139 @@ layout and confirm input remains responsive during background work.
 No provider feature expansion, quality policy changes, tracking changes,
 player-screen redesign, changed progress UI, new key bindings, new visual
 theme, external picker dependency, or standalone terminal application.
+
+## Delivered Interfaces
+
+- `ui/view_model.py`: immutable view, item, detail, image, action and tab
+  records, common section filtering, and selectable-item rules.
+- `ui/view_session.py`: identity-based events and commands, view stack,
+  presentation position, activation generations, and coalesced update queue.
+- `ui/view_presentation.py`: shared image/footer presentation state and
+  four-line formatting, including persistent cover loading/failure status.
+- `ui/view_picker.py`: session adapter for the existing terminal and plain
+  renderers. Converts indexes only at this compatibility boundary.
+- `ui/picker_state.py`: low-level position transport across renderer calls.
+- `app/animethemes_artist_controller.py`: Artist data loading and application
+  event handling. It supplies views rather than terminal rendering callbacks.
+
+Applications start `ViewSession(initial_view, handler)` and pass it to
+`run_view_session(flags, ui, session)`. The handler receives `UiEvent` values
+after selection/actions release the picker. Focus events are debounced; their
+handlers must schedule work and return promptly. Intentional playback handoff
+remains application-owned and returns to the existing session.
+
+For example, an application handler opens a supplied child with
+`PushView(child_view)`. Back is handled by the shared navigation stack.
+An asynchronous worker posts `UpdateItems(view_id, generation, items)` to
+update existing records or uses `replace_all=True` to replace their membership
+and order. Partial updates cannot resurrect a removed item.
+
+When fetching a different query or submenu, use `BeginNavigation` and keep the
+source visible until a matching `CompleteNavigation` supplies the ready/empty
+destination. `replace_current=True` replaces the source rather than pushing a
+child. `ReplaceView(..., new_activation=True)` is for already prepared views;
+activating an incomplete loading destination through push or replacement is
+rejected. Initial loading with no source is still permitted. Ordinary metadata
+updates use `ReplaceView` without that flag. Completions from prior activations
+are discarded. Single-result auto-entry resets for an explicit query or tab
+change; ordinary metadata updates do not consume auto-entry.
+
+Cover-resolution workers should include the original `ImageSpec` in
+`UpdateItems.expected_images`. This prevents an older resolver from overwriting
+a newer cover, even when their logical resource keys are the same.
+
+Structured plain mode derives its actions from the same supplied action list
+but describes actual line-mode commands: numbers, `b`, `q`, `t`, and custom
+action IDs. TUI printable letters remain available for filtering. Structured
+renderer restarts preserve buffered input and restore terminal settings.
+
+## Contract Enforcement
+
+The view model, picker state and view session are checked strictly by mypy
+and are included in the Ruff lint/format gate. Runtime constructors validate
+identities, nested records, flags, revisions, event payloads and update guards.
+Bad internal data raises rather than being silently treated as empty content.
+Application references and exit results are opaque objects, not UI-owned
+business dictionaries.
+
+Views, queued item updates and selection-event collections snapshot supplied
+data. Picker/session positions remain mutable because navigation needs to
+change them; supplied mark sets are copied and positions are validated at
+renderer/session entry boundaries. Positive out-of-range indexes still clamp
+against the current options. Negative indexes and wrong field types are errors.
+
+An event has a known UI kind; custom application actions use `action` with a
+registered action ID. Command types are explicit, and background producers
+may only post update/completion commands. Controller batches containing
+unsupported command types are rejected before any command is applied;
+legal-transition checks still run per command. Stale generations, obsolete
+requests and unsupported selections remain ignored outcomes rather than
+exceptions, and do not cancel a valid pending navigation.
+
+Action IDs identify command roles, not display-row identity. Repeated roles
+such as `back` may have distinct nonempty key groups and labels, preserving
+existing Left/Search and Esc/Back hints. Overlapping bindings and ambiguous
+duplicates are rejected. This does not introduce provider-specific behavior.
+
+## Remaining Migration
+
+Regular provider search, history, downloads, AniList, details, progress,
+episodes, mirrors and playback menus still use their existing picker API.
+AnimeThemes search results and non-Artist tabs also retain their existing
+entry flow. They can migrate individually using the shared contract; their
+domain behavior must be reviewed and preserved during each migration.
+
+The legacy adapter cannot be removed yet. Quality deduplication, new playback
+actions, and opening other AnimeThemes entity tabs remain feature work.
+
+## Continuous Terminal Lifecycle
+
+The interactive application now retains one lazy `TerminalRuntime` across picker
+and loader calls. Original terminal settings are captured once and restored at
+application exit, not between screens. Nested information screens borrow the
+owner; external editors and foreground local players suspend it explicitly.
+Curses cleanup reasserts the owner's raw mode before returning to other screens.
+
+Legacy state handlers run through `app/terminal_controller.py`. Their application
+preparation uses detached UI/machine/config/argument snapshots. UI entry points
+marshal requests to the main thread through the bounded preparation pump; workers
+do not render or read terminal input. This covers work before and between picker
+calls, rather than just the callable passed to an individual loading helper.
+Accepted handlers commit their state; cancelled handlers cannot activate late UI
+requests. The adapter retains legacy source position for a cancelled transition.
+
+Loading input consumes non-cancelling keys and preserves escape-sequence
+boundaries before handing input to a ready screen. Esc/Left cancels; Ctrl-C quits.
+Cover/metadata presentation loading remains independent of transition loading.
+Loading helpers enter the alternate screen before their first draw. After an
+invoked UI action exits that screen, pending pump ticks must not draw, reposition
+the normal-buffer cursor, clear its rows, or reopen the alternate screen. Loader
+painting immediately invalidates the affected cached row, so an identical
+destination footer still repaints. Cleanup invalidates only rows it painted,
+without writing into the restored shell buffer. Re-entering an already active
+alternate screen never clears its image.
+Pickers clear the previous cover in the same output buffer as their first ready
+frame, rather than clearing it during destination setup.
+Information and playback frames use `terminal_images.replace_for_frame` to
+delete the previous overlay and record the replacement in the same handoff.
+A text-only destination drops native ownership too. Curses drops it only after
+its preparation finishes, immediately before taking over the display; playback
+teardown emits its deletion sequence instead of merely resetting the flag.
+Loading presentation waits 150ms; work and input handling start immediately.
+Only actual wait cycles may paint the status, never final result acceptance.
+The presentation delay resets after each dispatched UI call returns, so time
+spent using a ready picker cannot cause a loading flash on forward/back/quit.
+Cached/fast preparation has no artificial delay. Debug logs include preparation
+duration, abandoned work, first-frame timing and slow picker frames.
+
+Catalog executor jobs use detached snapshots, so timeouts cannot leave a worker
+mutating the visible show. Details and playback-entry preparation commit accepted
+results instead of exposing partly prepared contexts. A running Python thread is
+not forcibly killed on cancellation; its late result/UI requests are discarded.
+
+Managed playback keeps its existing specialized loading/player loop rather than
+being executed as a generic screen controller. New screen-controller entry stops
+its loading ticker/input reader before taking over. IPC mpv cannot read the TUI's
+stdin. This is a compatibility handoff, not a claim that the playback renderer
+has been migrated to ViewSession. Normal search/history/downloads/AniList/details,
+episode/mirror and AnimeThemes transitions share the preparation bridge.

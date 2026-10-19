@@ -24,7 +24,7 @@ def menu_header(width=80):
     return render_menu_card(
         "Choose an AniList list.",
         "Titles are matched to streaming providers before playback.",
-        "Enter/Right=select  Left=search  Esc=quit",
+        "Enter=select  Esc=quit",
         width=width,
     )
 

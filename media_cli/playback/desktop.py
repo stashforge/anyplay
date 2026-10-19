@@ -1,7 +1,16 @@
 """Desktop mpv playback orchestration."""
 
+import logging
+from contextlib import nullcontext
+
 from ..media.proxy_rules import proxy_filtered_headers
 from ..media.urls import validate_optional_referer, validate_stream_url
+
+log = logging.getLogger(__name__)
+
+
+class PlaybackPreparationCancelled(Exception):
+    """A preparation adapter cancelled before the player could start."""
 
 
 def play_desktop(
@@ -26,14 +35,19 @@ def play_desktop(
         custom_skip_intervals=None,
         start_time_override=None,
         torrent_progress_callback=None,
-        cancel_check=None):
+        cancel_check=None,
+        prepare_torrent_fn=None,
+        prepare_subtitles_fn=None,
+        prepare_proxy_fn=None,
+        start_player_fn=None,
+        playback_input_scope=None):
     prepared_torrent = None
     torrent_ready_message = ""
     suppress_embedded_chapters = stream.get("type") == "torrent"
     if suppress_embedded_chapters:
         from ..torrents.runtime import TorrentCancelled, prepare_torrent_stream
         try:
-            prepared_torrent = prepare_torrent_stream(
+            prepared_torrent = (prepare_torrent_fn or prepare_torrent_stream)(
                 stream,
                 progress_callback=torrent_progress_callback,
                 cancel_check=cancel_check,
@@ -76,12 +90,18 @@ def play_desktop(
     if subtitles:
         try:
             from ..media.subtitle_scorer import filter_subtitles
-            subtitles = filter_subtitles(
+            subtitles = (prepare_subtitles_fn or filter_subtitles)(
                 subtitles,
                 headers=headers,
                 referer=referer,
                 video_duration_s=float(stream.get("duration") or 0),
             )
+        except (PlaybackPreparationCancelled, KeyboardInterrupt) as exc:
+            if prepared_torrent is not None:
+                prepared_torrent.close()
+            if isinstance(exc, KeyboardInterrupt):
+                raise
+            return ("CANCELLED", 0, 0, 0, 0)
         except Exception:
             pass
 
@@ -132,14 +152,17 @@ def play_desktop(
 
 
     skip_intervals = []
+    skip_lookup = None
     if custom_skip_intervals is not None:
         skip_intervals = list(custom_skip_intervals or [])
     elif aniskip_enabled and mal_id:
+        from ..media.aniskip import cached_skip_times
+        ep_num = episode_progress_number(episode)
+        skip_lookup = (mal_id, ep_num)
         try:
-            from ..media.aniskip import fetch_skip_times
-            ep_num = episode_progress_number(episode)
-            skip_intervals = fetch_skip_times(mal_id, ep_num)
+            skip_intervals = cached_skip_times(mal_id, ep_num)
         except Exception:
+            log.exception("AniSkip cached lookup failed")
             skip_intervals = []
 
     proxy_server = None
@@ -152,7 +175,7 @@ def play_desktop(
     ):
         try:
             from ..media.local_proxy import replace_active_local_proxy, start_local_proxy
-            url, proxy_server = start_local_proxy(
+            url, proxy_server = (prepare_proxy_fn or start_local_proxy)(
                 url,
                 referer,
                 headers,
@@ -164,48 +187,65 @@ def play_desktop(
                 flixcloud_xor_mask=stream.get("flixcloud_xor_mask"),
             )
             replace_active_local_proxy(proxy_server)
+        except (PlaybackPreparationCancelled, KeyboardInterrupt) as exc:
+            if prepared_torrent is not None:
+                prepared_torrent.close()
+            if isinstance(exc, KeyboardInterrupt):
+                raise
+            return ("CANCELLED", 0, 0, 0, 0)
         except Exception:
             proxy_server = None
 
-    ipc_player.load(
-        url,
-        media_title,
-        headers,
-        referer,
-        start_time,
-        osd_msg,
-        audio_url,
-        subtitle_url,
-        subtitles=subtitles,
-        skip_intervals=skip_intervals,
-        aniskip_auto=aniskip_auto,
-        audio_tracks=audio_tracks,
-        suppress_chapters=suppress_embedded_chapters and not skip_intervals,
+    log.debug(
+        "Playback selection: show_id=%r MAL=%r episode=%r source=%r resolution=%r remote_skips=%s",
+        show_id, mal_id, episode, stream.get("source_name"), resolution,
+        skip_lookup is not None,
     )
-
-
-    mirror_name = stream.get("source_name", "Unknown")
-    preference = get_preferred_mirror(show_id) if show_id else {}
-    stream_info = {
-        "title": title,
-        "mirror": mirror_name,
-        "quality": resolution,
-        "is_pref": (
-            preference.get("source_name") == mirror_name
-            and preference.get("resolution") == resolution
-        ),
-        "episode_index": episode_index,
-        "next_episode": next_episode,
-    }
-    update_stream_info(stream_info)
     try:
-        result, played_seconds = ipc_player.wait_for_playback(
-            stream_info,
-            episode,
-            total_eps,
-            fetch_callback,
-            is_binge,
-        )
+        if start_player_fn is not None:
+            start_player_fn(ipc_player)
+        with playback_input_scope() if playback_input_scope else nullcontext(False) as terminal_managed:
+            ipc_player.load(
+                url,
+                media_title,
+                headers,
+                referer,
+                start_time,
+                osd_msg,
+                audio_url,
+                subtitle_url,
+                subtitles=subtitles,
+                skip_intervals=skip_intervals,
+                aniskip_auto=aniskip_auto,
+                audio_tracks=audio_tracks,
+                suppress_chapters=suppress_embedded_chapters,
+                **({"skip_lookup": skip_lookup} if skip_lookup is not None else {}),
+            )
+
+            mirror_name = stream.get("source_name", "Unknown")
+            preference = get_preferred_mirror(show_id) if show_id else {}
+            stream_info = {
+                "title": title,
+                "mirror": mirror_name,
+                "quality": resolution,
+                "is_pref": (
+                    preference.get("source_name") == mirror_name
+                    and preference.get("resolution") == resolution
+                ),
+                "episode_index": episode_index,
+                "next_episode": next_episode,
+            }
+            update_stream_info(stream_info)
+            result, played_seconds = ipc_player.wait_for_playback(
+                stream_info,
+                episode,
+                total_eps,
+                fetch_callback,
+                is_binge,
+                **({"terminal_managed": True} if terminal_managed else {}),
+            )
+    except PlaybackPreparationCancelled:
+        return ("CANCELLED", 0, 0, 0, 0)
     finally:
         if proxy_server is not None:
             from ..media.local_proxy import cleanup_active_local_proxy

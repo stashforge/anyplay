@@ -12,12 +12,14 @@ def picker_help(
         info_label=None):
     help_items = {
         "↑ / ↓": "Move selection",
-        "Home / End": "Jump to first or last item",
+        "Home / End": "Top/bottom item; query start/end when filtering",
+        "Page Up / Down": "Move one visible page up/down",
         "Type": "Filter visible items",
         "Backspace": "Edit filter",
         "Ctrl+U": "Clear filter",
-        "Enter / Right": select_label,
-        "Left": back_label,
+        "Enter": select_label,
+        "Right Arrow": f"{select_label}; moves cursor while editing a filter",
+        "Left Arrow": f"{back_label} without a filter; otherwise move filter cursor",
         "Esc": quit_label,
         "?": "Show or hide this help",
         "Ctrl+C": "Exit program",

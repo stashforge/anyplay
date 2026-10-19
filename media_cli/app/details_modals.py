@@ -132,7 +132,7 @@ def handle_update_progress_state(
             s,
             ui,
             ms,
-            "Enter/Right=set progress  Ctrl+R=flip  ? = Help  Left/Esc=back",
+            "Enter=set progress  Ctrl+R=flip  ? = Help  Esc=back",
         )
         parts.append(app_core._poster_footer_line(s, footer, w))
         res = "\n".join(parts)
@@ -274,7 +274,7 @@ def handle_update_status_state(
             s,
             ui,
             ms,
-            "Enter/Right=select  ? = Help  Left/Esc=back",
+            "Enter=select  ? = Help  Esc=back",
         )
         parts.append(app_core._poster_footer_line(s, footer, w))
         res = "\n".join(parts)
@@ -364,7 +364,7 @@ def handle_update_score_state(
             s,
             ui,
             ms,
-            "Enter/Right=select  ? = Help  Left/Esc=back",
+            "Enter=select  ? = Help  Esc=back",
         )
         parts.append(app_core._poster_footer_line(s, footer, w))
         res = "\n".join(parts)

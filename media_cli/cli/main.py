@@ -6,8 +6,45 @@ import sys
 from .. import app_core as app
 from ..constants import APP_NAME
 from ..context import FLAGS as runtime_flags
+from ..ui.terminal_runtime import current_runtime, terminal_application
 
 
+def _cleanup():
+    try:
+        app.flush_anilist_writes()
+    except Exception:
+        pass
+    try:
+        from ..services.catalog import _catalog_executor
+        _catalog_executor.shutdown(wait=False, cancel_futures=True)
+    except Exception:
+        pass
+    try:
+        from ..media.local_proxy import cleanup_active_local_proxy
+        cleanup_active_local_proxy()
+    except Exception:
+        pass
+    try:
+        from ..core.storage import cleanup_incognito_cache
+        cleanup_incognito_cache()
+    except Exception:
+        pass
+    try:
+        app._ipc_player.quit()
+    except Exception:
+        pass
+    try:
+        app.kill_active_subprocesses()
+    except Exception:
+        pass
+    try:
+        from ..media.download_worker import stop_global_worker
+        stop_global_worker()
+    except Exception:
+        pass
+
+
+@terminal_application
 def run():
     exit_code = 0
     try:
@@ -56,41 +93,17 @@ def run():
             exit_code = 1
     finally:
         try:
-            app.restore_terminal()
-        except Exception:
-            pass
-        try:
-            app.flush_anilist_writes()
-        except Exception:
-            pass
-        try:
-            from ..services.catalog import _catalog_executor
-            _catalog_executor.shutdown(wait=False, cancel_futures=True)
-        except Exception:
-            pass
-        try:
-            from ..media.local_proxy import cleanup_active_local_proxy
-            cleanup_active_local_proxy()
-        except Exception:
-            pass
-        try:
-            from ..core.storage import cleanup_incognito_cache
-            cleanup_incognito_cache()
-        except Exception:
-            pass
-        try:
-            app._ipc_player.quit()
-        except Exception:
-            pass
-        try:
-            app.kill_active_subprocesses()
-        except Exception:
-            pass
-        try:
-            from ..media.download_worker import stop_global_worker
-            stop_global_worker()
-        except Exception:
-            pass
+            try:
+                runtime = current_runtime()
+                if runtime is not None:
+                    runtime.prepare_shutdown()
+            finally:
+                _cleanup()
+        finally:
+            try:
+                app.restore_terminal()
+            except Exception:
+                pass
 
     for stream in (sys.stdout, sys.stderr, sys.__stdout__, sys.__stderr__):
         try:

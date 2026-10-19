@@ -279,37 +279,54 @@ def _extend_streams(streams, key=None):
             _streams_cache[k]["streams"].extend(streams)
 
 
-def _stream_snapshot(show_id=None, ep=None, ttype="sub", provider_id=None, quality="best", ep_data=None) -> list:
+def _stream_snapshot(show_id=None, ep=None, ttype="sub", provider_id=None, quality="best", ep_data=None, *, cancel_check=None) -> list:
+    from copy import deepcopy
+
+    if cancel_check and cancel_check():
+        return []
     now = time.time()
     with _streams_lock:
-        if show_id is not None:
-            k = make_stream_key(show_id, ep, ttype, provider_id, quality)
-            entry = _streams_cache.get(k)
-            if not entry:
+        k = make_stream_key(show_id, ep, ttype, provider_id, quality) if show_id is not None else _active_stream_key
+        entry = _streams_cache.get(k) if k is not None else None
+        if show_id is not None and entry is None:
+            return []
+        version = entry.get("ep_data_version", "") if entry is not None else ""
+        if entry is not None and ep_data is not None:
+            requested_version = _compute_ep_data_version(ep_data)
+            if requested_version and version and requested_version != version:
                 return []
-            # If caller provides ep_data, check version matches cached version
-            if ep_data is not None:
-                current_version = _compute_ep_data_version(ep_data)
-                cached_version = entry.get("ep_data_version", "")
-                if current_version and cached_version and current_version != cached_version:
-                    return []  # Version mismatch - treat as stale
-            valid = [s for s in entry.get("streams", []) if check_stream_health_and_refresh(s, now)]
-            entry["streams"] = valid
-            return list(valid)
-        elif _active_stream_key is not None:
-            entry = _streams_cache.get(_active_stream_key)
-            if entry:
-                if ep_data is not None:
-                    current_version = _compute_ep_data_version(ep_data)
-                    cached_version = entry.get("ep_data_version", "")
-                    if current_version and cached_version and current_version != cached_version:
-                        return []
-                valid = [s for s in entry.get("streams", []) if check_stream_health_and_refresh(s, now)]
-                entry["streams"] = valid
-                return list(valid)
-        valid_all = [s for s in all_streams if check_stream_health_and_refresh(s, now)]
-        all_streams[:] = valid_all
-        return list(valid_all)
+        originals = tuple(entry.get("streams", []) if entry is not None else all_streams)
+        before = deepcopy(originals)
+
+    # Health checks may perform network I/O; never keep the cache locked here.
+    valid = []
+    for index, candidate in enumerate(deepcopy(before)):
+        if cancel_check and cancel_check():
+            return []
+        if check_stream_health_and_refresh(candidate, now):
+            valid.append((index, candidate))
+
+    with _streams_lock:
+        if cancel_check and cancel_check():
+            return []
+        if entry is not None:
+            if _streams_cache.get(k) is not entry or entry.get("ep_data_version", "") != version:
+                return []
+            current = entry.get("streams", [])
+        else:
+            current = all_streams
+        if len(current) != len(originals) or any(a is not b for a, b in zip(current, originals)) or originals != before:
+            return []
+        accepted = []
+        for index, candidate in valid:
+            original = originals[index]
+            original.update(candidate)
+            accepted.append(original)
+        if entry is not None:
+            entry["streams"] = accepted
+        else:
+            all_streams[:] = accepted
+        return list(accepted)
 
 
 def _stream_count(show_id=None, ep=None, ttype="sub", provider_id=None, quality="best") -> int:
@@ -564,11 +581,6 @@ def start_bg_resolve(
                 if ep_data:
                     _streams_cache[stream_key]["ep_data"] = ep_data
                     _streams_cache[stream_key]["ep_data_version"] = ep_data_version
-            # Populate all_streams with still-valid existing cached streams (full health check)
-            existing_valid = [s for s in _streams_cache[stream_key].get("streams", []) if check_stream_health_and_refresh(s, now)]
-            _streams_cache[stream_key]["streams"] = existing_valid
-            all_streams.extend(existing_valid)
-        seen_keys = {(s.get("source_name"), s.get("resolution")) for s in all_streams}
 
     with _bg_lock:
         _bg_stats = {
@@ -581,6 +593,19 @@ def start_bg_resolve(
 
     def worker():
         nonlocal sources
+        if stream_key is not None:
+            existing_valid = _stream_snapshot(
+                show_id, ep, ttype, provider_id, quality,
+                cancel_check=lambda: not _generation_is_current(generation),
+            )
+        else:
+            existing_valid = []
+        with _streams_lock:
+            if generation != _streams_generation:
+                return
+            # Publish only accepted health checks; never expose unchecked cache.
+            all_streams.extend(existing_valid)
+            seen_keys = {(s.get("source_name"), s.get("resolution")) for s in all_streams}
         if not sources and _episode_data_fn and show_id:
             try:
                 fetched_ep_data = _episode_data_fn(show_id, ep, ttype, provider_id=provider_id)
@@ -655,9 +680,13 @@ def start_bg_resolve(
         _bg_thread.start()
 
 
-def fetch_episode_stream(show_id, ep_number, ttype="sub", quality="best", provider_id=None, exclude_sources=None, ep_data=None):
+def fetch_episode_stream(show_id, ep_number, ttype="sub", quality="best", provider_id=None, exclude_sources=None, ep_data=None, *, cancel_check=None):
+    if cancel_check and cancel_check():
+        return None
     if ep_data is None and _episode_data_fn:
         ep_data = _episode_data_fn(show_id, ep_number, ttype, provider_id=provider_id)
+    if cancel_check and cancel_check():
+        return None
     if not ep_data:
         reporting.warn("No episode metadata returned by provider.")
         return None
@@ -732,6 +761,8 @@ def fetch_episode_stream(show_id, ep_number, ttype="sub", quality="best", provid
 
     retry_announced = False
     for attempt_idx, (src, failed, is_retry, is_final_pass) in enumerate(generate_source_passes(sorted_sources, max_passes=2), 1):
+        if cancel_check and cancel_check():
+            return None
         if is_retry and not retry_announced:
             reporting.warn("Initial pass failed. Retrying failed mirrors (Pass 2/2)...")
             retry_announced = True
@@ -740,6 +771,8 @@ def fetch_episode_stream(show_id, ep_number, ttype="sub", quality="best", provid
         mirror_num = min(attempt_idx if not is_retry else len(failed) + 1, total_mirrors)
         reporting.info(f"[{prefix}{mirror_num}/{total_mirrors}] Testing mirror: {src_name} ...")
         streams = resolve_source(src)
+        if cancel_check and cancel_check():
+            return None
         if streams:
             selected_stream = streams[0]
             found_pref = False

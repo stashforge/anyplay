@@ -1,7 +1,13 @@
 import json
 import pathlib
-import tomllib
+import sys
 from unittest.mock import MagicMock, patch
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib
+
 from media_cli.providers.anikoto import AnikotoProvider, _vrf_encrypt
 
 
@@ -60,6 +66,7 @@ def test_anikoto_fetch_media_token_failure_fallback():
 
 def test_anikoto_episode_catalog_site_parsing():
     p = AnikotoProvider()
+    p._media_cache["182205"] = {"id": 182205}
     mock_episodes_html = """
     <div class="episodes">
       <ul>
@@ -119,7 +126,7 @@ def test_anikoto_get_anime_page_retries_search_without_vrf():
     }
 
     search_html = '<a href="/watch/frieren-journey" class="film-name">Frieren: Beyond Journey\'s End</a>'
-    watch_html = '<main data-id="9999"><h1>Frieren</h1></main>'
+    watch_html = '<main data-id="9999"><h1>Frieren: Beyond Journey&#39;s End</h1></main>'
     seen_urls = []
 
     def fake_urlopen(req, timeout=0):

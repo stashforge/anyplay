@@ -11,8 +11,8 @@ from .. import app_core
 from ..services import animethemes as animethemes_service
 from ..ui.help import picker_help
 from ..ui.picker import tui_pick
-from ..ui.spinner import loading_line as _loading_line
 from .footer import context_footer
+from .search_coordinator import _make_background_status
 
 _TAB_LABELS = {
     "anime": "Anime",
@@ -49,7 +49,7 @@ def _image_url(value) -> str:
             if isinstance(candidate, str) and candidate.strip():
                 return candidate.strip()
     images = value.get("images")
-    if isinstance(images, list):
+    if isinstance(images, (list, tuple)):
         for image in images:
             if isinstance(image, dict):
                 for key in ("link", "url", "path", "src"):
@@ -275,17 +275,9 @@ def _search_header(
             get_error_fn=lambda: error_msg,
         )
 
-    row = rows[selected_idx]
-    show = _row_show(row)
-    title = show.get("name") or row.get("label") or "Unknown"
-    alt = show.get("englishName") or "No alternative title"
-    if row.get("kind") == "artist":
-        raw = row.get("raw") or {}
-        title = "Artist: " + title
-        memberships = ", ".join(g.get("name", "") for g in raw.get("groups") or [])
-        alt = raw.get("information") or ("Member of " + memberships if memberships else alt)
-    metadata = _metadata_for_row(row)
-    footer = f'AnimeThemes • "{query}" • Tab=switch • Enter=open • Left=search • Esc=back'
+    title, alt, metadata = _row_detail_values(rows[selected_idx])
+    show = _row_show(rows[selected_idx])
+    footer = f'AnimeThemes • "{query}" • Tab=switch • Enter=open • Esc=search'
     try:
         width = os.get_terminal_size().columns
     except OSError:
@@ -302,6 +294,37 @@ def _search_header(
         f"{C_META}{_fit(metadata)}{C_RESET}",
         app_core._poster_footer_line(show, footer, width),
     ])
+
+
+def _row_detail_values(row):
+    """One metadata projection for both legacy search and shared navigation."""
+    show = _row_show(row)
+    title = show.get("name") or row.get("label") or "Unknown"
+    alt = show.get("englishName") or "No alternative title"
+    if row.get("kind") == "artist":
+        raw = row.get("raw") or {}
+        title = "Artist: " + title
+        memberships = ", ".join(g.get("name", "") for g in raw.get("groups") or [])
+        alt = raw.get("information") or ("Member of " + memberships if memberships else alt)
+    metadata = _metadata_for_row(row)
+    return title, alt, metadata
+
+
+def _search_view(query, tab, tabs, rows):
+    from ..ui.view_model import Blank, Content, DetailLines, ImageSpec, ViewAction, ViewItem, ViewSpec, ViewTab
+
+    items = tuple(ViewItem(
+        f"result:{index}", row["label"], kind="submenu",
+        details=DetailLines(*(Content(value) if value else Blank for value in _row_detail_values(row))),
+        image=ImageSpec(f"result:{index}", "available", url) if (url := _image_url(row.get("raw") or {})) else None,
+        reference=index,
+    ) for index, row in enumerate(rows))
+    return ViewSpec("animethemes:search", "Search AnimeThemes", items,
+                    details=DetailLines(Blank, Blank, Blank),
+                    tabs=tuple(ViewTab(name, _tab_label(name)) for name in tabs), active_tab_id=tab,
+                    context=("AnimeThemes", f'"{query}"'),
+                    actions=(ViewAction("tab", "switch", ("TAB",)), ViewAction("select", "open", ("ENTER",)),
+                             ViewAction("back", "search", ("LEFT", "ESC"))))
 
 
 def _play_row(row: dict, cfg: dict, args: Any):
@@ -388,14 +411,25 @@ def _pick_video_rows(flags, ui, ms, cfg, args, show: dict, rows: list[dict], *, 
 
 def handle_animethemes_search_state(flags, ui, ms, cfg, args, ttype: str) -> str:
     del ttype
-    query = " ".join(getattr(args, "query", None) or []) or ms.query_str
+    query = ms.query_str
     if not query:
-        app_core.err("AnimeThemes search needs a query.")
-        return "QUIT"
+        from .search import prompt_search_query
+        result = prompt_search_query(flags, ui, provider_name="AnimeThemes", search_title="Search AnimeThemes")
+        ui.search_error = ""
+        if result == -2:
+            return "QUIT"
+        if not isinstance(result, str) or not result.strip():
+            return "ANIMETHEMES_SEARCH"
+        query = ms.query_str = result.strip()
+        if not flags.incognito_mode:
+            app_core.save_search_history(query)
     app_core.enter_alt_screen()
     data: dict[str, list[dict]] = {}
     loading = True
     error = ""
+    search_status = _make_background_status(
+        "animethemes-search", getattr(app_core.display, "_spinner_style", None),
+    )
 
     def _worker():
         nonlocal data, loading, error
@@ -414,13 +448,7 @@ def handle_animethemes_search_state(flags, ui, ms, cfg, args, ttype: str) -> str
         return animethemes_service.flatten_search_bucket(tab, data.get(tab) or [])
 
     def loading_text():
-        if not loading:
-            return ""
-        try:
-            width = os.get_terminal_size().columns
-        except OSError:
-            width = 80
-        return _loading_line("Searching…", width, getattr(app_core.display, "_spinner_style", None))
+        return search_status.read(loading) or ""
 
     def tabs_for():
         return _active_tabs(data)
@@ -473,31 +501,53 @@ def handle_animethemes_search_state(flags, ui, ms, cfg, args, ttype: str) -> str
                 return poster
         return ""
 
+    from ..ui.picker_state import PickerState
+    from ..ui.view_session import UiEvent
+    handoff = None
+    picker_state = PickerState()
     while True:
         tabs = tabs_for()
         tab = tabs[max(0, min(active_idx, len(tabs) - 1))] if tabs else current_tab()
         labels = [row["label"] for row in rows] if rows else ([] if loading else ["No results"])
         hd = picker_help("Search AnimeThemes", "Back", "Back", tab_label="Switch tab")
-        idx = tui_pick(
-            flags,
-            ui,
-            lambda: _search_prompt(tabs_for(), active_idx),
-            labels,
-            header_fn=lambda si: _search_header(
-                query,
-                current_tab(),
-                rows,
-                si,
-                loading_text(),
-                error,
-            ),
-            top_header_fn=_top_header,
-            tab_fn=_tab_fn,
-            live_fn=_live_fn,
-            info_fn=app_core.make_info_fn(lambda: [_row_show(row) for row in rows], ui),
-            help_dict=hd,
-            auto_select_single_when_done=auto_open_artist,
-        )
+        if handoff is not None:
+            event, handoff = handoff, None
+            if event.kind == "tab":
+                active_idx = tabs.index(event.value)
+                rows = rows_for(current_tab())
+                continue
+            if event.kind == "select":
+                idx = int(event.item_id.split(":", 1)[1])
+            else:
+                return "QUIT"
+        else:
+            try:
+                idx = tui_pick(
+                    flags,
+                    ui,
+                    lambda: _search_prompt(tabs_for(), active_idx),
+                    labels,
+                    header_fn=lambda si: _search_header(
+                        query,
+                        current_tab(),
+                        rows,
+                        si,
+                        loading_text(),
+                        error,
+                    ),
+                    top_header_fn=_top_header,
+                    tab_fn=_tab_fn,
+                    live_fn=_live_fn,
+                    info_fn=app_core.make_info_fn(lambda: [_row_show(row) for row in rows], ui),
+                    help_dict=hd,
+                    auto_select_single_when_done=auto_open_artist,
+                    state=picker_state,
+                )
+            finally:
+                search_status.read(False)
+        if idx in (-2, -3):
+            ms.query_str = ""
+            return "ANIMETHEMES_SEARCH"
         if idx < 0:
             return "QUIT"
         if not rows:
@@ -532,7 +582,17 @@ def handle_animethemes_search_state(flags, ui, ms, cfg, args, ttype: str) -> str
         elif row["kind"] == "artist":
             from .animethemes_artist import open_artist
             opened_artists.add(raw.get("slug"))
-            open_artist(flags, ui, ms, cfg, args, raw)
+            picker_state.selected_index = idx
+            result = open_artist(flags, ui, ms, cfg, args, raw,
+                                 source_view=_search_view(query, current_tab(), tabs_for(), rows),
+                                 source_position=picker_state)
+            if result == "quit" or isinstance(result, UiEvent) and result.kind == "quit":
+                return "QUIT"
+            if isinstance(result, UiEvent) and result.kind == "back":
+                ms.query_str = ""
+                return "ANIMETHEMES_SEARCH"
+            if isinstance(result, UiEvent) and result.kind in {"select", "tab"}:
+                handoff = result
         elif row["kind"] == "theme":
             show = _row_show(row)
             ui.ui_show_ctx = show

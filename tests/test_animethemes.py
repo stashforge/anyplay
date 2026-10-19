@@ -159,7 +159,7 @@ def test_animethemes_search_header_keeps_standard_four_line_shape():
     assert lines[0] == "[Oshi no Ko]"
     assert lines[1] == "No alternative title"
     assert lines[2] == "TV • Spring 2023 • 2 themes"
-    assert lines[3] == 'AnimeThemes • "oshi no ko" • Tab=switch • Enter=open • Left=search • Esc=back'
+    assert lines[3] == 'AnimeThemes • "oshi no ko" • Tab=switch • Enter=open • Esc=search'
 
 
 def test_animethemes_theme_header_uses_theme_metadata_only():

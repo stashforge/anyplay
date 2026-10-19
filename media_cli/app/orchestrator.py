@@ -470,6 +470,10 @@ def _resolve_quit_with_active_downloads() -> str:
     return "QUIT"
 
 
+from ..ui.terminal_runtime import terminal_application
+
+
+@terminal_application
 def main() -> None:
     from .. import app_core
 
@@ -917,8 +921,10 @@ def main() -> None:
             ms.show_title = get_show_display_title(show)
             _hist_ttype = h.get("translation_type", ttype)
             ms.total_eps = show.get("availableEpisodes", {}).get(_hist_ttype, 1)
-            ms.current_ep = app_core.playback_ep_from_history_entry(h, _hist_ttype)
             episode_ids = app_core.ensure_episode_ids(show, _hist_ttype)
+            ms.current_ep = app_core.playback_ep_from_history_entry(
+                h, _hist_ttype, episode_ids=episode_ids, episode_labels=show.get("_episode_labels") or {},
+            )
             ms.total_eps = len(episode_ids) or ms.total_eps
             ms.current_ep_index = episode_index_for_id(episode_ids, ms.current_ep)
             app_core.set_ui_context(ui, show, _hist_ttype)
@@ -942,60 +948,71 @@ def main() -> None:
     elif args.history:
         state = "HISTORY"
 
+    from .terminal_controller import run_screen_controller
+
+    def screen(handler, *handler_args):
+        fallback = {
+            "DETAILS": ui.search_prev_state,
+            "ACTION_MENU": ui.action_prev_state,
+            "EPISODE": ui.ep_prev_state,
+            "MIRRORS": "DETAILS",
+        }.get(state, state)
+        return run_screen_controller(handler, *handler_args, fallback=fallback)
+
     while state != "QUIT":
         cur_ttype = ui.ui_ttype_ctx if ui.ui_ttype_ctx is not None else ttype
         if state == "DOWNLOADS":
             from media_cli.app.downloads import handle_downloads_state
 
-            state = handle_downloads_state(
+            state = screen(handle_downloads_state,
                 flags, ui, ms, cfg, args, cur_ttype, resolveTracking
             )
         elif state == "SEARCH":
-            state = handlers.handle_search_state(
+            state = screen(handlers.handle_search_state,
                 flags, ui, ms, cfg, args, cur_ttype, resolveTracking
             )
         elif state == "HISTORY":
-            state = handlers.handle_history_state(
+            state = screen(handlers.handle_history_state,
                 flags, ui, ms, cfg, args, cur_ttype, resolveTracking
             )
         elif state == "ANILIST_MENU":
-            state = handlers.handle_anilist_menu_state(
+            state = screen(handlers.handle_anilist_menu_state,
                 flags, ui, ms, cfg, args, cur_ttype, resolveTracking
             )
         elif state == "ANILIST_AIRING":
-            state = handlers.handle_anilist_airing_state(
+            state = screen(handlers.handle_anilist_airing_state,
                 flags, ui, ms, cfg, args, cur_ttype, resolveTracking
             )
         elif state == "ANILIST_BROWSE":
-            state = handlers.handle_anilist_browse_state(
+            state = screen(handlers.handle_anilist_browse_state,
                 flags, ui, ms, cfg, args, cur_ttype, resolveTracking
             )
         elif state == "ANILIST_SEARCH":
-            state = handlers.handle_anilist_search_state(
+            state = screen(handlers.handle_anilist_search_state,
                 flags, ui, ms, cfg, args, cur_ttype, resolveTracking
             )
         elif state == "ANIMETHEMES_SEARCH":
-            state = handlers.handle_animethemes_search_state(
+            state = screen(handlers.handle_animethemes_search_state,
                 flags, ui, ms, cfg, args, cur_ttype
             )
         elif state in ("DETAILS", "ACTION_MENU"):
-            state = handlers.handle_details_state(
+            state = screen(handlers.handle_details_state,
                 flags, ui, ms, cfg, args, cur_ttype, resolveTracking
             )
         elif state == "UPDATE_PROGRESS":
-            state = handlers.handle_update_progress_state(
+            state = screen(handlers.handle_update_progress_state,
                 flags, ui, ms, cfg, args, cur_ttype, resolveTracking
             )
         elif state == "UPDATE_STATUS":
-            state = handlers.handle_update_status_state(
+            state = screen(handlers.handle_update_status_state,
                 flags, ui, ms, cfg, args, cur_ttype, resolveTracking
             )
         elif state == "UPDATE_SCORE":
-            state = handlers.handle_update_score_state(
+            state = screen(handlers.handle_update_score_state,
                 flags, ui, ms, cfg, args, cur_ttype, resolveTracking
             )
         elif state == "EPISODE":
-            state = handlers.handle_episode_state(
+            state = screen(handlers.handle_episode_state,
                 flags, ui, ms, cfg, args, cur_ttype, resolveTracking
             )
         elif state == "PLAY":
@@ -1003,7 +1020,7 @@ def main() -> None:
                 flags, ui, ms, cfg, args, cur_ttype, quality, resolveTracking
             )
         elif state == "MIRRORS":
-            state = handlers.handle_mirrors_state(
+            state = screen(handlers.handle_mirrors_state,
                 flags, ui, ms, cfg, args, cur_ttype, resolveTracking
             )
         else:

@@ -2,22 +2,116 @@
 
 import json
 import logging
+import math
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Optional
+from collections.abc import Iterable
+from http.client import HTTPException
 
 from ..core.reporting import debug_warn
 
 log = logging.getLogger(__name__)
 ANISKIP_API_URL = "https://api.aniskip.com/v2/skip-times"
-_ANISKIP_CACHE: dict[str, list[dict]] = {}
+_SKIP_LABELS = {"op": "Opening", "ed": "Ending", "recap": "Recap", "mixed-op": "Opening", "mixed-ed": "Ending"}
+_ANISKIP_CACHE: dict[tuple[int, float, float, tuple[str, ...]], list[dict]] = {}
+
+
+def _request_key(mal_id, episode_number, episode_length, skip_types):
+    if not mal_id or episode_number is None:
+        return None
+    try:
+        mal_id = int(mal_id)
+        episode = float(episode_number)
+        duration = float(episode_length)
+        types = tuple(sorted(set(skip_types or _SKIP_LABELS)))
+        if mal_id <= 0 or not math.isfinite(episode) or not math.isfinite(duration) or duration < 0:
+            return None
+        if any(stype not in _SKIP_LABELS for stype in types):
+            return None
+        return mal_id, episode, duration, types
+    except (ValueError, TypeError, OverflowError):
+        return None
+
+
+def _parsed_interval(item) -> dict | None:
+    if not isinstance(item, dict):
+        return None
+    try:
+        stype = item["type"]
+        if any(isinstance(item[key], bool) for key in ("start", "end", "episode_length")):
+            return None
+        start = float(item["start"])
+        end = float(item["end"])
+        reference = float(item["episode_length"])
+        if stype not in _SKIP_LABELS:
+            return None
+        if not all(math.isfinite(value) for value in (start, end, reference)):
+            return None
+        if start < 0 or end <= start or reference <= 0 or end > reference:
+            return None
+    except (KeyError, ValueError, TypeError, OverflowError):
+        return None
+    return dict(item, start=start, end=end, episode_length=reference)
+
+
+def validated_skip_intervals(intervals: Iterable[dict], duration: float) -> list[dict]:
+    """Filter AniSkip candidates against the actual runtime without adjusting timestamps.
+
+    Custom skip intervals do not require AniSkip reference metadata and should not
+    be passed through this helper.
+    """
+    try:
+        duration = float(duration)
+        if not math.isfinite(duration) or duration <= 0:
+            return []
+        candidates = iter(intervals)
+    except (ValueError, TypeError, OverflowError):
+        return []
+
+    results = []
+    for item in candidates:
+        parsed = _parsed_interval(item)
+        if parsed is None:
+            log.debug(
+                "[aniskip] Rejected malformed interval: reference duration %r, actual duration %.3fs.",
+                item.get("episode_length") if isinstance(item, dict) else None,
+                duration,
+            )
+            continue
+        reference = parsed["episode_length"]
+        if parsed["end"] > duration or abs(reference - duration) > 20.0:
+            log.debug(
+                "[aniskip] Rejected interval %.3fs - %.3fs: reference duration %.3fs, actual duration %.3fs.",
+                parsed["start"],
+                parsed["end"],
+                reference,
+                duration,
+            )
+            continue
+        results.append(parsed)
+    return results
+
+
+def cached_skip_times(
+    mal_id: int | None,
+    episode_number: float,
+    *,
+    episode_length: float = 0.0,
+    skip_types: list[str] | None = None,
+) -> list[dict]:
+    """Return copies of an exact cached request, or an empty list, without I/O."""
+    key = _request_key(mal_id, episode_number, episode_length, skip_types)
+    return [dict(item) for item in _ANISKIP_CACHE.get(key, [])] if key is not None else []
 
 
 def fetch_skip_times(
-    mal_id: Optional[int],
+    mal_id: int | None,
     episode_number: float,
     *,
-    skip_types: Optional[list[str]] = None,
+    episode_length: float = 0.0,
+    skip_types: list[str] | None = None,
     timeout: float = 3.0,
 ) -> list[dict]:
     """Fetch skip intervals for a given MAL anime ID and episode number.
@@ -27,6 +121,10 @@ def fetch_skip_times(
       - 'start': float (start time in seconds)
       - 'end': float (end time in seconds)
       - 'label': str (e.g. 'Opening', 'Ending', 'Recap')
+      - 'episode_length': float (AniSkip's reference runtime in seconds)
+      - 'skip_id': str | None (AniSkip's interval identifier, if provided)
+
+    With unknown episode_length (0), candidates are retained for later validation.
     """
     if not mal_id:
         log.debug("[aniskip] Skipped: No MAL ID available for this title.")
@@ -36,27 +134,24 @@ def fetch_skip_times(
         log.debug("[aniskip] Skipped: Episode number is missing.")
         return []
 
-    try:
-        mal_id_int = int(mal_id)
-        ep_num = float(episode_number)
-        if ep_num.is_integer():
-            ep_num = int(ep_num)
-    except (ValueError, TypeError) as exc:
-        debug_warn("AniSkip invalid MAL ID or episode number", exc)
+    cache_key = _request_key(mal_id, episode_number, episode_length, skip_types)
+    if cache_key is None:
+        log.debug("[aniskip] Skipped: Invalid MAL ID, episode number, duration, or skip types.")
         return []
 
-    cache_key = f"{mal_id_int}:{ep_num}"
     if cache_key in _ANISKIP_CACHE:
-        return _ANISKIP_CACHE[cache_key]
+        return [dict(item) for item in _ANISKIP_CACHE[cache_key]]
+    mal_id_int, ep_num, episode_length, requested_types = cache_key
+    if ep_num.is_integer():
+        ep_num = int(ep_num)
 
-    if not skip_types:
-        skip_types = ["op", "ed", "recap", "mixed-op", "mixed-ed"]
-
-    query_params = [("types", st) for st in skip_types]
-    query_params.append(("episodeLength", "0"))
+    query_params = [("types", st) for st in requested_types]
+    query_params.append(("episodeLength", str(episode_length)))
     url = f"{ANISKIP_API_URL}/{mal_id_int}/{ep_num}?{urllib.parse.urlencode(query_params)}"
 
-    log.debug(f"[aniskip] Fetching skip times: MAL ID {mal_id_int}, EP {ep_num}...")
+    log.debug(
+        "[aniskip] Fetching skip times: MAL ID %s, EP %s, request runtime %.3fs.", mal_id_int, ep_num, episode_length
+    )
 
     req = urllib.request.Request(
         url,
@@ -67,34 +162,44 @@ def fetch_skip_times(
     should_cache = False
     max_attempts = 3
     for attempt in range(max_attempts):
+        request_started = time.monotonic()
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 if resp.status == 200:
                     data = json.loads(resp.read().decode("utf-8"))
+                    if not isinstance(data, dict) or not isinstance(data.get("found"), bool):
+                        log.debug("[aniskip] Malformed AniSkip response.")
+                        break
+                    if data.get("found") and not isinstance(data.get("results"), list):
+                        log.debug("[aniskip] Malformed AniSkip results.")
+                        break
                     if data.get("found") and data.get("results"):
                         for item in data["results"]:
-                            interval = item.get("interval", {})
-                            start = float(interval.get("startTime", 0))
-                            end = float(interval.get("endTime", 0))
-                            if end > start:
-                                stype = item.get("skipType", "").lower()
-                                if "op" in stype:
-                                    label = "Opening"
-                                elif "ed" in stype:
-                                    label = "Ending"
-                                elif "recap" in stype:
-                                    label = "Recap"
-                                else:
-                                    label = stype.upper()
-
-                                results.append({
-                                    "type": stype,
-                                    "start": start,
-                                    "end": end,
-                                    "label": label,
-                                })
+                            try:
+                                interval = item["interval"]
+                                stype = item["skipType"].lower()
+                                parsed = _parsed_interval(
+                                    {
+                                        "type": stype,
+                                        "start": interval["startTime"],
+                                        "end": interval["endTime"],
+                                        "label": _SKIP_LABELS.get(stype, ""),
+                                        "episode_length": item["episodeLength"],
+                                        "skip_id": item.get("skipId"),
+                                    }
+                                )
+                            except (KeyError, ValueError, TypeError, AttributeError):
+                                parsed = None
+                            if parsed is None:
+                                log.debug("[aniskip] Rejected malformed response interval: %r", item)
+                            elif stype in requested_types:
+                                results.append(parsed)
+                        if episode_length > 0:
+                            results = validated_skip_intervals(results, episode_length)
                         if results:
-                            summary = ", ".join([f"{r['label']} ({r['start']:.1f}s - {r['end']:.1f}s)" for r in results])
+                            summary = ", ".join(
+                                [f"{r['label']} ({r['start']:.1f}s - {r['end']:.1f}s)" for r in results]
+                            )
                             log.debug(f"[aniskip] Found {len(results)} interval(s): {summary}")
                     else:
                         log.debug(f"[aniskip] No skip times recorded on AniSkip for MAL ID {mal_id_int} EP {ep_num}.")
@@ -102,30 +207,39 @@ def fetch_skip_times(
                     break
         except urllib.error.HTTPError as exc:
             if exc.code == 404:
-                log.debug(f"[aniskip] No skip times recorded on AniSkip for MAL ID {mal_id_int} EP {ep_num} (HTTP 404).")
-                should_cache = True
+                log.debug(
+                    f"[aniskip] No skip times recorded on AniSkip for MAL ID {mal_id_int} EP {ep_num} (HTTP 404)."
+                )
                 break
             elif exc.code in (500, 502, 503, 504):
                 log.debug(f"[aniskip] AniSkip HTTP {exc.code} on attempt {attempt + 1}/{max_attempts}.")
                 if attempt < max_attempts - 1:
-                    import time
                     time.sleep(0.3)
                     continue
             else:
                 log.debug(f"[aniskip] AniSkip HTTP error {exc.code}: {exc.reason}")
-                debug_warn("AniSkip HTTP error", exc)
                 break
-        except Exception as exc:
+        except (json.JSONDecodeError, UnicodeError) as exc:
+            log.debug("[aniskip] Invalid AniSkip JSON response: %s", exc)
+            break
+        except (urllib.error.URLError, OSError, HTTPException) as exc:
             log.debug(f"[aniskip] AniSkip request error on attempt {attempt + 1}/{max_attempts}: {exc}")
             if attempt < max_attempts - 1:
-                import time
                 time.sleep(0.3)
                 continue
             break
+        finally:
+            log.debug(
+                "[aniskip] Request attempt %s/%s completed in %.3fs (request runtime %.3fs).",
+                attempt + 1,
+                max_attempts,
+                time.monotonic() - request_started,
+                episode_length,
+            )
 
-    if should_cache or results:
+    if should_cache:
         _ANISKIP_CACHE[cache_key] = results
-    return results
+    return [dict(item) for item in results]
 
 
 def generate_chapters_file(skip_intervals: list[dict], filepath: str) -> str:

@@ -354,9 +354,15 @@ def resolve_editor(editor_override: str | None = None) -> str | None:
 
 def open_config_editor(editor_override: str | None = None) -> int:
     """Ensure config exists and open it in the user's preferred or fallback editor."""
+    from ..ui.transition import call_on_ui_thread, in_preparation
+    if in_preparation():
+        return call_on_ui_thread(lambda: open_config_editor(editor_override))
     import shlex
     import subprocess
     import sys
+    from contextlib import nullcontext
+
+    from ..ui.terminal_runtime import current_runtime
     from .paths import CONFIG_PATH
 
     # Ensure config file exists on disk
@@ -371,7 +377,9 @@ def open_config_editor(editor_override: str | None = None) -> int:
 
     cmd_parts = shlex.split(editor_cmd) + [CONFIG_PATH]
     try:
-        res = subprocess.run(cmd_parts)
+        runtime = current_runtime()
+        with runtime.suspend() if runtime is not None else nullcontext():
+            res = subprocess.run(cmd_parts)
         if res.returncode == 0:
             print(f"Configuration file closed: {CONFIG_PATH}")
         return res.returncode

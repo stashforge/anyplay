@@ -14,10 +14,40 @@ from ..domain.titles import get_show_display_title
 from ..providers import provider_display_name, provider_key
 from ..services.catalog import search_anime
 from ..ui import display
-from ..ui.spinner import loading_line as _loading_line
+from ..ui.footer import Footer, render_footer
 from ..ui.spinner import spinner_from_config
 
 _provider_search_cache = {}
+
+
+def _loading_header(status):
+    if not status:
+        return ""
+    try:
+        width = os.get_terminal_size().columns
+    except OSError:
+        width = 80
+    return render_footer(Footer(statuses=(status,)), width)
+
+
+def _make_background_status(owner_id, spinner_style, *, task_id="search", message="Searching…"):
+    from ..ui.actions import ActionBindings
+    from ..ui.background_loading import BackgroundLoadingStatus
+    from ..ui.loading_model import (
+        LoadingInteraction,
+        LoadingOwner,
+        LoadingPlacement,
+        LoadingTaskSpec,
+    )
+
+    return BackgroundLoadingStatus(
+        LoadingTaskSpec(
+            task_id=task_id, owner=LoadingOwner(owner_id, 0),
+            message=message, interaction=LoadingInteraction.BACKGROUND,
+            placement=LoadingPlacement.FOOTER, actions=ActionBindings(()), delay=0,
+        ),
+        spinner_style,
+    )
 
 
 def make_provider_oneshot_search(
@@ -61,6 +91,11 @@ def make_provider_oneshot_search(
 
         return live_fn, get_results, get_loading, get_error
 
+    search_status = _make_background_status(f"provider-search:{provider_id}", spinner_style)
+    enrichment_status = _make_background_status(
+        f"provider-search:{provider_id}", spinner_style,
+        task_id="enrichment", message="Enriching metadata…",
+    )
     enriching = False
 
     def _fetch():
@@ -149,16 +184,9 @@ def make_provider_oneshot_search(
         return results
 
     def get_loading():
-        try:
-            w = os.get_terminal_size().columns
-        except OSError:
-            w = 80
-
-        if loading:
-            return _loading_line("Searching…", w, spinner_style)
-        if enriching:
-            return _loading_line("Enriching metadata…", w, spinner_style)
-        return ""
+        searching = search_status.read(loading)
+        enrichment = enrichment_status.read(enriching and not loading)
+        return searching or enrichment or ""
 
     def get_error():
         return error
@@ -176,7 +204,7 @@ def make_provider_oneshot_search(
 
         is_plain = getattr(FLAGS, "plain_mode", False) or not sys.stdin.isatty()
         is_done = (not loading) if is_plain else (not loading and not enriching)
-        return cached_opts, get_loading(), is_done
+        return cached_opts, _loading_header(get_loading()), is_done
 
     return live_fn, get_results, get_loading, get_error
 
@@ -192,6 +220,7 @@ def make_anilist_oneshot_search(token: str, initial_query: str):
     loading = True
     error = ""
     spinner_style = display._spinner_style
+    search_status = _make_background_status("anilist-search", spinner_style)
 
     def worker():
         nonlocal results, loading, error
@@ -211,14 +240,7 @@ def make_anilist_oneshot_search(token: str, initial_query: str):
     t.start()
 
     def get_loading():
-        if loading:
-            try:
-                w = os.get_terminal_size().columns
-            except OSError:
-                w = 80
-
-            return _loading_line("Searching…", w, spinner_style)
-        return ""
+        return search_status.read(loading) or ""
 
     last_count = -1
     cached_opts = []
@@ -228,7 +250,7 @@ def make_anilist_oneshot_search(token: str, initial_query: str):
         if len(results) != last_count:
             last_count = len(results)
             cached_opts = [f"{get_show_display_title(s)}" for s in results]
-        return cached_opts, get_loading(), not loading
+        return cached_opts, _loading_header(get_loading()), not loading
 
     return live_fn, lambda: list(results), get_loading, lambda: error
 
