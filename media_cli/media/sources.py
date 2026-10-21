@@ -1,5 +1,6 @@
 """Pure provider source-name, URL, and priority helpers."""
 
+import math
 import re
 
 CIPHER = {
@@ -256,6 +257,14 @@ def calculate_stream_expiry(stream: dict, resolved_at: float | None = None) -> f
     sname = str(stream.get("source_name") or stream.get("sourceName") or "")
     surl = str(stream.get("link") or stream.get("streamUrl") or stream.get("sourceUrl") or "")
     hard = extract_hard_token_expiry(surl)
+    provider_expiry = stream.get("expiresAt")
+    if provider_expiry is not None and not isinstance(provider_expiry, bool):
+        try:
+            provider_expiry = float(provider_expiry)
+        except (TypeError, ValueError, OverflowError):
+            provider_expiry = None
+        if provider_expiry is not None and math.isfinite(provider_expiry):
+            return min(hard, provider_expiry) if hard is not None else provider_expiry
     if hard is not None:
         return hard
     ttl = get_stream_soft_ttl(sname, surl)

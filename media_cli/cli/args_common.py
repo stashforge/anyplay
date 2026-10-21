@@ -200,7 +200,7 @@ def _set_cli_defaults(parser):
         auth_status=False,
         auth_token=False,
         auth_token_raw=False,
-        provider="allanime",
+        provider=None,
         auto_download=None,
         auto_delete=None,
     )

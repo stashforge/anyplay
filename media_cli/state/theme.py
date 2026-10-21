@@ -17,5 +17,9 @@ APPLICATION_THEME = replace(
         ("metadata.airing", TextStyle(117)),
         ("metadata.offline", TextStyle((230, 80, 80))),
         ("metadata.separator", TextStyle(248)),
+        ("episode.label", TextStyle(252)),
+        ("episode.downloaded", TextStyle((166, 227, 161))),
+        ("episode.missing", TextStyle(167)),
+        ("history.new_release", TextStyle((166, 227, 161))),
     ),
 )

@@ -184,7 +184,14 @@ anyplay config get quality
 anyplay config set quality 1080p
 anyplay config set provider miruro
 anyplay config set player mpv
+anyplay config set details_cover false
 ```
+
+`details_cover` controls covers in title details/action menus (default: `true`).
+Global covers must also be enabled; `--no-cover` still hides them everywhere.
+
+Incognito sessions start with automatic next-episode downloads off. Opt in with
+`--auto-download` or the session's Playback settings; the saved config stays unchanged.
 
 The config file lives here:
 

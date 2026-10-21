@@ -29,6 +29,11 @@ class StyledText:
         if not isinstance(self.runs, tuple) or any(not isinstance(run, TextRun) for run in self.runs):
             raise TypeError("StyledText.runs requires an immutable tuple of TextRun values")
 
+    @property
+    def text(self) -> str:
+        """Plain content for non-styled renderers; roles never become escape codes."""
+        return "".join(run.text for run in self.runs)
+
 
 def fit_styled_text(content: StyledText, *, columns: int) -> StyledText:
     """Fit an exact cell budget while preserving run roles, without rendering."""

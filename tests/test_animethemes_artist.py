@@ -31,7 +31,7 @@ def test_group_rows_only_include_artist_participation():
         {"id": 3, "title": "Someone else", "animethemes": [{"id": 33, "type": "ED"}]},
     ]}
     rows = service.artist_theme_rows(group, owner)
-    assert [r["label"] for r in rows] == ["OP  Together"]
+    assert [r["label"] for r in rows] == ["Together OP"]
     assert rows[0]["artist"] == "Miku Itou"
 
 
@@ -60,8 +60,8 @@ def test_artist_headers_preserve_four_lines_and_identity():
     row = service.artist_theme_rows(artist)[0]
     details = resolve_details(view.details, controller.song_item(row, section).details)
     assert details.title == "Song"
-    assert "Artist: Miku Itou • As An Akagi" in details.secondary
-    assert details.metadata == "ED3 • Anime"
+    assert details.secondary == "No alternative title"
+    assert details.metadata == "by Miku Itou · Anime · ED 3 · As An Akagi · Group"
     controller.close()
 
 
@@ -88,15 +88,33 @@ def test_song_enrichment_keeps_exact_theme_and_fetches_credits(monkeypatch):
     assert _row_show(enriched)["thumbnail"].endswith("cover.jpg")
 
 
-def test_one_performance_section_opens_directly(monkeypatch):
+def _playable_artist_theme(row):
+    raw = row["raw"]
+    return {**row, "raw": {**raw, "animethemeentries": [{"id": 1, "videos": [
+        {"link": "https://example.test/song.webm", "resolution": 720}]}]}}
+
+
+def _wait_for_navigation(controller):
+    from time import monotonic, sleep
+    deadline = monotonic() + 2
+    while controller.session.navigation is not None and monotonic() < deadline:
+        controller.session.drain_updates()
+        sleep(0.005)
+    assert controller.session.navigation is None
+
+
+def test_one_performance_section_opens_details_without_quality_picker(monkeypatch):
     artist = artist_fixture()
     section = {"label": "Song Performances", "rows": service.artist_theme_rows(artist)}
     controller = ArtistController(artist, lambda row: None)
+    monkeypatch.setattr(controller, "_enriched", _playable_artist_theme)
     controller.install_sections([section])
     event = controller.session.auto_event()
     assert event.item_id == "section:direct"
     controller.session.dispatch(event)
-    assert controller.session.current.prompt == "Select song"
+    _wait_for_navigation(controller)
+    assert controller.session.current.prompt == "Select action"
+    assert any(item.reference == "songs" for item in controller.session.current.items)
     controller.close()
 
 
@@ -105,17 +123,19 @@ def test_group_picker_uses_standard_hints_and_back(monkeypatch):
     sections = [{"id": str(index), "label": name, "rows": service.artist_theme_rows(artist)}
                 for index, name in enumerate(["Song Performances", "In Group"])]
     controller = ArtistController(artist, lambda row: None)
+    monkeypatch.setattr(controller, "_enriched", _playable_artist_theme)
     controller.install_sections(sections)
     session = controller.session
     assert session.current.items[1].hint == "1 theme"
     session.dispatch(UiEvent("select", session.current.id, session.generation, "section:1"))
-    assert session.current.prompt == "Select song"
+    _wait_for_navigation(controller)
+    assert session.current.prompt == "Select action"
     session.dispatch(UiEvent("back", session.current.id, session.generation))
     assert session.position.selected_id == "section:1"
     controller.close()
 
 
-def test_single_artist_auto_opens_once_and_back_stays_in_results(monkeypatch):
+def test_single_artist_requires_explicit_selection_even_after_back(monkeypatch):
     from media_cli.app import animethemes as search_flow
     artist = artist_fixture()
     class ImmediateThread:
@@ -134,7 +154,8 @@ def test_single_artist_auto_opens_once_and_back_stays_in_results(monkeypatch):
         nonlocal count
         kwargs["live_fn"]()
         count += 1
-        assert kwargs["auto_select_single_when_done"]() == (count == 1)
+        policy = kwargs.get("auto_select_single_when_done", False)
+        assert (policy() if callable(policy) else policy) is False
         return 0 if count == 1 else -1
     monkeypatch.setattr(search_flow, "tui_pick", pick)
     result = search_flow.handle_animethemes_search_state(

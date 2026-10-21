@@ -1,5 +1,8 @@
 # Shared Terminal UI Design
 
+This design includes stage-specific progress notes. [Current Tasks](TASKS.md)
+owns present completion status; do not treat earlier migration lists as current.
+
 Status: shared foundation implemented; Artist is the first migrated consumer.
 Existing non-migrated callers retain the compatibility picker interface.
 

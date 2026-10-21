@@ -127,6 +127,7 @@ def _pre_resolved_stream(source, name, priority, warn):
                 if def_sub:
                     stream_dict["subtitle_url"] = def_sub
     for key in (
+        "expiresAt",
         "audio_url",
         "audio_tracks",
         "split_audio_url",
@@ -205,6 +206,9 @@ def resolve_source(source, silent=False):
         if isinstance(s, dict):
             s.setdefault("source_parent_name", clean_name)
             s.setdefault("raw_source_name", raw_name)
+            if "skip_intervals" in source:
+                from .provider_skips import normalize_provider_skips
+                s["skip_intervals"] = normalize_provider_skips(source["skip_intervals"])
     return streams or []
 
 

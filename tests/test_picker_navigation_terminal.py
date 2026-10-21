@@ -79,3 +79,70 @@ finish(picker_module.tui_pick(
         terminal.send_after(b"\x1b[12;100H", b"\x1b[C")
         terminal.send_after(b"Press Right Arrow again or Enter to select.", confirm)
         assert terminal.result() == 0
+
+
+@pytest.mark.parametrize("key", [b"\x12", b"\x1b[15~", b"\x1br"])
+@pytest.mark.parametrize("change,expected", [
+    ("unchanged", 2), ("renamed", 2), ("reordered", 1), ("removed", 2), ("disabled", 1),
+])
+def test_refresh_keeps_selection_and_filter(tmp_path, key, change, expected):
+    script = f"""
+from media_cli.ui.picker_state import PickerState
+state = PickerState(query='match', selected_index=2)
+rows = ['match first', 'match second', 'match selected', 'match last']
+def refresh(selected):
+    assert selected == 2
+    updated = list(rows)
+    if {change!r} == 'renamed':
+        updated[2] = 'match selected updated'
+    elif {change!r} == 'reordered':
+        updated[1], updated[2] = updated[2], updated[1]
+    elif {change!r} == 'removed':
+        updated.pop(2)
+    disabled = {{2}} if {change!r} == 'disabled' else set()
+    return updated, 'REFRESHED\\nSecondary\\nDetails\\nFooter', disabled
+picked = picker_module.tui_pick(
+    flags, ui, 'REFRESH-POSITION', rows, initial_selected=2, initial_query='match',
+    state=state, header='Primary\\nSecondary\\nDetails\\nFooter',
+    reverse_fn=refresh, alt_reverse_fn=refresh, return_on_quit=True,
+)
+finish(dict(picked=picked, query=state.query))
+"""
+    with Terminal(tmp_path, script, rows=12) as terminal:
+        terminal.send_after(b"\x1b[12;100H", key)
+        terminal.send_after(b"REFRESHED", b"\r")
+        assert terminal.result() == {"picked": expected, "query": "match"}
+
+
+@pytest.mark.parametrize("live", [False, True])
+@pytest.mark.parametrize("reorder", [False, True, "duplicates", "renamed"])
+def test_duplicate_titles_keep_provider_identity_on_update(tmp_path, live, reorder):
+    script = f"""
+from media_cli.ui.picker_state import PickerState
+state = PickerState(query='match', selected_index=2)
+rows = [('provider-a', 'match same'), ('other', 'match other'), ('provider-b', 'match same')]
+header = 'Primary\\nSecondary\\nDetails\\nFooter'
+def refresh(selected):
+    global header
+    assert rows[selected][0] == 'provider-b'
+    if {reorder!r} == 'duplicates':
+        rows[0], rows[2] = rows[2], rows[0]
+    elif {reorder!r} == 'renamed':
+        rows[2] = ('provider-b', 'match same updated')
+    elif {reorder!r}:
+        rows[1], rows[2] = rows[2], rows[1]
+    header = 'UPDATED\\nSecondary\\nDetails\\nFooter'
+    return None if {live!r} else ([label for _, label in rows], header)
+picked = picker_module.tui_pick(
+    flags, ui, 'IDENTITY', [label for _, label in rows], state=state,
+    header=header, reverse_fn=refresh, return_on_quit=True,
+    item_key_fn=lambda index: rows[index][0],
+    live_fn=(lambda query: ([label for _, label in rows], header, True)) if {live!r} else None,
+)
+finish(dict(provider=rows[picked][0], picked=picked, query=state.query))
+"""
+    with Terminal(tmp_path, script, rows=12) as terminal:
+        terminal.send_after(b"\x1b[12;100H", b"\x12")
+        terminal.send_after(b"UPDATED", b"\r")
+        expected = 0 if reorder == "duplicates" else 1 if reorder is True else 2
+        assert terminal.result() == {"provider": "provider-b", "picked": expected, "query": "match"}

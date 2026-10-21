@@ -62,6 +62,12 @@ def _is_playlist(url, content_type):
     )
 
 
+def _upstream_content_type(hint, upstream):
+    # Signed child playlists can have no recognizable extension. Their actual
+    # MIME type must override a guessed segment type so nested URLs get rewritten.
+    return upstream if _is_playlist("", upstream) else (hint or upstream)
+
+
 def _ass_to_vtt(text: str, mpegts_pts: int = 133508) -> str:
     lines = text.splitlines()
     vtt_cues = ["WEBVTT"]
@@ -608,7 +614,7 @@ def _build_proxy_server(initial_entries, timeout, show_id=None, episode=None, du
                         context=SSL_CTX_SECURE,
                         timeout=max(1, float(timeout))) as response:
                     validate_http_url(response.geturl())
-                    content_type = entry.get("content_type") or response.headers.get("Content-Type", "")
+                    content_type = _upstream_content_type(entry.get("content_type"), response.headers.get("Content-Type", ""))
 
                     if method == "GET" and _is_playlist(url, content_type):
                         body = response.read()
@@ -748,7 +754,9 @@ def _build_proxy_server(initial_entries, timeout, show_id=None, episode=None, du
                             verify=False,
                             stream=True,
                         )
-                        content_type = entry.get("content_type") or resp.headers.get("Content-Type") or resp.headers.get("content-type", "")
+                        content_type = _upstream_content_type(
+                            entry.get("content_type"), resp.headers.get("Content-Type") or resp.headers.get("content-type", ""),
+                        )
 
                         if method == "GET" and _is_playlist(url, content_type):
                             raw_chunks = []

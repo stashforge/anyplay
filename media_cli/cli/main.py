@@ -3,10 +3,16 @@
 import os
 import sys
 
+from ..core.startup import begin_startup, startup_checkpoint
+
+begin_startup()
+
 from .. import app_core as app
 from ..constants import APP_NAME
 from ..context import FLAGS as runtime_flags
 from ..ui.terminal_runtime import current_runtime, terminal_application
+
+startup_checkpoint("imports")
 
 
 def _cleanup():

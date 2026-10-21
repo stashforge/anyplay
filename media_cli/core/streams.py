@@ -15,15 +15,13 @@ One upper-layer fact is injected via :func:`configure`:
 catalog lookup (``get_episode_data`` in app_core), which pulls in
 provider/UI wiring that must not be imported downward.
 
-``resolve_source`` is bound at import from media.resolver but kept as a
-module global so tests can patch ``streams.resolve_source`` (or via the
-``__globals__`` of any moved function) exactly as before.
+``resolve_source`` loads extraction dependencies on demand and remains a
+module global so callers can replace the resolution boundary in tests.
 """
 
 import threading
 import time
 
-from ..media.resolver import resolve_source
 from ..media.sources import (
     calculate_stream_expiry,
     check_stream_health_and_refresh,
@@ -37,6 +35,14 @@ YELLOW = "\033[1;33m"
 RESET = "\033[0m"
 
 _episode_data_fn = None
+
+
+def resolve_source(source, silent=False):
+    """Load stream extraction only when playback needs a source resolved."""
+    from ..media import resolver
+
+    resolver.configure_reporters(reporting.info, reporting.ok, reporting.warn)
+    return resolver.resolve_source(source, silent=silent)
 
 
 def is_fixed_resolution(src: dict) -> bool:
@@ -93,7 +99,7 @@ def expand_direct_sources(sources: list) -> list:
         sname = str(src.get("sourceName") or "")
         base_name = sname.split(" (")[0].strip()
 
-        if is_fixed_resolution(src) or base_name in has_variants:
+        if src.get("allow_ytdlp_expansion") is False or is_fixed_resolution(src) or base_name in has_variants:
             continue
 
         if url and ("Yt-Dlp" not in sname and "yt-dlp" not in sname.lower()):

@@ -15,7 +15,7 @@ from media_cli.ui.view_model import (
     ViewTab,
 )
 from media_cli.ui.view_presentation import ViewPresentation
-from media_cli.ui.view_session import ViewSession
+from media_cli.ui.view_session import BeginNavigation, ViewSession
 from media_cli.ui.view_tui import TuiViewBackend
 
 
@@ -89,7 +89,7 @@ def test_cover_or_loading_message_does_not_block_actions_by_itself():
 
 def test_footer_shows_cancel_bindings_not_blocked_source_actions():
     session = ViewSession(view(ViewAction("select", "play", ("ENTER",)), ViewAction("refresh", "Reload", ("ESC",))))
-    session.navigation = SimpleNamespace(message="Preparing")
+    session.apply(BeginNavigation(session.current.id, session.generation, "request", "Preparing"))
     footer = ViewPresentation(session, None)._footer()
     assert footer.actions == ("Esc=back",)
 
@@ -99,7 +99,7 @@ def test_empty_selection_is_consumed_instead_of_dispatched():
     events = []
     context = SimpleNamespace(
         view=spec,
-        session=SimpleNamespace(navigation=None, cancel_navigation=lambda: None),
+        session=SimpleNamespace(navigation=None, input_blocked=False, cancel_navigation=lambda: None),
         focus=lambda index: None,
         emit=lambda *args: events.append(args),
         tab=lambda *args: None,

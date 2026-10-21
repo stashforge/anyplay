@@ -41,7 +41,6 @@ from media_cli.context import (
     get_action_prev,
 )
 from media_cli.media import local_proxy
-from media_cli.media import resolver as stream_resolver
 from media_cli.playback import android as android_playback
 from media_cli.playback import engine as playback_engine
 from media_cli.playback.engine import _ipc_player, play_desktop, _exit_player_screen
@@ -141,8 +140,7 @@ warn = reporting.warn
 err = reporting.err
 debug_warn = reporting.debug_warn
 
-stream_resolver.configure_reporters(info, ok, warn)
-resolve_source = stream_resolver.resolve_source
+resolve_source = streams.resolve_source
 local_proxy.configure_debug_reporter(debug_warn)
 start_local_proxy = local_proxy.start_local_proxy
 start_local_content_server = local_proxy.start_local_content_server

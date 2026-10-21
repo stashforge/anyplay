@@ -31,7 +31,7 @@ def tui_bindings(view: ViewSpec, *, navigation_pending: bool = False) -> ActionB
         # Keyless declarations are presentation/typed-command labels, not native bindings.
         keys = tuple(key for key in binding.action.keys if normalize_key(key) not in protected)
         if keys:
-            append(ViewAction(binding.action.id, binding.action.label, keys))
+            append(ViewAction(binding.action.id, binding.action.label, keys, footer=binding.action.footer))
 
     defaults: tuple[ViewAction, ...] = CORE_PICKER_ACTIONS
     if view.tabs:
@@ -39,5 +39,5 @@ def tui_bindings(view: ViewSpec, *, navigation_pending: bool = False) -> ActionB
     for action in defaults:
         keys = tuple(key for key in action.keys if key not in claimed)
         if keys:
-            append(ViewAction(action.id, action.label, keys))
+            append(ViewAction(action.id, action.label, keys, footer=action.footer))
     return ActionBindings(tuple(resolved))

@@ -8,10 +8,12 @@ _title_cache = {}
 
 
 def _cached_match_titles(item):
-    key = id(item)
+    key = tuple(str(value or "") for value in _match_title_values(item))
     cached = _title_cache.get(key)
     if cached is None:
-        cached = match_titles(item)
+        cached = tuple(match_titles(item))
+        if len(_title_cache) >= 512:
+            _title_cache.pop(next(iter(_title_cache)))
         _title_cache[key] = cached
     return cached
 
@@ -39,8 +41,8 @@ def normalized_match_title(value):
     return " ".join(tokens)
 
 
-def match_titles(item):
-    values = [
+def _match_title_values(item):
+    return (
         item.get("name"),
         item.get("englishName"),
         item.get("romajiName"),
@@ -50,10 +52,13 @@ def match_titles(item):
         item.get("_allanime_name"),
         item.get("_folder_name"),
         *(item.get("altNames") or []),
-    ]
+    )
+
+
+def match_titles(item):
     titles = []
     seen = set()
-    for value in values:
+    for value in _match_title_values(item):
         title = normalized_match_title(value)
         if title and title not in seen:
             titles.append(title)

@@ -68,6 +68,10 @@ def test_regular_results_back_returns_to_query_entry(monkeypatch, code, provider
     module = anilist if provider == "anilist" else search
 
     monkeypatch.setattr(module, "tui_pick", lambda *args, **kwargs: code)
+    if provider == "streaming":
+        from media_cli.app.search_results_controller import SearchResultsResult
+
+        monkeypatch.setattr(search, "run_search_results", lambda *args, **kwargs: SearchResultsResult("back"))
     monkeypatch.setattr(app_core, "_clear_poster_downloads", lambda: None)
     monkeypatch.setattr(app_core, "enter_alt_screen", lambda: None)
     monkeypatch.setattr(
@@ -140,11 +144,18 @@ def test_animethemes_query_entry_does_not_reuse_original_cli_query(monkeypatch):
 def test_title_menu_back_skips_only_an_auto_single_results_screen(monkeypatch, code, count):
     from media_cli import app_core
     from media_cli.app import playback_menu
+    from media_cli.app.details_menu_controller import DetailsMenuResult
 
     show = {"_id": "one", "name": "One", "_episode_ids": ["1"], "availableEpisodes": {"sub": 1}}
     ui = UiState(ui_show_ctx=show, search_prev_state="SEARCH", action_prev_state="SEARCH")
     ms = MachineState(query_str="original", shows=[show] * count, current_ep="1")
-    monkeypatch.setattr(playback_menu, "tui_pick", lambda *args, **kwargs: code)
+    monkeypatch.setattr(
+        playback_menu,
+        "run_details_menu",
+        lambda flags, ui, *, read_view, switch_translation, information: (
+            read_view(), DetailsMenuResult("back")
+        )[1],
+    )
     monkeypatch.setattr(app_core, "ensure_episode_ids", lambda *args, **kwargs: ["1"])
     monkeypatch.setattr(app_core, "get_resume_time", lambda *args: 0)
     result = playback_menu.handle_action_menu_state(

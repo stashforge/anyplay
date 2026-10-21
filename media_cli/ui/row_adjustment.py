@@ -1,5 +1,20 @@
 """Route outward filter-boundary arrows without knowing the row's setting."""
 
+from collections.abc import Sequence
+from typing import TypeVar
+
+_T = TypeVar("_T")
+
+
+def cycle_value(current: _T, values: Sequence[_T], direction: int = 1) -> _T:
+    """Step through the declared values, wrapping at either end."""
+    if not values:
+        raise ValueError("Cycling requires at least one value")
+    if type(direction) is not int or direction not in (-1, 1):
+        raise ValueError("Cycling direction must be -1 or 1")
+    index = values.index(current)
+    return values[(index + direction) % len(values)]
+
 
 def adjustment_direction(key: str, query: str, cursor: int) -> int | None:
     if not isinstance(key, str) or not isinstance(query, str):

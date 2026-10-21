@@ -50,3 +50,15 @@ def commit_details_transition(show: dict, prepared: PreparedDetails) -> None:
             show[key] = value
     for key in prepared.original.keys() - prepared.show.keys():
         show.pop(key, None)
+
+
+def prepare_title_refresh(show: dict, ttype: str) -> PreparedDetails:
+    """Force a provider check without persisting from a cancellable worker."""
+    original = deepcopy(show)
+    prepared = deepcopy(original)
+    # Optional enrichment can write history; only the accepted result may do so.
+    app_core.refresh_history_entry_provider_catalog(
+        {"show": prepared, "translation_type": ttype}, enrich=False,
+    )
+    ids = prepared.get("_episode_ids") or ()
+    return PreparedDetails(prepared, tuple(str(value) for value in ids), original)

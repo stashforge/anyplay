@@ -22,6 +22,7 @@ def run_screen_controller(handler, flags, ui, ms, cfg, args, *extra, fallback):
     if flags.plain_mode or not sys.stdin.isatty():
         return handler(flags, ui, ms, cfg, args, *extra)
     draft = []
+    _log.debug("Screen preparation starting: handler=%s fallback=%s", handler.__name__, fallback)
 
     def prepare():
         next_ui, next_ms, next_cfg, next_args = deepcopy((ui, ms, cfg, args))
@@ -34,6 +35,7 @@ def run_screen_controller(handler, flags, ui, ms, cfg, args, *extra, fallback):
     except PreparationCancelled:
         if draft:
             ui._resume_picker_position = getattr(draft[0], "_last_picker_position", None)
+            ui._view_positions = deepcopy(getattr(draft[0], "_view_positions", {}))
         ms.just_searched = False
         ms.just_picked_anime = False
         _log.debug("Screen preparation cancelled: handler=%s fallback=%s", handler.__name__, fallback)

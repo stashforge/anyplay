@@ -7,6 +7,47 @@ from media_cli.domain.metadata import (
 from media_cli.ui.info_panel import build_info_panel
 
 
+def test_named_movie_metadata_uses_numeric_progress_and_availability():
+    show = {
+        "_id": "movie", "_provider": "animekhor", "name": "Example",
+        "status": "RELEASING", "type": "ONA", "episodeCount": 1,
+        "availableEpisodes": {"sub": 1}, "_episode_ids": ["opaque"],
+        "_episode_labels": {"opaque": "Movie"},
+        "_local_progress": 1, "_local_episode_label": "Movie",
+    }
+    rendered = strip_ansi(format_info_metadata_line(show))
+    assert "Watched 1" in rendered and "Watched 0" not in rendered
+    assert "Avail" not in rendered
+    show["_local_progress"] = 0
+    assert strip_ansi(format_progress(show)) == "Watched 0"
+
+
+def test_named_second_episode_metadata_uses_numeric_progress_not_its_label():
+    show = {
+        "status": "RELEASING", "episodeCount": 12, "availableEpisodes": {"sub": 2},
+        "_episode_ids": ["first", "last"], "_episode_labels": {"last": "Finale"},
+        "_local_progress": 2, "_local_episode_label": "Finale",
+    }
+    assert strip_ansi(format_progress(show)) == "Watched 2/12"
+    assert format_available_episodes(show) == ""
+
+
+def test_batch_preparation_keeps_named_progress_separate_from_display_label(monkeypatch):
+    from media_cli.context import FLAGS
+    from media_cli.domain.metadata import batch_prepare_shows_display_state
+
+    show = {"_id": "movie", "name": "Example", "_episode_ids": ["opaque"],
+            "_episode_ids_ttype": "sub", "_episode_labels": {"opaque": "Movie"}}
+    monkeypatch.setattr(FLAGS, "incognito_mode", False)
+    monkeypatch.setattr("media_cli.core.storage.load_prefs", lambda: {})
+    monkeypatch.setattr("media_cli.core.storage.load_history", lambda: [
+        {"show": {"_id": "movie", "name": "Example"}, "episode": "opaque", "translation_type": "sub"},
+    ])
+    batch_prepare_shows_display_state([show])
+    assert show["_local_progress"] == 1
+    assert show["_local_episode_label"] == "Movie"
+
+
 def _show(*, total=None, available=21):
     show = {
         "status": "RELEASING",
@@ -27,14 +68,14 @@ def _show(*, total=None, available=21):
 def test_format_progress_uses_primary_number_for_dual_episode_label():
     rendered = format_progress(_show(total=52), local_only=True, ttype="sub")
 
-    assert strip_ansi(rendered) == "Watched 19/52"
+    assert strip_ansi(rendered) == "Watched 19/52 [451]"
     assert strip_ansi(format_available_episodes(_show(total=52), ttype="sub")) == "Avail 21 [453]"
 
 
 def test_format_progress_omits_total_when_season_total_is_unknown():
     rendered = format_progress(_show(), local_only=True, ttype="sub")
 
-    assert strip_ansi(rendered) == "Watched 19"
+    assert strip_ansi(rendered) == "Watched 19 [451]"
     assert strip_ansi(format_available_episodes(_show(), ttype="sub")) == "Avail 21 [453]"
 
 
@@ -42,7 +83,7 @@ def test_format_progress_omits_stale_total_below_available_count():
     show = _show(total=17)
     rendered = format_progress(show, local_only=True, ttype="sub")
 
-    assert strip_ansi(rendered) == "Watched 19"
+    assert strip_ansi(rendered) == "Watched 19 [451]"
     assert strip_ansi(format_available_episodes(show, local_only=True, ttype="sub")) == "Avail 21 [453]"
 
 

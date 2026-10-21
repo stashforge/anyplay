@@ -209,11 +209,14 @@ def play_android(
     try:
         from ..domain.episodes import episode_progress_number
         from ..media.aniskip import fetch_skip_times, generate_chapters_file
+        from ..media.provider_skips import merge_skip_intervals, needs_skip_fallback, normalize_provider_skips
         skip_intervals = []
-        if aniskip_enabled and mal_id:
+        if aniskip_enabled:
+            skip_intervals = normalize_provider_skips(stream.get("skip_intervals"))
+        if aniskip_enabled and mal_id and needs_skip_fallback(skip_intervals):
             ep_num = episode_progress_number(episode)
             fetch = fetch_skip_times_fn or fetch_skip_times
-            skip_intervals = fetch(mal_id, ep_num, episode_length=0.0)
+            skip_intervals = merge_skip_intervals(skip_intervals, fetch(mal_id, ep_num, episode_length=0.0))
             log.debug(
                 "AniSkip Android chapter candidates: MAL=%s EP=%s intervals=%d duration_matching=False",
                 mal_id, ep_num, len(skip_intervals),
@@ -242,6 +245,9 @@ def play_android(
         else:
             ep_str = ep_str.title()
         media_title = f"{title} - {ep_str}"
+    if isinstance(stream.get("media_title"), str) and stream["media_title"].strip():
+        from ..core.terminal import sanitize_terminal_text
+        media_title = sanitize_terminal_text(stream["media_title"])
     proxy_server = None
     intent_type = "video/*"
 

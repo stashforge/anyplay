@@ -21,8 +21,12 @@ class PlainViewBackend:
     def action_labels(self, view: ViewSpec, *, navigation_pending: bool = False) -> list[str]:
         labels = []
         configured = set()
+        declared = set()
         commands = {"select": "1,2" if view.selection_policy.multiple else "1-N", "back": "b", "quit": "q", "tab": "t"}
         for action in view.actions:
+            if action.id in declared:
+                continue
+            declared.add(action.id)
             kind = action_kind(action)
             configured.add(kind)
             labels.append(f"[{commands.get(kind, action.id)}] {action.label}")

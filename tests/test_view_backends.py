@@ -33,6 +33,16 @@ def view(**kwargs):
     return ViewSpec(id="test", prompt="Pick", items=(), details=DetailLines(Blank, Blank, Blank), **kwargs)
 
 
+@pytest.mark.parametrize("delay,error", [(True, TypeError), ("1", TypeError), (None, TypeError),
+                                         (-1, ValueError), (float("nan"), ValueError), (float("inf"), ValueError)])
+def test_invalid_focus_delay_fails_before_rendering(delay, error):
+    from media_cli.ui.view_picker import run_view_session
+    from media_cli.ui.view_session import ViewSession
+
+    with pytest.raises(error, match="focus_delay"):
+        run_view_session(SimpleNamespace(plain_mode=True), SimpleNamespace(), ViewSession(view()), focus_delay=delay)
+
+
 @pytest.mark.parametrize("command, kind", [(" back ", "back"), ("ESC", "back"), ("quit", "quit")])
 def test_plain_commands_do_not_focus_or_use_tui_bindings(command, kind):
     ctx, events, tabs, focuses = context(view())
@@ -52,6 +62,14 @@ def test_plain_tab_and_custom_action_use_typed_commands():
     assert events == [("action", 0, "refresh")]
     assert not renderer.handle_key("CTRL_R", 0, ctx)
     assert not renderer.handle_key("1", 0, ctx)
+
+
+def test_plain_commands_are_listed_once_for_multiple_keyboard_binding_groups():
+    content = view(actions=(
+        ViewAction("translation", "Sub/Dub", ("TAB",)),
+        ViewAction("translation", "Sub/Dub", ("BTAB", "CTRL_N"), footer=False),
+    ))
+    assert backend("plain").action_labels(content).count("[translation] Sub/Dub") == 1
 
 
 def test_tui_printable_keys_remain_filter_input():

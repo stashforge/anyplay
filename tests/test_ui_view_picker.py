@@ -424,11 +424,16 @@ def test_info_callback_opens_existing_modal_with_supplied_text_only(environment,
 
 
 def test_info_modal_receives_sanitized_name_and_multiline_description(environment, monkeypatch):
+    from media_cli.core.terminal import sanitize_terminal_text
     from media_cli.ui import info_screen
 
     shown = []
     monkeypatch.setattr(info_screen, "show_info_screen", lambda show, **kwargs: shown.append(show))
-    item = ViewItem("a", "\x1b[2JTitle\x00 name", info="\x1b]0;Injected\x07First\n\nSecond\tline\x1b[31m", details=Inherit)
+    raw_name = "\x1b[2JTitle\x00 name"
+    with pytest.raises(ValueError):
+        ViewItem("a", raw_name, details=Inherit)
+    item = ViewItem("a", sanitize_terminal_text(raw_name),
+                    info="\x1b]0;Injected\x07First\n\nSecond\tline\x1b[31m", details=Inherit)
 
     def inspect(options, hooks):
         hooks["info_fn"](0)
@@ -679,7 +684,10 @@ def test_query_and_multi_selection_events_carry_stable_values(environment):
     def handle(event):
         events.append(event)
         if event.kind == "query":
-            return ReplaceView("root", event.generation, replace(session.current, selection_policy=SelectionPolicy(multiple=True)))
+            # Submitted search text is not a filter on the new result list.
+            return ReplaceView("root", event.generation,
+                               replace(session.current, selection_policy=SelectionPolicy(multiple=True)),
+                               new_activation=True)
         return ExitSession(event.value)
 
     session = ViewSession(ViewSpec("root", "Pick", (ViewItem("a", "A", details=Inherit), ViewItem("b", "B", details=Inherit)),

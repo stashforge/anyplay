@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from decimal import Decimal, InvalidOperation
 import re
 import sys
 import time
@@ -17,6 +18,7 @@ from ..domain.episodes import (
     episode_id_at,
     episode_index_for_id,
     episode_progress_number,
+    parse_episode_dual_numbers,
 )
 from ..domain.titles import get_show_display_title
 from ..domain.tracking import tracking_status_for_progress
@@ -31,6 +33,7 @@ from ..playback.rules import (
     sync_queued_osd,
 )
 from ..providers import title_provider_id, title_provider_key
+from ..media.episode_identity import download_identity_conflicts
 from ..ui.display import suppress_terminal_echo
 from . import playback as playback_mod
 
@@ -60,6 +63,33 @@ def auto_download_mode(cfg: dict | None, session_value=None) -> str:
     if norm in _AUTO_DOWNLOAD_ADAPTIVE_VALUES:
         return "adaptive"
     return "adaptive"
+
+
+def initial_auto_download_mode(cfg: dict, *, incognito: bool, requested: bool | None) -> str:
+    if requested is not None:
+        return auto_download_mode(cfg, requested)
+    return "off" if incognito else auto_download_mode(cfg)
+
+
+def set_auto_download_enabled(ms: MachineState, enabled: bool) -> None:
+    """Change session policy and stop automatic work without touching manual jobs."""
+    ms.auto_download_next = "adaptive" if enabled else "off"
+    if enabled:
+        return
+    from ..media.download_worker import DownloadStatus, get_global_worker_if_started
+
+    worker = get_global_worker_if_started()
+    if worker is None:
+        return
+    unfinished = {DownloadStatus.QUEUED, DownloadStatus.RESOLVING, DownloadStatus.DOWNLOADING, DownloadStatus.PAUSED}
+    for item in worker.get_items():
+        if item.automatic and item.status in unfinished:
+            worker.cancel_item(item.id)
+            worker.discard_finished_item(item.id)
+            tasks = getattr(ms, "_bg_download_tasks", None)
+            if tasks is not None:
+                tasks.discard((item.title, str(item.ep_id)))
+            _logger.debug("Automatic download cancelled after session toggle: item=%s", item.id)
 
 
 def _stream_is_local(stream: dict | None) -> bool:
@@ -172,6 +202,7 @@ class AdaptiveAutoDownloadController:
 def trigger_background_auto_download(show_ctx, current_ep_index, episode_ids, ttype, cfg, ms, current_stream=None):
     mode = auto_download_mode(cfg, getattr(ms, "auto_download_next", None))
     if mode == "off":
+        _logger.debug("Auto-download skipped: session mode=off")
         return
     if not app_core.is_online():
         return
@@ -302,6 +333,7 @@ def trigger_background_auto_download(show_ctx, current_ep_index, episode_ids, tt
         on_complete=_on_complete,
         ep_id=next_ep,
         show_metadata=build_offline_metadata(show_ctx),
+        automatic=True,
     )
     worker = get_global_worker(download_dir)
 
@@ -351,7 +383,7 @@ def trigger_background_auto_download(show_ctx, current_ep_index, episode_ids, tt
                         DownloadStatus.SKIPPED,
                     ):
                         break
-                controller.update(dict(getattr(player, "props", {}) or {}))
+                    controller.update(dict(getattr(player, "props", {}) or {}))
                 time.sleep(_ADAPTIVE_MONITOR_INTERVAL_SECONDS)
         except Exception:
             _logger.exception("Adaptive auto-download monitor failed")
@@ -370,7 +402,7 @@ def _mark_watched_in_show(show_ctx, episode) -> None:
 
 
 def _auto_delete_watched_downloads(show_ctx, episode_ids, ttype, cfg, ms) -> list[str]:
-    if not (cfg.get("auto_delete_watched", False) or getattr(ms, "auto_delete_watched", False)):
+    if not getattr(ms, "auto_delete_watched", cfg.get("auto_delete_watched", False)):
         return []
     buf = int(getattr(ms, "auto_delete_buffer", cfg.get("auto_delete_buffer", 1)))
     if buf < 0:
@@ -379,11 +411,38 @@ def _auto_delete_watched_downloads(show_ctx, episode_ids, ttype, cfg, ms) -> lis
     folder_name = show_ctx.get("_folder_name", getattr(ms, "show_title", ""))
     watched_list = show_ctx.get("watched_episodes", [])
     watched_keys = {str(ep) for ep in watched_list}
+    labels = show_ctx.get("_episode_labels") or {}
+    watched_indexes = {
+        index for watched in watched_keys
+        if (index := episode_index_for_id(episode_ids, watched, labels=labels)) is not None
+    }
+    # Persisted local history is authoritative over stale display-state caches.
+    local_progress = app_core.get_local_progress(show_ctx, ttype)
+    if local_progress is None:
+        local_progress = show_ctx.get("_local_progress")
+    try:
+        progress = Decimal(str(local_progress))
+        if not progress.is_finite() or progress < 0:
+            progress = None
+    except (InvalidOperation, ValueError):
+        progress = None
+    episode_indexes = {str(eid): index for index, eid in enumerate(episode_ids)}
     dl_files = getattr(ms, "_download_files", {})
     watched_dl = []
 
     def _episode_is_watched(eid, eid_lbl) -> bool:
-        return str(eid) in watched_keys or str(eid_lbl) in watched_keys
+        index = episode_indexes[str(eid)]
+        if str(eid) in watched_keys or str(eid_lbl) in watched_keys or index in watched_indexes:
+            return True
+        if progress is None:
+            return False
+        primary, _ = parse_episode_dual_numbers(str(eid_lbl))
+        number = primary or clean_episode_identifier(str(eid_lbl))
+        try:
+            episode_progress = Decimal(number)
+        except InvalidOperation:
+            episode_progress = Decimal(index + 1)
+        return episode_progress.is_finite() and 0 < episode_progress <= progress
 
     for eid in episode_ids:
         eid_lbl = playback_mod._display_episode_label(show_ctx, eid, ttype)
@@ -405,6 +464,8 @@ def _auto_delete_watched_downloads(show_ctx, episode_ids, ttype, cfg, ms) -> lis
         for eid in episode_ids
     )
     effective_buf = 0 if is_finished and all_available_watched else buf
+    _logger.debug("Watched-download cleanup: title=%s watched_downloads=%s buffer=%s",
+                  folder_name, len(watched_dl), effective_buf)
 
     if len(watched_dl) <= effective_buf:
         return []
@@ -421,6 +482,9 @@ def _auto_delete_watched_downloads(show_ctx, episode_ids, ttype, cfg, ms) -> lis
             if str(deid) in dl_eps:
                 dl_eps.remove(str(deid))
             deleted_labels.append(str(dlbl))
+        else:
+            _logger.debug("Watched-download cleanup skipped: title=%s episode=%s no recorded file removed",
+                          folder_name, dlbl)
     if deleted_labels:
         app_core.set_action_feedback(
             show_ctx,
@@ -451,7 +515,7 @@ def _local_stream_for_episode(show_ctx, show_title, episode, ttype, cfg, ms):
 
     for key in lookup_keys:
         filepath = _valid_local_download_path(dl_files.get(key))
-        if filepath:
+        if filepath and not download_identity_conflicts(label, filepath):
             return (
                 {"link": filepath, "resolution": "Offline (Local)", "is_local": True},
                 "Local File",
@@ -1170,11 +1234,9 @@ def handle_play_state(
                                             if base_name:
                                                 exclude_names.add(base_name)
                                             exclude_names.add(raw_sname.split(" (")[0].strip())
-                                        sources_total = len(ep_data.get("episode", {}).get("sourceUrls", []))
-                                        if len(exclude_names) < sources_total:
-                                            app_core.start_bg_resolve(ep_data, exclude_names, show_id=ms.show_id, ep=ms.current_ep, ttype=ttype, provider_id=provider_id, quality=target_quality)
-                                        else:
-                                            app_core.info("Finding a playable stream...")
+                                    sources_total = len(ep_data.get("episode", {}).get("sourceUrls", []))
+                                    if len(exclude_names) < sources_total:
+                                        app_core.start_bg_resolve(ep_data, exclude_names, show_id=ms.show_id, ep=ms.current_ep, ttype=ttype, provider_id=provider_id, quality=target_quality)
 
                     # Fallback: fetch episode stream if no cached stream was selected or no cached streams available
                     if res is None:
@@ -1708,7 +1770,7 @@ def handle_play_state(
             aniskip_enabled=aniskip_enabled,
             action_show=action_show,
             ttype=ttype,
-            cfg=cfg,
+            cfg={**cfg, "auto_download_next": auto_download_mode(cfg, ms.auto_download_next)},
             ep_index=ms.current_ep_index,
             fetch_skip_times_fn=_fetch_android_skip_times,
             prepare_subtitles_fn=_prepare_android_subtitles,
@@ -2017,7 +2079,7 @@ def handle_play_state(
             try:
                 _auto_delete_watched_downloads(ui.ui_show_ctx, episode_ids, ttype, cfg, ms)
             except Exception:
-                pass
+                _logger.exception("Automatic watched-download cleanup failed")
 
         if auto_scrobbled or (duration > 0 and time_pos >= duration - 30):
             app_core.save_resume_time(ms.show_id, ms.current_ep, 0)

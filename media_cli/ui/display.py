@@ -22,6 +22,7 @@ globals, so there is exactly one owner of the flag.
 """
 
 import atexit
+import logging
 import os
 import re
 import sys
@@ -188,6 +189,7 @@ def enter_alt_screen():
         sys.stdout.write(pending_image_clear + "\033[?1049h\033[2J\033[?25l")
         sys.stdout.flush()
         _alt_screen_active = True
+        logging.getLogger(__name__).debug("Alternate screen entered: cleared=True")
 
 
 _INITIAL_TERMIOS_ATTRS = None
@@ -213,6 +215,7 @@ def exit_alt_screen():
         sys.stdout.write("\033[?1049l\033[?25h")
         sys.stdout.flush()
         _alt_screen_active = False
+        logging.getLogger(__name__).debug("Alternate screen exited")
 
 
 @terminal_application
@@ -348,11 +351,21 @@ def _run_loading_helper(msg, fn, args, kwargs, paint, *, preserve_callback=False
         runtime.assert_owner_thread()
         enter_alt_screen()
         painted_rows = set()
+        first_paint = True
 
         def bindings():
             return runtime.input_bindings or picker_bindings()
 
         def render(snapshot):
+            nonlocal first_paint
+            if first_paint:
+                from .picker import cached_frame_rows
+                logging.getLogger(__name__).debug(
+                    "Loading first paint: renderer=%s work=%s alt_screen=%s cached_rows=%d",
+                    getattr(paint, "__name__", type(paint).__name__),
+                    getattr(fn, "__name__", type(fn).__name__), is_alt_screen_active(), cached_frame_rows(),
+                )
+                first_paint = False
             row = paint(snapshot, runtime.fileno(), spinner_style)
             if row is not None:
                 painted_rows.add(row)

@@ -25,6 +25,7 @@ class TestDownloadsFullCatalog(unittest.TestCase):
                 "shows": {
                     "Beyond Times Gaze": {
                         "metadata": {
+                            "_id": "beyond-times-gaze",
                             "name": "Beyond Times Gaze",
                             "episodeCount": 12,
                             "_local_progress": 31,
@@ -155,9 +156,14 @@ class TestDownloadsFullCatalog(unittest.TestCase):
 
         def fake_tui_pick(*args, **kwargs):
             nonlocal captured_opts, captured_hints_fn
-            captured_opts = args[3]
-            captured_hints_fn = kwargs.get("hints")
-            return -2  # return to details
+            from media_cli.app.details_menu_controller import DetailsMenuResult
+            from media_cli.state.theme import APPLICATION_THEME
+            from media_cli.ui.row_text import render_row_text
+            view = kwargs["read_view"]()
+            captured_opts = [render_row_text(item.label, columns=120, theme=APPLICATION_THEME) for item in view.items]
+            def captured_hints_fn(i):
+                return view.items[i].hint_text
+            return DetailsMenuResult("back")
 
         with tempfile.TemporaryDirectory() as tmpdir:
             ms._download_files = {}
@@ -168,7 +174,7 @@ class TestDownloadsFullCatalog(unittest.TestCase):
                 ms._download_files[str(i)] = path
 
             with patch("media_cli.app_core.ensure_episode_ids", return_value=eids), \
-                 patch("media_cli.app.playback_episodes.tui_pick", side_effect=fake_tui_pick):
+                 patch("media_cli.app.playback_episodes.run_details_menu", side_effect=fake_tui_pick):
 
                 res = playback_episodes.handle_episode_state(flags, ui, ms, cfg, MagicMock(), "sub", MagicMock(return_value=False))
                 self.assertEqual(res, "DETAILS")
@@ -177,16 +183,18 @@ class TestDownloadsFullCatalog(unittest.TestCase):
                 ep1_opt = captured_opts[0]
                 self.assertIn("\033[38;5;244mEpisode 1\033[0m", ep1_opt)
                 self.assertNotIn("✔", ep1_opt)
-                self.assertEqual(captured_hints_fn(0), "\033[38;5;244mwatched • not downloaded\033[0m")
+                self.assertEqual(captured_hints_fn(0), "watched • not downloaded")
 
                 # 2. Ep 30: Watched + Downloaded -> greyed out with green checkmark
                 ep30_opt = captured_opts[29]
-                self.assertIn("\033[38;5;244mEpisode 30  \033[38;2;166;227;161m✔\033[0m", ep30_opt)
+                self.assertIn("\033[38;5;244mEpisode 30\033[0m", ep30_opt)
+                self.assertIn("\033[38;2;166;227;161m  ✔\033[0m", ep30_opt)
                 self.assertEqual(captured_hints_fn(29), "watched • ready to watch")
 
                 # 3. Ep 35: Unwatched + Downloaded -> normal text with green checkmark
                 ep35_opt = captured_opts[34]
-                self.assertIn("Episode 35  \033[38;2;166;227;161m✔\033[0m", ep35_opt)
+                self.assertIn("Episode 35", ep35_opt)
+                self.assertIn("\033[38;2;166;227;161m  ✔\033[0m", ep35_opt)
                 self.assertNotIn("\033[38;5;244mEpisode 35", ep35_opt)
                 self.assertEqual(captured_hints_fn(34), "ready to watch")
 
@@ -195,6 +203,7 @@ class TestDownloadsFullCatalog(unittest.TestCase):
         flags = CliFlags()
         ui = UiState()
         ui.ui_show_ctx = {
+            "_id": "test-show",
             "name": "Test Show",
             "_episode_ids": ["1", "2"],
             "_episode_ids_ttype": "sub",
@@ -227,7 +236,24 @@ class TestDownloadsFullCatalog(unittest.TestCase):
                         return i
             return -2
 
-        with patch("media_cli.app.playback_menu.tui_pick", side_effect=pick_action), \
+        def select_settings(flags, ui, *, read_view, switch_translation, information, activate=None):
+            from media_cli.app.details_menu_controller import DetailsMenuController, DetailsMenuResult
+            from media_cli.ui.view_picker import run_view_session
+
+            view = read_view()
+            if view.prompt == "Playback":
+                controller = DetailsMenuController(
+                    ui=ui, read_view=read_view, switch_translation=switch_translation,
+                    information=information, activate=activate,
+                )
+                return run_view_session(
+                    flags, ui, controller.session, picker=playback_menu.tui_pick, updates_fn=controller.updates,
+                )
+            item = next(item for item in view.items if item.reference == "PLAYBACK_SETTINGS")
+            return DetailsMenuResult("selected", item.reference)
+
+        with patch("media_cli.app.playback_menu.run_details_menu", side_effect=select_settings), \
+             patch("media_cli.app.playback_menu.tui_pick", side_effect=pick_action), \
              patch("media_cli.app_core.save_config") as mock_save:
 
             playback_menu.handle_action_menu_state(flags, ui, ms, cfg, MagicMock(), "sub", MagicMock(return_value=False))
@@ -250,7 +276,8 @@ class TestDownloadsFullCatalog(unittest.TestCase):
                         return i
             return -2
 
-        with patch("media_cli.app.playback_menu.tui_pick", side_effect=pick_delete), \
+        with patch("media_cli.app.playback_menu.run_details_menu", side_effect=select_settings), \
+             patch("media_cli.app.playback_menu.tui_pick", side_effect=pick_delete), \
              patch("media_cli.app_core.save_config") as mock_save:
 
             playback_menu.handle_action_menu_state(flags, ui, ms, cfg, MagicMock(), "sub", MagicMock(return_value=False))
@@ -287,13 +314,18 @@ class TestDownloadsFullCatalog(unittest.TestCase):
 
         def fake_tui_pick(*args, **kwargs):
             nonlocal captured_opts, captured_hints_fn
-            captured_opts = args[3]
-            captured_hints_fn = kwargs.get("hints")
-            return -2
+            from media_cli.app.details_menu_controller import DetailsMenuResult
+            from media_cli.state.theme import APPLICATION_THEME
+            from media_cli.ui.row_text import render_row_text
+            view = kwargs["read_view"]()
+            captured_opts = [render_row_text(item.label, columns=120, theme=APPLICATION_THEME) for item in view.items]
+            def captured_hints_fn(i):
+                return view.items[i].hint_text
+            return DetailsMenuResult("back")
 
         with patch("media_cli.app_core.ensure_episode_ids", return_value=eids), \
              patch("media_cli.app_core.find_offline_file_for_episode", return_value=None), \
-             patch("media_cli.app.playback_episodes.tui_pick", side_effect=fake_tui_pick):
+             patch("media_cli.app.playback_episodes.run_details_menu", side_effect=fake_tui_pick):
 
             res = playback_episodes.handle_episode_state(flags, ui, ms, cfg, MagicMock(), "sub", MagicMock(return_value=False))
             self.assertEqual(res, "DETAILS")
@@ -301,11 +333,11 @@ class TestDownloadsFullCatalog(unittest.TestCase):
             # Ep 1-10 are watched -> must be greyed out
             for i in range(10):
                 self.assertIn(f"\033[38;5;244mEpisode {i+1}\033[0m", captured_opts[i])
-                self.assertEqual(captured_hints_fn(i), "\033[38;5;244mwatched\033[0m")
+                self.assertEqual(captured_hints_fn(i), "watched")
 
             # Ep 11-28 are unwatched -> must be normal text
             for i in range(10, 28):
-                self.assertEqual(captured_opts[i], f"Episode {i+1}")
+                self.assertIn(f"Episode {i+1}", captured_opts[i])
                 self.assertNotIn("\033[38;5;244m", captured_opts[i])
                 self.assertEqual(captured_hints_fn(i), "")
 

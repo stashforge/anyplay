@@ -2,6 +2,7 @@ import argparse
 import json
 
 from media_cli.context import CliFlags, MachineState, UiState
+from media_cli.ui.loading_messages import episode_indexing
 
 
 def test_history_sanitizer_strips_runtime_episode_catalog_maps():
@@ -177,6 +178,7 @@ def test_background_auto_download_uses_provider_key(monkeypatch, tmp_path):
 
     assert captured["show_id"] == "provider-title-456"
     assert captured["provider_id"] == "anikoto"
+    assert fake_worker.items[0].automatic is True
 
 
 def test_background_auto_download_prefers_provider_title_id(monkeypatch, tmp_path):
@@ -547,6 +549,7 @@ def test_mpv_next_prefetch_falls_back_online_when_download_is_invalid(monkeypatc
 
 def test_provider_details_menu_keeps_playback_settings_last(monkeypatch):
     from media_cli.app import playback_menu
+    from media_cli.app.details_menu_controller import DetailsMenuResult
 
     flags = CliFlags()
     ui = UiState()
@@ -564,14 +567,14 @@ def test_provider_details_menu_keeps_playback_settings_last(monkeypatch):
     ms.current_ep = "1"
     ms.current_ep_index = 0
     ms.total_eps = 2
-    captured_opts = []
+    captured_view = None
 
-    def fake_pick(flags, ui, title, opts, **kwargs):
-        nonlocal captured_opts
-        captured_opts = list(opts)
-        return -2
+    def fake_menu(flags, ui, *, read_view, switch_translation, information):
+        nonlocal captured_view
+        captured_view = read_view()
+        return DetailsMenuResult("back")
 
-    monkeypatch.setattr(playback_menu, "tui_pick", fake_pick)
+    monkeypatch.setattr(playback_menu, "run_details_menu", fake_menu)
     monkeypatch.setattr(playback_menu.app_core, "ensure_episode_ids", lambda *a, **k: ["1", "2"])
     monkeypatch.setattr(playback_menu.app_core, "get_show_anilist_id", lambda *a, **k: None)
     monkeypatch.setattr(playback_menu.app_core, "get_resume_time", lambda *a, **k: 0)
@@ -589,14 +592,16 @@ def test_provider_details_menu_keeps_playback_settings_last(monkeypatch):
     )
 
     assert state == "DETAILS"
-    assert captured_opts[-1] == "Playback"
-    assert "Download" in captured_opts
-    assert not any("Auto-Download" in opt for opt in captured_opts)
-    assert not any("Auto-Delete" in opt for opt in captured_opts)
+    labels = [item.label for item in captured_view.items]
+    assert labels[-1] == "Playback"
+    assert "Download" in labels
+    assert not any("Auto-Download" in label for label in labels)
+    assert not any("Auto-Delete" in label for label in labels)
 
 
 def test_playback_settings_keeps_header_and_stays_open_after_toggle(monkeypatch):
     from media_cli.app import playback_menu
+    from media_cli.app.details_menu_controller import DetailsMenuResult
 
     flags = CliFlags()
     ui = UiState()
@@ -622,9 +627,12 @@ def test_playback_settings_keeps_header_and_stays_open_after_toggle(monkeypatch)
     playback_headers = []
     playback_initial_selected = []
 
+    def choose_playback_settings(flags, ui, *, read_view, switch_translation, information):
+        view = read_view()
+        action_id = next(item.reference for item in view.items if item.label == "Playback")
+        return DetailsMenuResult("selected", action_id)
+
     def fake_pick(flags, ui, title, opts, **kwargs):
-        if title == "Select action":
-            return opts.index("Playback")
         if title == "Playback":
             playback_calls.append(list(opts))
             playback_headers.append(kwargs.get("header_fn"))
@@ -634,6 +642,7 @@ def test_playback_settings_keeps_header_and_stays_open_after_toggle(monkeypatch)
             return -2
         return -2
 
+    monkeypatch.setattr(playback_menu, "run_details_menu", choose_playback_settings)
     monkeypatch.setattr(playback_menu, "tui_pick", fake_pick)
     monkeypatch.setattr(playback_menu.app_core, "ensure_episode_ids", lambda *a, **k: ["1", "2"])
     monkeypatch.setattr(playback_menu.app_core, "get_show_anilist_id", lambda *a, **k: None)
@@ -662,6 +671,7 @@ def test_playback_settings_keeps_header_and_stays_open_after_toggle(monkeypatch)
 
 def test_playback_settings_preserves_selected_row_after_toggle(monkeypatch):
     from media_cli.app import playback_menu
+    from media_cli.app.details_menu_controller import DetailsMenuResult
 
     flags = CliFlags()
     ui = UiState()
@@ -682,9 +692,12 @@ def test_playback_settings_preserves_selected_row_after_toggle(monkeypatch):
 
     playback_initial_selected = []
 
+    def choose_playback_settings(flags, ui, *, read_view, switch_translation, information):
+        view = read_view()
+        action_id = next(item.reference for item in view.items if item.label == "Playback")
+        return DetailsMenuResult("selected", action_id)
+
     def fake_pick(flags, ui, title, opts, **kwargs):
-        if title == "Select action":
-            return opts.index("Playback")
         if title == "Playback":
             playback_initial_selected.append(kwargs.get("initial_selected"))
             if len(playback_initial_selected) == 1:
@@ -692,6 +705,7 @@ def test_playback_settings_preserves_selected_row_after_toggle(monkeypatch):
             return -2
         return -2
 
+    monkeypatch.setattr(playback_menu, "run_details_menu", choose_playback_settings)
     monkeypatch.setattr(playback_menu, "tui_pick", fake_pick)
     monkeypatch.setattr(playback_menu.app_core, "ensure_episode_ids", lambda *a, **k: ["1", "2"])
     monkeypatch.setattr(playback_menu.app_core, "get_show_anilist_id", lambda *a, **k: None)
@@ -715,6 +729,8 @@ def test_playback_settings_preserves_selected_row_after_toggle(monkeypatch):
 
 def test_skip_settings_status_rows_are_actionable(monkeypatch):
     from media_cli.app import playback_menu
+    from media_cli.app.details_menu_controller import DetailsMenuController, DetailsMenuResult
+    from media_cli.ui.view_picker import run_view_session
 
     flags = CliFlags()
     ui = UiState()
@@ -744,10 +760,19 @@ def test_skip_settings_status_rows_are_actionable(monkeypatch):
     playback_calls = []
     skip_done = False
 
+    def choose_playback_settings(flags, ui, *, read_view, switch_translation, information, activate=None):
+        view = read_view()
+        if activate is not None:
+            controller = DetailsMenuController(
+                ui=ui, read_view=read_view, switch_translation=switch_translation,
+                information=information, activate=activate,
+            )
+            return run_view_session(flags, ui, controller.session, picker=fake_pick, updates_fn=controller.updates)
+        action_id = next(item.reference for item in view.items if item.label == "Playback")
+        return DetailsMenuResult("selected", action_id)
+
     def fake_pick(flags, ui, title, opts, **kwargs):
         nonlocal skip_done
-        if title == "Select action":
-            return opts.index("Playback")
         if title == "Playback":
             if skip_done:
                 return -2
@@ -764,6 +789,7 @@ def test_skip_settings_status_rows_are_actionable(monkeypatch):
             return -2
         return -2
 
+    monkeypatch.setattr(playback_menu, "run_details_menu", choose_playback_settings)
     monkeypatch.setattr(playback_menu, "tui_pick", fake_pick)
     monkeypatch.setattr(playback_menu.app_core, "ensure_episode_ids", lambda *a, **k: ["1", "2"])
     monkeypatch.setattr(playback_menu.app_core, "get_show_anilist_id", lambda *a, **k: None)
@@ -831,7 +857,8 @@ def test_episode_menu_uses_loading_catalog_entrypoint(monkeypatch):
     monkeypatch.setattr(playback_episodes.app_core, "with_loading", fake_with_loading)
     monkeypatch.setattr(playback_episodes.app_core, "ensure_episode_ids", fail_direct_ensure)
     monkeypatch.setattr(playback_episodes.app_core, "build_info_panel", lambda *a, **k: None)
-    monkeypatch.setattr(playback_episodes, "tui_pick", lambda *a, **k: -2)
+    from media_cli.app.details_menu_controller import DetailsMenuResult
+    monkeypatch.setattr(playback_episodes, "run_details_menu", lambda *a, **k: DetailsMenuResult("back"))
 
     state = playback_episodes.handle_episode_state(
         flags,
@@ -845,12 +872,13 @@ def test_episode_menu_uses_loading_catalog_entrypoint(monkeypatch):
 
     assert state == "DETAILS"
     assert called == {"show": show, "ttype": "sub"}
-    assert loading_messages == ["Indexing episodes…"]
+    assert loading_messages == [episode_indexing()]
 
 
 def test_details_entry_wraps_episode_catalog_loading(monkeypatch):
     from media_cli.app import details
     from media_cli.app import playback_menu
+    from media_cli.app.details_menu_controller import DetailsMenuResult
 
     flags = CliFlags()
     ui = UiState()
@@ -880,7 +908,13 @@ def test_details_entry_wraps_episode_catalog_loading(monkeypatch):
     monkeypatch.setattr(details.app_core, "ensure_episode_ids", lambda *a, **k: ["1", "2"])
     monkeypatch.setattr(details.app_core, "patch_history_entry_show", lambda *a, **k: None)
     monkeypatch.setattr(details.app_core, "get_show_anilist_id", lambda *a, **k: None)
-    monkeypatch.setattr(playback_menu, "tui_pick", lambda *a, **k: -2)
+    monkeypatch.setattr(
+        playback_menu,
+        "run_details_menu",
+        lambda flags, ui, *, read_view, switch_translation, information: (
+            read_view(), DetailsMenuResult("back")
+        )[1],
+    )
 
     state = details.handle_details_state(
         flags,
@@ -992,7 +1026,8 @@ def test_large_episode_menu_wraps_preparation_in_loading(monkeypatch):
             AssertionError("episode menu should not scan the download folder once per row")
         ),
     )
-    monkeypatch.setattr(playback_episodes, "tui_pick", lambda *a, **k: -2)
+    from media_cli.app.details_menu_controller import DetailsMenuResult
+    monkeypatch.setattr(playback_episodes, "run_details_menu", lambda *a, **k: DetailsMenuResult("back"))
 
     state = playback_episodes.handle_episode_state(
         flags,
@@ -1005,9 +1040,7 @@ def test_large_episode_menu_wraps_preparation_in_loading(monkeypatch):
     )
 
     assert state == "DETAILS"
-    assert loading_messages[0] == "Indexing episodes…"
-    assert loading_messages[1] == "Indexing 120 episodes…"
-    assert loading_messages[2] == "Checking local files…"
+    assert loading_messages == [episode_indexing(), episode_indexing(120)]
     assert "Preparing episodes…" not in loading_messages
     assert "Checking downloaded episodes…" not in loading_messages
 

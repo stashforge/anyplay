@@ -12,6 +12,7 @@ import sqlite3
 import sys
 import time
 import urllib.parse
+from threading import Lock
 from typing import Any
 
 from bs4 import BeautifulSoup
@@ -231,7 +232,8 @@ class AnimePaheProvider(Provider):
         self._cookies: dict[str, str] = {}
         self._user_agent = os.environ.get("ANIMEPAHE_USER_AGENT", "").strip()
         self._browser_cookie_refresh_attempted = False
-        self._init_cookies()
+        self._cookies_initialized = False
+        self._cookies_lock = Lock()
 
     @property
     def base_url(self) -> str:
@@ -259,6 +261,10 @@ class AnimePaheProvider(Provider):
             self._user_agent = _detect_firefox_user_agent()
 
     def _get_session(self):
+        with self._cookies_lock:
+            if not self._cookies_initialized:
+                self._init_cookies()
+                self._cookies_initialized = True
         if self._session is None and CURL_CFFI_AVAILABLE and cffi_requests is not None:
             if "Firefox" in self._user_agent:
                 self._session = cffi_requests.Session(impersonate="firefox147")
@@ -269,6 +275,7 @@ class AnimePaheProvider(Provider):
         return self._session
 
     def _fetch_page(self, url: str, headers: dict[str, str] | None = None, timeout: int = 15) -> str:
+        sess = self._get_session()
         req_headers = {
             "User-Agent": self._user_agent or UA,
             "Referer": f"{self.base_url}/",
@@ -278,7 +285,6 @@ class AnimePaheProvider(Provider):
         if headers:
             req_headers.update(headers)
 
-        sess = self._get_session()
         if sess is not None:
             try:
                 resp = sess.get(url, headers=req_headers, timeout=timeout)

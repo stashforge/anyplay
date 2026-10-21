@@ -130,6 +130,10 @@ def play_desktop(
             ep_str = ep_str.title()
         media_title = f"{title} - {ep_str} ({resolution})"
 
+    if isinstance(stream.get("media_title"), str) and stream["media_title"].strip():
+        from ..core.terminal import sanitize_terminal_text
+        media_title = sanitize_terminal_text(stream["media_title"])
+
     if start_time_override is not None and float(start_time_override) > 0:
         start_time = float(start_time_override)
     else:
@@ -155,15 +159,22 @@ def play_desktop(
     skip_lookup = None
     if custom_skip_intervals is not None:
         skip_intervals = list(custom_skip_intervals or [])
-    elif aniskip_enabled and mal_id:
+    elif aniskip_enabled:
         from ..media.aniskip import cached_skip_times
+        from ..media.provider_skips import normalize_provider_skips
         ep_num = episode_progress_number(episode)
-        skip_lookup = (mal_id, ep_num)
-        try:
-            skip_intervals = cached_skip_times(mal_id, ep_num)
-        except Exception:
-            log.exception("AniSkip cached lookup failed")
-            skip_intervals = []
+        native = normalize_provider_skips(stream.get("skip_intervals"))
+        if native or mal_id:
+            skip_lookup = (mal_id, ep_num)
+        cached = []
+        if mal_id:
+            try:
+                cached = cached_skip_times(mal_id, ep_num)
+            except Exception:
+                log.exception("AniSkip cached lookup failed")
+        # Keep native candidates separate until actual-duration validation; an
+        # invalid native range must not hide a usable cached fallback.
+        skip_intervals = native + cached
 
     proxy_server = None
     if (

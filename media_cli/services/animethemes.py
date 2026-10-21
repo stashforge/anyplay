@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from urllib.parse import quote, urlencode
 from ..core.workers import DaemonExecutor
 from threading import Lock, Thread
@@ -168,10 +169,33 @@ def search(query: str) -> dict:
     return {}
 
 
+def get_theme(theme_id) -> dict:
+    includes = "anime.images,song.artists,animethemeentries.videos"
+    url = f"{API_BASE}/animetheme/{quote(str(theme_id), safe='')}?{urlencode({'include': includes})}"
+    theme = request_json(url, extra_hdrs={"User-Agent": "anyplay-cli"}).get("animetheme") or {}
+    if str(theme.get("id")) != str(theme_id):
+        raise ValueError("AnimeThemes returned a different theme identity")
+    return theme
+
+
+def get_series(slug: str) -> dict:
+    includes = "anime.images,anime.animethemes"
+    url = f"{API_BASE}/series/{quote(slug, safe='')}?{urlencode({'include': includes})}"
+    return request_json(url, extra_hdrs={"User-Agent": "anyplay-cli"}).get("series") or {}
+
+
 def get_artist(slug: str, *, summary=False) -> dict:
     include = "images,groups" if summary else "images,groups,songs.animethemes.anime,memberPerformances.song"
     url = f"{API_BASE}/artist/{quote(slug, safe='')}?{urlencode({'include': include})}"
     return request_json(url, extra_hdrs={"User-Agent": "anyplay-cli"}).get("artist") or {}
+
+
+def song_row_label(title, theme=None) -> str:
+    theme = theme or {}
+    slug = _text(theme.get("slug")) or (_text(theme.get("type")) + _text(theme.get("sequence")))
+    match = re.fullmatch(r"(OP|ED)(\d+)?(?:v\d+)?", slug, re.IGNORECASE)
+    label = " ".join(part for part in (match[1].upper(), match[2]) if part) if match else ""
+    return " ".join(part for part in (_text(title) or "Unknown song", label) if part)
 
 
 def artist_theme_rows(artist: dict, owner: dict | None = None) -> list[dict]:
@@ -187,13 +211,12 @@ def artist_theme_rows(artist: dict, owner: dict | None = None) -> list[dict]:
             if theme.get("id") in seen:
                 continue
             seen.add(theme.get("id"))
-            label = _text(theme.get("type")) + str(theme.get("sequence") or "")
             rows.append({
                 "kind": "theme", "bucket": "animethemes",
-                "label": f"{label}  {_text(song.get('title')) or 'Unknown song'}",
+                "label": song_row_label(song.get("title"), theme),
                 "raw": {**theme, "song": song},
                 "credit": song.get("artistsong") or {},
-                "artist": (owner or artist).get("name", "Unknown artist"),
+                "artist": (owner or artist).get("name") or "",
             })
     return rows
 
@@ -265,6 +288,34 @@ def theme_video_rows(theme: dict) -> list[dict]:
     return flatten_anime_videos({**anime, "animethemes": [theme]})
 
 
+def anime_song_rows(anime: dict) -> list[dict]:
+    """One choice per playable theme, retaining every version/quality as a variant."""
+    rows = []
+    context = {key: value for key, value in anime.items() if key != "animethemes"}
+    for theme in anime.get("animethemes") or []:
+        variants = tuple(flatten_anime_videos({**context, "animethemes": [theme]}))
+        if not variants:
+            continue
+        song = _theme_song(theme)
+        title = _text(song.get("title")) or "Unknown song"
+        artists = _artist_names(song)
+        theme_label = _text(theme.get("slug")) or (
+            _text(theme.get("type")) + str(theme.get("sequence") or "")
+        )
+        rows.append({
+            "kind": "theme",
+            "bucket": "animethemes",
+            "label": song_row_label(title, theme),
+            "anime": _text(anime.get("name")),
+            "theme": theme_label,
+            "song": title,
+            "artists": artists,
+            "raw": {**theme, "anime": context},
+            "variants": variants,
+        })
+    return rows
+
+
 def flatten_anime_videos(anime: dict) -> list[dict]:
     rows = []
     anime_name = _text(anime.get("name"))
@@ -319,8 +370,7 @@ def flatten_search_bucket(bucket: str, items: list[dict]) -> list[dict]:
         elif bucket == "animethemes":
             song = _theme_song(item)
             title = _text(song.get("title")) or _text(item.get("slug") or item.get("type"))
-            artists = _artist_names(song)
-            label = f"{title} by {artists}" if title and artists else title
+            label = song_row_label(title, item) if title else ""
             kind = "theme"
         elif bucket == "artists":
             label = _text(item.get("name"))

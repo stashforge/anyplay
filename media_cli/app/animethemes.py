@@ -118,7 +118,7 @@ def _metadata_for_row(row: dict) -> str:
     raw = row.get("raw") or {}
     bucket = row.get("bucket") or ""
     kind = row.get("kind") or ""
-    if bucket == "anime":
+    if bucket == "anime" or kind == "anime":
         return " • ".join(
             part
             for part in (
@@ -277,7 +277,8 @@ def _search_header(
 
     title, alt, metadata = _row_detail_values(rows[selected_idx])
     show = _row_show(rows[selected_idx])
-    footer = f'AnimeThemes • "{query}" • Tab=switch • Enter=open • Esc=search'
+    select_label = "play" if rows[selected_idx].get("kind") == "theme" else "open"
+    footer = f'AnimeThemes • "{query}" • Tab=switch • Enter={select_label} • Esc=search'
     try:
         width = os.get_terminal_size().columns
     except OSError:
@@ -298,6 +299,10 @@ def _search_header(
 
 def _row_detail_values(row):
     """One metadata projection for both legacy search and shared navigation."""
+    if row.get("kind") == "theme" or row.get("bucket") == "animethemes":
+        from .animethemes_song_title import theme_result_lines
+
+        return theme_result_lines(row.get("raw") or {})
     show = _row_show(row)
     title = show.get("name") or row.get("label") or "Unknown"
     alt = show.get("englishName") or "No alternative title"
@@ -323,72 +328,63 @@ def _search_view(query, tab, tabs, rows):
                     details=DetailLines(Blank, Blank, Blank),
                     tabs=tuple(ViewTab(name, _tab_label(name)) for name in tabs), active_tab_id=tab,
                     context=("AnimeThemes", f'"{query}"'),
-                    actions=(ViewAction("tab", "switch", ("TAB",)), ViewAction("select", "open", ("ENTER",)),
+                    actions=(ViewAction("tab", "switch", ("TAB",)),
+                             ViewAction("select", "play" if tab == "animethemes" else "open", ("ENTER",)),
                              ViewAction("back", "search", ("LEFT", "ESC"))))
 
 
-def _play_row(row: dict, cfg: dict, args: Any):
-    stream = row.get("stream") or {}
-    title = row.get("anime") or row.get("song") or "AnimeThemes"
+def _play_row(row: dict, cfg: dict, args: Any, *, collection=None):
+    from .animethemes_song_title import song_player_title
+
+    title = song_player_title(row)
+    stream = {**(row.get("stream") or {}), "media_title": title}
     ep = row.get("theme") or "Video"
     player = args.player or cfg.get("player", "mpv")
-    if app_core.is_termux():
-        app_core.play_android(
+    try:
+        if app_core.is_termux():
+            if stream.get("is_local"):
+                from ..playback.engine import play_local_video
+                return play_local_video(stream["link"], player)
+            return app_core.play_android(
+                title,
+                ep,
+                stream,
+                None,
+                player,
+                total_eps=1,
+                show_id=None,
+                is_binge=False,
+                aniskip_enabled=False,
+            )
+        options = {"fetch_callback": None, "total_eps": 1, "episode_index": 0, "next_episode": None}
+        options.update(collection or {})
+        return app_core.play_desktop(
             title,
             ep,
             stream,
-            None,
-            player,
-            total_eps=1,
-            show_id=None,
             is_binge=False,
+            show_id=None,
+            osd_msg=title,
+            aniskip_enabled=False,
+            aniskip_auto=False,
+            **options,
         )
+    finally:
         app_core._exit_player_screen()
-        return
-    app_core.play_desktop(
-        title,
-        ep,
-        stream,
-        fetch_callback=None,
-        total_eps=1,
-        is_binge=False,
-        show_id=None,
-        osd_msg=f"AnimeThemes\n{row.get('song') or ep}",
-        episode_index=0,
-        next_episode=None,
-        aniskip_enabled=False,
-        aniskip_auto=False,
-    )
-    app_core._exit_player_screen()
 
 
 def open_anime_songs(flags, ui, ms, cfg, args, show: dict, ttype: str = "sub") -> str:
+    from .animethemes_song_playback import open_anime_collection
+
     anime = app_core.with_loading(
         "Loading AnimeThemes…",
         animethemes_service.get_anime_for_show,
         show,
     )
-    rows = animethemes_service.flatten_anime_videos(anime or {})
-    if not rows:
+    result = open_anime_collection(flags, ui, cfg, args, anime)
+    if result is None:
         app_core.set_action_feedback(show, "No AnimeThemes videos found.")
-        return "DETAILS"
-
-    hd = picker_help("Select song", "Back", "Back")
-    idx = tui_pick(
-        flags,
-        ui,
-        "Select song",
-        [row["label"] for row in rows],
-        header_fn=lambda _si: _theme_header(show, ui, ms, ttype),
-        top_header_fn=lambda _si: _show_poster(show, ui),
-        hints={row["label"]: row.get("episodes") or "play video" for row in rows},
-        info_fn=app_core.make_single_show_info_fn(show, ui),
-        help_dict=hd,
-    )
-    if idx < 0:
-        return "DETAILS"
-    _play_row(rows[idx], cfg, args)
-    return "DETAILS"
+    return "QUIT" if result == "quit" else "DETAILS"
 
 
 def _pick_video_rows(flags, ui, ms, cfg, args, show: dict, rows: list[dict], *, header_fn=None) -> None:
@@ -472,12 +468,6 @@ def handle_animethemes_search_state(flags, ui, ms, cfg, args, ttype: str) -> str
         return labels, _search_header(query, tabs[active_idx], rows, 0, loading_text(), error)
 
     live_was_done = False
-    opened_artists = set()
-
-    def auto_open_artist():
-        return (current_tab() == "artists" and len(rows) == 1
-                and (rows[0].get("raw") or {}).get("slug") not in opened_artists)
-
     def _live_fn(_q=""):
         nonlocal active_idx, rows, live_was_done
         tabs = tabs_for()
@@ -540,7 +530,7 @@ def handle_animethemes_search_state(flags, ui, ms, cfg, args, ttype: str) -> str
                     live_fn=_live_fn,
                     info_fn=app_core.make_info_fn(lambda: [_row_show(row) for row in rows], ui),
                     help_dict=hd,
-                    auto_select_single_when_done=auto_open_artist,
+                    auto_select_single_when_done=False,
                     state=picker_state,
                 )
             finally:
@@ -564,26 +554,19 @@ def handle_animethemes_search_state(flags, ui, ms, cfg, args, ttype: str) -> str
                 animethemes_service.get_anime_for_show,
                 {**show, "_animethemes_slug": slug, "name": raw.get("name")},
             )
-            video_rows = animethemes_service.flatten_anime_videos(anime or {})
-            if not video_rows:
-                continue
-            if isinstance(anime, dict):
-                show.update(
-                    {
-                        "_id": anime.get("id") or show.get("_id"),
-                        "name": anime.get("name") or show.get("name"),
-                        "type": anime.get("media_format") or show.get("type"),
-                        "airedStart": {"year": anime.get("year")} if anime.get("year") else show.get("airedStart"),
-                        "thumbnail": _image_url(anime) or show.get("thumbnail"),
-                    }
-                )
-            ui.ui_show_ctx = show
-            _pick_video_rows(flags, ui, ms, cfg, args, show, video_rows)
-        elif row["kind"] == "artist":
-            from .animethemes_artist import open_artist
-            opened_artists.add(raw.get("slug"))
+            from .animethemes_song_playback import open_anime_collection
+
             picker_state.selected_index = idx
-            result = open_artist(flags, ui, ms, cfg, args, raw,
+            if open_anime_collection(flags, ui, cfg, args, anime) == "quit":
+                return "QUIT"
+        elif row["kind"] in {"artist", "series"}:
+            from .animethemes_artist import open_artist
+            from .animethemes_series import open_series
+            if not raw.get("slug"):
+                continue
+            picker_state.selected_index = idx
+            opener = open_artist if row["kind"] == "artist" else open_series
+            result = opener(flags, ui, ms, cfg, args, raw,
                                  source_view=_search_view(query, current_tab(), tabs_for(), rows),
                                  source_position=picker_state)
             if result == "quit" or isinstance(result, UiEvent) and result.kind == "quit":
@@ -594,17 +577,12 @@ def handle_animethemes_search_state(flags, ui, ms, cfg, args, ttype: str) -> str
             if isinstance(result, UiEvent) and result.kind in {"select", "tab"}:
                 handoff = result
         elif row["kind"] == "theme":
-            show = _row_show(row)
-            ui.ui_show_ctx = show
-            _pick_video_rows(
-                flags,
-                ui,
-                ms,
-                cfg,
-                args,
-                show,
-                animethemes_service.theme_video_rows(raw),
-            )
+            from .animethemes_song_playback import open_theme_results
+
+            picker_state.selected_index = idx
+            result = open_theme_results(flags, ui, ms, cfg, args, rows, idx, query, picker_state)
+            if result == "quit":
+                return "QUIT"
         elif row["kind"] == "video" and raw.get("link"):
             play_row = {
                 **row,

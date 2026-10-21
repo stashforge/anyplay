@@ -163,7 +163,6 @@ def _download_catalog_for_show(
     provider = title_provider_key(show, default="")
     try:
         from ..core.storage import load_downloads_db
-        from ..domain.matching import is_same_show
     except Exception:
         return [], {}, None, None
 
@@ -182,9 +181,10 @@ def _download_catalog_for_show(
             show_id
             and meta_id
             and show_id == meta_id
-            and (not provider or not meta_provider or provider == meta_provider)
+            and provider
+            and provider == meta_provider
         )
-        if not same_provider_id and not is_same_show(show, meta):
+        if not same_provider_id:
             continue
 
         by_ttype = meta.get("_episode_ids_by_ttype") or {}
@@ -216,6 +216,12 @@ def _use_download_catalog_if_better(
 ) -> list[str]:
     saved_ids, labels, episodes_map, by_number = _download_catalog_for_show(show, ttype)
     if len(saved_ids) <= len(episode_ids or []):
+        return list(episode_ids or [])
+    # Saved metadata can already be mislabeled. A fuller catalogue must contain
+    # the provider's current entries, not merely have a matching display title.
+    if not episode_ids or not {str(ep) for ep in episode_ids} <= set(saved_ids):
+        _logger.debug("Ignoring incompatible saved episode catalog: provider=%s title=%s translation=%s",
+                      title_provider_key(show), title_provider_id(show), ttype)
         return list(episode_ids or [])
     detail = None
     if catalog:
@@ -383,12 +389,6 @@ def _ensure_episode_ids(show: dict, ttype: str, status_cb: Callable[[str], None]
         _normalize_episode_ids(show.get("_episode_ids"))
         if cached_ttype == ttype else []
     )
-    if not cached_ids and (show.get("_downloaded_episodes") or show.get("_folder_name")):
-        eps = show.get("_episode_ids") or show.get("_downloaded_episodes") or []
-        cached_ids = _normalize_episode_ids(eps)
-        if cached_ids:
-            show["_episode_ids_ttype"] = ttype
-
     if not cached_ids:
         by_ttype = show.get("_episode_ids_by_ttype") or {}
         if ttype in by_ttype:
@@ -397,6 +397,15 @@ def _ensure_episode_ids(show: dict, ttype: str, status_cb: Callable[[str], None]
                 show["_episode_ids_ttype"] = ttype
                 show["_episode_ids"] = list(cached_ids)
 
+    # File labels identify local downloads, not the provider's playable entries.
+    show_id = title_provider_id(show)
+    local_title = not show_id or show_id.startswith("local:") or not title_provider_key(show, default="")
+    if not cached_ids and local_title and (show.get("_downloaded_episodes") or show.get("_folder_name")):
+        eps = show.get("_episode_ids") or show.get("_downloaded_episodes") or []
+        cached_ids = _normalize_episode_ids(eps)
+        if cached_ids:
+            show["_episode_ids_ttype"] = ttype
+
     if cached_ids:
         _logger.debug("Episode catalog reused: provider=%s title=%s translation=%s episodes=%d",
                       title_provider_key(show), title_provider_id(show), ttype, len(cached_ids))
@@ -404,7 +413,6 @@ def _ensure_episode_ids(show: dict, ttype: str, status_cb: Callable[[str], None]
         update_available_count_from_episode_ids(show, ttype, cached_ids)
         return _use_download_catalog_if_better(show, ttype, cached_ids)
 
-    show_id = title_provider_id(show)
     if show_id and str(show_id).startswith("local:"):
         eps = show.get("availableEpisodesDetail", {}).get(ttype, [])
         return _normalize_episode_ids(eps)

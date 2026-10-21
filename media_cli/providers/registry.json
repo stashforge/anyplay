@@ -10,6 +10,15 @@
       "engine": "hybrid",
       "features": ["search"]
     },
+    "anipm": {
+      "name": "AniPM",
+      "domains": ["https://ani.pm"],
+      "type": "anime",
+      "languages": ["sub", "dub"],
+      "status": "active",
+      "engine": "api",
+      "features": ["search"]
+    },
     "animepahe": {
       "name": "AnimePahe",
       "domains": ["https://animepahe.pw", "https://animepahe.org", "https://animepahe.com", "https://animepahe.ru"],

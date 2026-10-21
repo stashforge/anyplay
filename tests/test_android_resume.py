@@ -454,6 +454,7 @@ class TestAndroidResume(unittest.TestCase):
         """Verify action menu live_fn replaces Continue with Play Next and updates Mark Watched to Mark Unwatched."""
         from media_cli.context import CliFlags, UiState, MachineState
         from media_cli.app.playback_menu import handle_action_menu_state
+        from media_cli.app.details_menu_controller import DetailsMenuResult
 
         flags = CliFlags()
         ui = UiState()
@@ -476,14 +477,14 @@ class TestAndroidResume(unittest.TestCase):
         }
         ui.ui_show_ctx = action_show
 
-        captured_live_fn = None
-        initial_opts = None
+        captured_read_view = None
+        initial_view = None
 
-        def mock_tui_pick(f, u, title, opts, live_fn=None, **kwargs):
-            nonlocal captured_live_fn, initial_opts
-            captured_live_fn = live_fn
-            initial_opts = list(opts)
-            return 0
+        def mock_details_menu(f, u, *, read_view, switch_translation, information):
+            nonlocal captured_read_view, initial_view
+            captured_read_view = read_view
+            initial_view = read_view()
+            return DetailsMenuResult("selected", initial_view.items[0].reference)
 
         # Simulate resume_time = 440 (07:20) initially
         resume_dict = {("show_123", "4"): 440}
@@ -493,15 +494,16 @@ class TestAndroidResume(unittest.TestCase):
 
         with patch("media_cli.app_core.get_resume_time", side_effect=mock_get_resume), \
              patch("media_cli.core.storage.get_resume_time", side_effect=mock_get_resume), \
-             patch("media_cli.app.playback_menu.tui_pick", side_effect=mock_tui_pick), \
+             patch("media_cli.app.playback_menu.run_details_menu", side_effect=mock_details_menu), \
              patch("media_cli.app_core.build_info_panel"):
 
             handle_action_menu_state(flags, ui, ms, {}, MagicMock(), "sub", lambda *a: False)
 
-            self.assertIsNotNone(captured_live_fn)
-            self.assertIn("Continue", initial_opts)
-            self.assertIn("Mark Watched", initial_opts)
-            self.assertNotIn("Mark Unwatched", initial_opts)
+            self.assertIsNotNone(captured_read_view)
+            initial_labels = [item.label for item in initial_view.items]
+            self.assertIn("Continue", initial_labels)
+            self.assertIn("Mark Watched", initial_labels)
+            self.assertNotIn("Mark Unwatched", initial_labels)
 
             # Now simulate episode completion
             resume_dict[("show_123", "4")] = 0
@@ -509,14 +511,15 @@ class TestAndroidResume(unittest.TestCase):
             action_show["_local_episode_label"] = "4"
             action_show["_anilist_progress"] = 4
 
-            # Poll live_fn
-            updated_opts, updated_hdr, _done = captured_live_fn("")
-            self.assertNotIn("Continue", updated_opts)
-            self.assertIn("Play Next", updated_opts)
-            self.assertEqual(updated_opts[0], "Play Next")
-            self.assertIn("Replay", updated_opts)
-            self.assertIn("Mark Unwatched", updated_opts)
-            self.assertNotIn("Mark Watched", updated_opts)
+            # Re-read the structured view after the episode completes.
+            updated_view = captured_read_view()
+            updated_labels = [item.label for item in updated_view.items]
+            self.assertNotIn("Continue", updated_labels)
+            self.assertIn("Play Next", updated_labels)
+            self.assertEqual(updated_labels[0], "Play Next")
+            self.assertIn("Replay", updated_labels)
+            self.assertIn("Mark Unwatched", updated_labels)
+            self.assertNotIn("Mark Watched", updated_labels)
 
 
 if __name__ == "__main__":

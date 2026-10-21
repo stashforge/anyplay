@@ -153,6 +153,11 @@ def activate(show: dict, current_ep: object, total_eps: int) -> None:
         "show": show,
         "current_ep": current_ep,
         "current_ep_label": "",
+        "content_title": None,
+        "content_secondary": None,
+        "content_label": None,
+        "content_metadata": None,
+        "content_stream": None,
         "total_eps": total_eps,
         "status_lines": [],
         "stream_info": {},
@@ -514,8 +519,9 @@ def render(
         w, h = 80, 24
 
     show = s["show"]
-    title = get_show_display_title(show) if show else "Unknown"
-    alt_title = get_display_titles(show, title) if show else ""
+    title = s.get("content_title") or (get_show_display_title(show) if show else "Unknown")
+    alt_title = (s["content_secondary"] if s.get("content_secondary") is not None
+                 else get_display_titles(show, title) if show else "")
 
     # Target episode: e.g. "EP 1" or "EP 1/12"
     target_ep = s.get("current_ep_label") or str(s.get("current_ep", "") or "")
@@ -527,6 +533,8 @@ def render(
         target_ep_str = f"EP {clean_target_ep}/{total}" if total else f"EP {clean_target_ep}"
     else:
         target_ep_str = f"EP {total}" if total else ""
+    if s.get("content_label"):
+        target_ep_str = str(s["content_label"])
 
     ttype = s.get("ttype") or (getattr(ui, "ui_ttype_ctx", None) if ui else None) or "sub"
 
@@ -573,6 +581,8 @@ def render(
             meta_parts.append(f"★ {score}")
 
     meta_line = " \u2022 ".join(meta_parts)
+    if s.get("content_metadata") is not None:
+        meta_line = s["content_metadata"]
     next_air = format_next_airing(show) if isinstance(show, dict) else ""
     next_air_line = f"\033[38;5;117m{next_air}\033[0m" if next_air else ""
 
@@ -648,7 +658,10 @@ def render(
         label = s.get("current_ep_label") or str(s["current_ep"])
         from media_cli.domain.episodes import episode_label
         ep_str = episode_label(label)
-        if stream_str:
+        if s.get("content_stream") is not None:
+            if s["content_stream"]:
+                content.append(f"{TEXT_COLOR}{s['content_stream']}\033[0m")
+        elif stream_str:
             content.append(f"{TEXT_COLOR}{ep_str} • {stream_str}\033[0m")
         else:
             content.append(f"{TEXT_COLOR}{ep_str}\033[0m")

@@ -229,7 +229,8 @@ def test_noninteractive_dependency_error_is_handled_by_caller(monkeypatch):
         ({}, ()),
         (make_show(_episode_ids=["2", "1"], _episode_ids_ttype="sub"), ("2", "1")),
         (make_show(_episode_ids_by_ttype={"sub": ["1", "2"]}), ("1", "2")),
-        (make_show(_downloaded_episodes=["1", "2"], _folder_name="Demo"), ("1", "2")),
+        (make_show(_id="local:demo", _downloaded_episodes=["1", "2"], _folder_name="Demo"), ("1", "2")),
+        (make_show(_provider=None, _episode_ids=["1", "2"], _folder_name="Demo"), ("1", "2")),
         (make_show(_id="local:demo", availableEpisodesDetail={"sub": ["1", "2"]}), ("1", "2")),
     ],
 )
@@ -244,6 +245,44 @@ def test_prepare_preserves_cached_and_local_semantics_without_mutation(monkeypat
     assert show == original
     catalog.commit_episode_selection(show, result)
     assert catalog.ensure_episode_ids(show, "sub") == list(expected)
+
+
+def test_download_labels_do_not_become_online_provider_catalogue(monkeypatch):
+    from media_cli.core.storage import sanitize_show_for_history
+
+    ids = [f"https://provider.test/episode-{i}" for i in range(1, 5)]
+    labels = {eid: f"{i} [{i + 100}]" for i, eid in enumerate(ids, 1)}
+    calls = []
+
+    def fetch(*args):
+        calls.append(args)
+        return {"state": "loaded", "ids": ids, "labels": labels}
+
+    install_provider(monkeypatch, fetch)
+    show = make_show(_downloaded_episodes=["2", "3"], _folder_name="Demo",
+                     availableEpisodes={"sub": 3}, _provider_catalog_checked_at=9999999999)
+    for _ in range(2):
+        assert catalog.ensure_episode_ids(show, "sub") == ids
+        assert show["_episode_labels"] == labels
+        show = sanitize_show_for_history(show)
+    assert len(calls) == 2
+
+
+def test_translation_catalogue_wins_over_download_labels(monkeypatch):
+    ids = ["https://provider.test/one", "https://provider.test/two"]
+    show = make_show(_downloaded_episodes=["1"], _folder_name="Demo",
+                     _episode_ids_by_ttype={"sub": ids})
+    install_provider(monkeypatch, lambda *args: pytest.fail("Valid provider IDs should be reused"))
+    assert catalog.ensure_episode_ids(show, "sub") == ids
+
+
+def test_history_does_not_persist_runtime_download_labels():
+    from media_cli.core.storage import sanitize_show_for_history
+
+    show = make_show(_downloaded_episodes=["2", "3"], _folder_name="Demo", downloadedCount=2)
+    stored = sanitize_show_for_history(show)
+    assert "_downloaded_episodes" not in stored
+    assert show["_downloaded_episodes"] == ["2", "3"]
 
 
 def test_unavailable_catalog_is_only_applied_on_commit(monkeypatch):

@@ -7,7 +7,7 @@ from threading import Condition, Lock, Thread
 
 from ..services import animethemes as service
 from ..ui.view_model import Blank, Content, Count, DetailLines, ImageSpec, Inherit, LabelValue, SelectionPolicy, ViewAction, ViewItem, ViewSpec
-from ..ui.view_session import BeginNavigation, CompleteNavigation, ExitSession, FailNavigation, PushView, ReplaceView, UpdateItems, ViewSession
+from ..ui.view_session import BeginNavigation, CompleteNavigation, ExitSession, FailNavigation, ReplaceView, UpdateItems, ViewSession
 from .animethemes import _image_url, _row_detail_values
 
 _LOG = logging.getLogger(__name__)
@@ -72,7 +72,7 @@ class _ArtistJobs:
 
 
 class ArtistController:
-    def __init__(self, artist, play_callback, *, source_view=None, source_position=None):
+    def __init__(self, artist, play_callback, *, source_view=None, source_position=None, song_menu_factory=None):
         self.artist = dict(artist)
         self.play = play_callback
         self.root_id = f"artist:{artist['slug']}"
@@ -82,6 +82,8 @@ class ArtistController:
         self._cache = {}
         self._closed = False
         self._artist_loaded = False
+        self._song_menu_factory = song_menu_factory
+        self._song_menus = {}
         self._requests = count(1)
         self._external_source = source_view is not None
         if source_view is None:
@@ -153,13 +155,15 @@ class ArtistController:
             credits.append(section["group"])
         anime = raw.get("anime") or {}
         theme = str(raw.get("type") or "") + str(raw.get("sequence") or "")
-        metadata = tuple(p for p in (theme, anime.get("name")) if p)
-        details = DetailLines(Content(song.get("title") or "Unknown song"), Content(*credits),
-                              Content(*metadata) if metadata else Blank)
+        from .animethemes_song_title import theme_result_lines
+
+        lines = theme_result_lines({**raw, "slug": raw.get("slug") or theme}, artist=name, extras=credits[1:])
+        details = DetailLines(*(Content(text) if text else Blank for text in lines))
         url = _image_url(anime)
         image = ImageSpec(f"anime:{anime.get('slug') or raw['id']}",
                           "available" if url else "unavailable" if resolved else "resolving", url or None)
-        return ViewItem(f"theme:{raw['id']}", row["label"], kind="submenu", details=details, image=image,
+        label = service.song_row_label(song.get("title"), raw)
+        return ViewItem(f"theme:{raw['id']}", label, kind="submenu", details=details, image=image,
                         reference=(row, section))
 
     def songs_view(self, section):
@@ -235,34 +239,32 @@ class ArtistController:
             updated = replace(item, image=replace(item.image, state="failed", message="Could not fetch cover"))
         self.session.post(UpdateItems(view_id, generation, (updated,), expected_images=((item.id, item.image),)))
 
-    def _load_videos(self, view_id, generation, item, request=None):
-        row, section = item.reference
+    def _load_section(self, view_id, generation, section, request, selected=0):
         try:
-            enriched = self._enriched(row)
-            song = self.song_item(enriched, section, resolved=True)
-            videos = service.theme_video_rows(enriched["raw"])
-            by_id = {}
-            for video in videos:
-                entry = (video.get("raw") or {}).get("entry") or {}
-                entry_key = entry.get("id") or (entry.get("version"), entry.get("episodes"))
-                video_id = f"video:{entry_key}:{video['stream']['link']}"
-                by_id[video_id] = ViewItem(video_id, video["label"], hint=video.get("episodes") or "",
-                                           details=Inherit, reference=video)
-            items = tuple(by_id.values())
-            child_id = f"{view_id}:videos:{item.id}" if request is not None else view_id
-            view = ViewSpec(child_id, "Select song", items, details=song.details, image=song.image,
-                            context=_CONTEXT, actions=_PLAY, state="ready" if items else "empty",
-                            message="No videos found" if not items else "")
-            self.session.post(CompleteNavigation(view_id, generation, request, view) if request is not None
-                              else ReplaceView(view_id, generation, view))
+            from .animethemes_song_playback import create_song_menu, prepare_collection
+
+            rows = [self._enriched(row) for row in section["rows"]]
+            songs, initial = prepare_collection(rows, selected)
+            identity = f"{self.root_id}:section:{section.get('id') or section.get('group') or 'direct'}"
+            menu = (self._song_menu_factory(songs, initial, identity, self.session) if self._song_menu_factory
+                    else create_song_menu(None, None, {}, None, songs, initial, collection_id=identity,
+                                          session=self.session, play_callback=self.play))
+            self._song_menus[menu.root_id] = menu
+            self.session.post(CompleteNavigation(view_id, generation, request, menu.details_view()))
         except Exception:
-            _LOG.exception("Artist video loading failed")
-            if request is not None:
-                self.session.post(FailNavigation(view_id, generation, request, "Could not load videos"))
-            else:
-                self._fail_view(view_id, generation, "Could not load videos")
+            _LOG.exception("Artist songs loading failed")
+            self.session.post(FailNavigation(view_id, generation, request, "Could not load these songs"))
+
+    def _load_videos(self, view_id, generation, item, request):
+        row, section = item.reference
+        selected = next(index for index, candidate in enumerate(section["rows"])
+                        if candidate["raw"]["id"] == row["raw"]["id"])
+        self._load_section(view_id, generation, section, request, selected)
 
     def handle_event(self, event):
+        for identity, menu in tuple(self._song_menus.items()):
+            if event.view_id == identity or event.view_id.startswith(identity + ":"):
+                return menu.handle_event(event)
         if event.view_id == self.source_id:
             if event.kind == "select":
                 selected = self.session.item(event.item_id)
@@ -282,7 +284,9 @@ class ArtistController:
                 self._submit(self.enrich_item, event.view_id, event.generation, item, hover=True)
         elif event.kind == "select":
             if item.id.startswith("section:"):
-                return PushView(self.songs_view(item.reference))
+                request = f"songs:{next(self._requests)}"
+                self.session.apply(BeginNavigation(event.view_id, event.generation, request, "Fetching songs"))
+                self._submit(self._load_section, event.view_id, event.generation, item.reference, request)
             if item.id.startswith("theme:"):
                 request = f"videos:{next(self._requests)}"
                 self.session.apply(BeginNavigation(event.view_id, event.generation, request, "Fetching song videos"))

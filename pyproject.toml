@@ -8,6 +8,7 @@ dependencies = [
     "requests",
     "curl-cffi",
     "beautifulsoup4",
+    "m3u8>=6.0,<7",
     "pycryptodome>=3.19.0",
 ]
 

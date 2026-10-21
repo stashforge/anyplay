@@ -387,7 +387,8 @@ def test_provider_donghua_finished_cache_does_not_skip_provider_refresh():
     assert history_can_skip_finished_provider_refresh(normal_finished_show, require_genres=True) is True
 
 
-def test_refresh_history_anilist_airing_batch_enriches_full_metadata(tmp_path):
+@pytest.mark.parametrize("persist", [False, True])
+def test_refresh_history_anilist_airing_batch_enriches_full_metadata(tmp_path, persist):
     history_file = tmp_path / "history.json"
     paths.HISTORY_PATH = str(history_file)
     storage._history_cache = None
@@ -421,9 +422,11 @@ def test_refresh_history_anilist_airing_batch_enriches_full_metadata(tmp_path):
     ]
 
     with patch("media_cli.services.anilist.fetch", return_value=mock_raw_media), \
-         patch("media_cli.core.anilist._provider_catalog_refresh_fn", None):
-        changed = refresh_history_anilist_airing_batch(history_entries)
+         patch("media_cli.core.anilist._provider_catalog_refresh_fn", None), \
+         patch.object(storage, "patch_history_entry_state") as write:
+        changed = refresh_history_anilist_airing_batch(history_entries, persist=persist)
         assert changed is True
+        assert write.call_count == int(persist)
 
     s = history_entries[0]["show"]
     assert s["description"] == "Rimuru returns for season 4."

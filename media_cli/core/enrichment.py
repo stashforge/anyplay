@@ -204,29 +204,11 @@ def _persist_enrichment_state(show: dict):
     if not show_id:
         return
     try:
-        from ..core.storage import load_history, save_refreshed_history
-        hist = load_history()
-        patched = False
-        for entry in hist:
-            s = entry.get("show")
-            if not s:
-                continue
-            # Match by any ID field
-            entry_id = str(s.get("_id") or s.get("_provider_id") or s.get("id") or "")
-            if entry_id and entry_id == show_id:
-                for k in ("_title_enriched", "_enrichment_attempted", "_enrichment_in_progress",
-                          "_metadata_fields_loaded"):
-                    v = show.get(k)
-                    if v is not None:
-                        s[k] = v
-                    elif k == "_enrichment_in_progress" and k in s:
-                        s.pop(k, None)
-                patched = True
-        if patched:
-            save_refreshed_history(hist)
-        else:
-            from ..core.reporting import debug_warn
-            debug_warn(f"Enrichment persist: no matching history entry for show_id={show_id}")
+        from ..core.storage import patch_history_entry_show
+        patch_history_entry_show(
+            show_id, None, show,
+            fields=("_title_enriched", "_enrichment_attempted", "_metadata_fields_loaded"),
+        )
     except Exception as e:
         from ..core.reporting import debug_warn
         debug_warn(f"Failed to persist enrichment state for {show_id}", e)
@@ -396,26 +378,18 @@ def enrich_show_if_missing(show: dict) -> bool:
 
         if show_id:
             try:
-                from ..core.storage import load_history, save_refreshed_history
-                hist = load_history()
-                patched = False
-                for entry in hist:
-                    s = entry.get("show")
-                    if s and str(s.get("_id") or s.get("id") or "") == str(show_id):
-                        for k in (
-                            "description", "genres", "banner", "format", "type", "score",
-                            "status", "season", "airedStart", "airedEnd", "thumbnail",
-                            "englishName", "nativeName", "altNames", "aniListId", "malId",
-                            "anilistMatch", "_next_airing_ep", "_next_airing_at", "_next_airing_time",
-                            "_anilist_score", "_title_enriched", "_enrichment_attempted",
-                            "_metadata_fields_loaded",
-                        ):
-                            v = show.get(k)
-                            if v is not None:
-                                s[k] = v
-                        patched = True
-                if patched:
-                    save_refreshed_history(hist)
+                from ..core.storage import patch_history_entry_show
+                patch_history_entry_show(
+                    show_id, None, show,
+                    fields=(
+                        "description", "genres", "banner", "format", "type", "score",
+                        "status", "season", "airedStart", "airedEnd", "thumbnail",
+                        "englishName", "romajiName", "nativeName", "altNames", "preferredAltName", "aniListId", "malId",
+                        "anilistMatch", "_next_airing_ep", "_next_airing_at", "_next_airing_time",
+                        "_anilist_score", "_title_enriched", "_enrichment_attempted",
+                        "_metadata_fields_loaded",
+                    ),
+                )
             except Exception as e:
                 debug_warn("Failed to persist enriched show to history", e)
 

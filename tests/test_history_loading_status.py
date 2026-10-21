@@ -10,16 +10,25 @@ from media_cli.ui.footer import render_footer
 
 @pytest.mark.parametrize("exit_state", ["completed", "active", "error"])
 def test_history_updating_uses_shared_status_and_cleans_up_on_exit(monkeypatch, exit_state):
-    from media_cli.app import search
+    from media_cli.app import history_legacy_picker, history_menu_controller, search
 
     reads = []
     history = [{"show": {"_id": "a", "name": "Example"}, "translation_type": "sub"}]
-    busy = {"BATCH": "Checking stale titles..."}
+    busy = {"BATCH": "Refreshing 13 titles..."}
+    controllers = []
+    original = history_menu_controller.HistoryMenuController
+
+    class ObservedController(original):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            controllers.append(self)
+
+    monkeypatch.setattr(history_menu_controller, "HistoryMenuController", ObservedController)
 
     class ObservedStatus(BackgroundLoadingStatus):
-        def read(self, active):
+        def read(self, active, **kwargs):
             reads.append(active)
-            return super().read(active)
+            return super().read(active, **kwargs)
 
     monkeypatch.setattr(search, "BackgroundLoadingStatus", ObservedStatus)
     monkeypatch.setattr(search, "history_refresh_status", busy)
@@ -32,15 +41,25 @@ def test_history_updating_uses_shared_status_and_cleans_up_on_exit(monkeypatch, 
     monkeypatch.setattr(search.app_core, "build_info_panel", lambda *args, **kwargs: None)
     monkeypatch.setattr(search.app_core, "make_info_fn", lambda *args: None)
     monkeypatch.setattr(search.app_core, "_poster_footer_line", lambda show, footer, width: render_footer(footer, width))
-    monkeypatch.setattr(search, "context_prefix", lambda *args, **kwargs: "History")
+    monkeypatch.setattr(history_legacy_picker, "context_prefix", lambda *args, **kwargs: "History")
 
     def pick(*args, **kwargs):
-        assert "Updating" in strip_ansi(kwargs["header_fn"](0))
-        assert reads == [True]
+        control = controllers[0]
+        assert control.session.current.footer_statuses[0].message == "Refreshing 13 titles..."
+        assert not control.session.input_blocked
+        before = len(reads)
+        assert "Refreshing 13 titles..." in strip_ansi(kwargs["header_fn"](0))
+        assert reads[before:] == [True]
         if exit_state == "completed":
             busy.clear()
-            assert "Updating" not in strip_ansi(kwargs["header_fn"](0))
-            assert reads == [True, False]
+            busy["SINGLE"] = "Refreshing this title..."
+            assert "Refreshing this title..." in strip_ansi(kwargs["header_fn"](0))
+            busy.clear()
+            assert "Refreshing" not in strip_ansi(kwargs["header_fn"](0))
+            assert reads[before:] == [True, True, False]
+            for command in control.updates(force=True):
+                control.session.apply(command)
+            assert control.session.current.footer_statuses == ()
         if exit_state == "error":
             raise ValueError("Picker stopped")
         return -2

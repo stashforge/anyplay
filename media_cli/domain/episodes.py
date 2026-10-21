@@ -4,6 +4,39 @@ import decimal
 import re
 from typing import Any
 
+_EXPLICIT_EPISODE = re.compile(
+    r"(?:^|[-_.\s])(?:episode|ep)[-_.\s]?([0-9]+(?:\.[0-9]+)?)(?=[-_.\s\[(]|$)", re.I,
+)
+
+
+def explicit_episode_number(identifier: str) -> str | None:
+    """Read an ep/episode marker, not an opaque URL ID or trailing title number."""
+    path = str(identifier or "").split("?", 1)[0].split("#", 1)[0].rstrip("/")
+    slug = path.rsplit("/", 1)[-1]
+    match = _EXPLICIT_EPISODE.search(slug)
+    return (match.group(1).lstrip("0") or "0") if match else None
+
+
+def episode_display_summary(show: dict, ttype: str = "sub") -> tuple[str, str] | None:
+    """Retain latest-episode presentation without retaining a playable catalogue."""
+    available = (show.get("availableEpisodes") or {}).get(ttype)
+    ids = (show.get("_episode_ids_by_ttype") or {}).get(ttype) or ()
+    if show.get("_episode_ids_ttype", "sub") == ttype and show.get("_episode_ids"):
+        ids = show["_episode_ids"]
+    if ids:
+        labels = show.get("_episode_labels") or {}
+        if show.get("_episode_labels_ttype", ttype) != ttype:
+            labels = {}
+        latest = str(labels.get(str(ids[-1])) or clean_episode_identifier(str(ids[-1])))
+        return str(available if available is not None else len(ids)), latest
+    snapshot = (show.get("_episode_display") or {}).get(ttype)
+    if not isinstance(snapshot, dict):
+        return None
+    if str(snapshot.get("available")) != str(available):
+        return None
+    latest = snapshot.get("latest_label")
+    return (str(available), latest) if isinstance(latest, str) and latest else None
+
 
 def normalize_episode_ids(values):
     episode_ids = []
@@ -127,7 +160,7 @@ def clean_episode_identifier(raw: str) -> str:
     slug = path.split("/")[-1] if "/" in path else path
 
     # 3. Explicit episode patterns like episode-5, ep-5, ep_5, ep.5, ep05
-    m = re.search(r"(?:^|[-_.])(?:episode|ep)[-_. ]?([0-9]+(?:\.[0-9]+)?)(?:[-_. ]|$)", slug, re.I)
+    m = _EXPLICIT_EPISODE.search(slug)
     if m:
         return m.group(1).lstrip("0") or "0"
 
@@ -144,6 +177,17 @@ def clean_episode_identifier(raw: str) -> str:
         return m_num.group(1).lstrip("0") or "0"
 
     return slug
+
+
+def episode_file_identity_conflicts(identifier: str, path: str) -> bool:
+    """Reject proven numeric mismatches, not opaque IDs or unlabelled files."""
+    filename = str(path).replace("\\", "/").rsplit("/", 1)[-1]
+    explicit = _EXPLICIT_EPISODE.search(filename)
+    if explicit is None:
+        return False
+    primary, secondary = parse_episode_dual_numbers(filename[explicit.start():].lstrip("-_. "))
+    target, _ = parse_episode_dual_numbers(str(identifier))
+    return bool(target and target not in (primary, secondary))
 
 
 def episode_label(episode_id, labels=None):

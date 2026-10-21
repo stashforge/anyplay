@@ -107,7 +107,7 @@ def test_animethemes_search_tabs_match_visible_site_tabs():
     }
 
     assert flatten_search_bucket("anime", data["anime"])[0]["label"] == "[Oshi no Ko]"
-    assert flatten_search_bucket("animethemes", data["animethemes"])[0]["label"] == "Idol by YOASOBI"
+    assert flatten_search_bucket("animethemes", data["animethemes"])[0]["label"] == "Idol OP 1"
     assert flatten_search_bucket("artists", data["artists"])[0]["label"] == "YOASOBI"
     assert flatten_search_bucket("series", data["series"])[0]["label"] == "[Oshi no Ko]"
     assert flatten_search_bucket("studios", data["studios"])[0]["label"] == "Doga Kobo"
@@ -175,9 +175,10 @@ def test_animethemes_theme_header_uses_theme_metadata_only():
     header = _search_header("oshi no ko", "animethemes", rows, 0)
 
     lines = [strip_ansi(line) for line in header.splitlines()]
-    assert lines[0] == "Idol by YOASOBI"
-    assert lines[1] == "YOASOBI"
-    assert lines[2] == "OP1 • [Oshi no Ko]"
+    assert lines[0] == "Idol"
+    assert lines[1] == "No alternative title"
+    assert lines[2] == "by YOASOBI · [Oshi no Ko] · OP 1"
+    assert "Enter=play" in lines[3]
     assert "Anime 1" not in lines[3]
 
 
@@ -226,7 +227,7 @@ def test_animethemes_theme_row_uses_nested_anime_image():
 
     show = _row_show(row)
 
-    assert show["name"] == "Mephisto by Ziyouu-vachi"
+    assert show["name"] == "Mephisto ED"
     assert show["englishName"] == "Ziyouu-vachi"
     assert show["thumbnail"] == "https://img.example/oshi-theme.jpg"
 

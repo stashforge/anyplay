@@ -10,19 +10,17 @@ if TYPE_CHECKING:
     from ..context import CliFlags, MachineState, UiState
 
 from .. import app_core
-from ..core.terminal import truncate_display as _truncate_display
 from ..domain.episodes import (
     clean_episode_identifier,
     episode_id_at,
     episode_label,
 )
-from ..ui.help import picker_help
 from ..ui import loading_messages
-from ..ui.picker import tui_pick
-from .footer import context_footer
-
-_C_HINT = "\033[38;5;244m"
-_RST    = "\033[0m"
+from ..media.episode_identity import download_identity_conflicts
+from ..ui.confirmation import confirm_view_action
+from .details_menu_controller import run_details_menu
+from .episode_menu_view import EpisodeMenuOption, build_episode_menu_view
+from .footer import mode_label, provider_label
 
 
 def _episode_labels_for(show: dict, ttype: str) -> dict:
@@ -77,14 +75,15 @@ def _episode_picker_label(label) -> str:
     return raw
 
 
-def _prune_missing_download_files(ms: "MachineState") -> dict:
+def _prune_missing_download_files(ms: MachineState) -> dict:
     dl_files = getattr(ms, "_download_files", {}) or {}
     if not isinstance(dl_files, dict):
         ms._download_files = {}
         return {}
     stale_keys = []
     for key, path in list(dl_files.items()):
-        if not path or not os.path.isfile(os.path.expanduser(str(path))):
+        if (not path or not os.path.isfile(os.path.expanduser(str(path)))
+                or download_identity_conflicts(str(key), str(path))):
             stale_keys.append(key)
     for key in stale_keys:
         dl_files.pop(key, None)
@@ -258,6 +257,7 @@ def handle_episode_state(
     resolve_tracking_fn,
 ) -> str:
     show = ui.ui_show_ctx
+    show_cover = flags.show_image and cfg.get("details_cover", True)
 
     def _load_episode_ids(target_ttype: str) -> list[str]:
         show_id = str((show or {}).get("_id") or (show or {}).get("id") or "")
@@ -308,12 +308,6 @@ def handle_episode_state(
         ms.show_title or (show.get("name", "") if show else ""),
         cfg,
     )
-
-    def _has_any_downloaded_episode() -> bool:
-        dl_files = _prune_missing_download_files(ms)
-        if dl_files:
-            return True
-        return bool(offline_files)
 
     def _download_identity_keys(eid, lbl) -> set[str]:
         from ..domain.episodes import clean_episode_identifier, parse_episode_dual_numbers
@@ -373,20 +367,14 @@ def handle_episode_state(
             return True
         return False
 
+    watched_snapshot = ()
+    progress_snapshot = None
+
     def _is_ep_watched(eid, lbl, orig_idx=None):
         if not show:
             return False
         ep_entry = episodes_map.get(str(eid))
-        watched_eps = show.get("watched_episodes", [])
-        if not watched_eps:
-            try:
-                from ..core.storage import load_downloads_db
-                db = load_downloads_db()
-                folder_name = show.get("_folder_name") or getattr(ms, "show_title", "") or show.get("name")
-                if folder_name and folder_name in db.get("shows", {}):
-                    watched_eps = db["shows"][folder_name].get("watched_episodes", [])
-            except Exception:
-                pass
+        watched_eps = watched_snapshot
 
         if watched_eps:
             if str(eid) in watched_eps or str(lbl) in watched_eps:
@@ -410,9 +398,7 @@ def handle_episode_state(
                     if wc == clean or (clean_eid_num and wc == clean_eid_num) or (sec and sec == ws):
                         return True
 
-        local_p = show.get("_local_progress")
-        if local_p is None:
-            local_p = app_core.get_local_progress(show, ttype)
+        local_p = progress_snapshot
         al_p = show.get("_anilist_progress")
         eff_p = None
         if local_p is not None:
@@ -448,53 +434,28 @@ def handle_episode_state(
         return False
 
     def _build_ep_option(orig_i):
-
         eid = episode_ids[orig_i]
         lbl = episode_label(eid, episode_labels)
         display_lbl = _episode_picker_label(lbl)
         is_dl = _is_ep_downloaded(eid, lbl)
         is_w = _is_ep_watched(eid, lbl, orig_i)
-        if is_w:
-            if is_dl:
-                return f"\033[38;5;244m{display_lbl}  \033[38;2;166;227;161m✔\033[0m"
-            return f"\033[38;5;244m{display_lbl}\033[0m"
-        else:
-            if is_dl:
-                return f"{display_lbl}  \033[38;2;166;227;161m✔\033[0m"
-            return f"{display_lbl}"
-
-    def _compute_disabled_indices():
-        return set()
-
-    def _ep_hint_fn(oi):
-        if not (0 <= oi < len(display_order)):
-            return ""
-        orig_i = display_order[oi]
-        eid = episode_ids[orig_i]
-        lbl = episode_label(eid, episode_labels)
-        is_dl = _is_ep_downloaded(eid, lbl)
-        is_w = _is_ep_watched(eid, lbl, orig_i)
-        if getattr(ms, "_is_downloads", False):
-            if is_w:
-                if is_dl:
-                    return "watched • ready to watch"
-                return "\033[38;5;244mwatched • not downloaded\033[0m"
-            else:
-                if is_dl:
-                    return "ready to watch"
-                return "\033[38;5;167m✘\033[38;5;244m not downloaded\033[0m"
-        else:
-            if is_w:
-                if is_dl:
-                    return "watched • ready to watch"
-                return "\033[38;5;244mwatched\033[0m"
-            else:
-                if is_dl:
-                    return "ready to watch"
-                return ""
+        return EpisodeMenuOption(str(eid), display_lbl, watched=is_w, downloaded=is_dl)
 
     def _build_ep_options():
-        return [_build_ep_option(i) for i in display_order]
+        nonlocal watched_snapshot, progress_snapshot
+        watched_snapshot = tuple(show.get("watched_episodes") or ())
+        if not watched_snapshot:
+            try:
+                from ..core.storage import load_downloads_db
+                db = load_downloads_db()
+                folder_name = show.get("_folder_name") or getattr(ms, "show_title", "") or show.get("name")
+                watched_snapshot = tuple((db.get("shows", {}).get(folder_name) or {}).get("watched_episodes") or ())
+            except Exception:
+                pass
+        progress_snapshot = show.get("_local_progress")
+        if progress_snapshot is None:
+            progress_snapshot = app_core.get_local_progress(show, ttype)
+        return tuple(_build_ep_option(i) for i in display_order)
 
     if len(display_order) > 80:
         ep_opts = app_core.with_loading(
@@ -503,60 +464,15 @@ def handle_episode_state(
         )
     else:
         ep_opts = _build_ep_options()
-    disabled_indices = _compute_disabled_indices()
-
-    _hdr_cache: dict[tuple, str] = {}
-
-    def _ep_hdr(si):
-        try:
-            w = os.get_terminal_size().columns
-        except OSError:
-            w = 80
-        feedback = app_core.get_active_feedback(show)
-        cache_key = (w, ttype, feedback, getattr(ms, "_is_downloads", False), si)
-        if cache_key in _hdr_cache:
-            return _hdr_cache[cache_key]
-        parts = []
-        if show:
-            app_core.build_info_panel(show, ttype, w, parts, local_only=getattr(ms, "_is_downloads", False))
-
-        def _t(s):
-            return _truncate_display(s, max(1, w - 1))
-        direct_single = ui.ep_prev_state == "SEARCH" and len(ms.shows) <= 1 and ms.just_searched
-        nav_text = "Esc=Search" if direct_single else "Esc=Back"
-        if feedback:
-            parts.append(f"\033[38;5;222m{_t(feedback)}{_RST}")
-        else:
-            action_nav = ""
-            if 0 <= si < len(display_order):
-                orig_i = display_order[si]
-                eid = episode_ids[orig_i]
-                lbl = episode_label(eid, episode_labels)
-                if _is_ep_downloaded(eid, lbl):
-                    action_nav = "Enter=Play • Del=Delete • "
-                elif getattr(ms, "_is_downloads", False):
-                    action_nav = "Enter=Download • "
-            footer = context_footer(
-                show,
-                ui,
-                ms,
-                action_nav + "Tab=Sub/Dub • Ctrl+R=flip • ?=Help • " + nav_text,
-                offline=app_core.is_confirmed_offline(),
-            )
-            parts.append(f"{_C_HINT}{_t(footer)}{_RST}")
-        res = "\n".join(parts)
-        _hdr_cache[cache_key] = res
-        return res
 
     def _ep_tab_fn(opt=None, direction=1):
-        nonlocal ttype, episode_ids, episode_labels, display_order, ep_opts, disabled_indices
-        _hdr_cache.clear()
+        nonlocal ttype, episode_ids, episode_labels, display_order, ep_opts, episodes_map
         target_ttype = "dub" if ttype == "sub" else "sub"
         allowed, reason = app_core.check_translation_switch_capability(show, ttype, target_ttype)
         if not allowed:
             if reason:
                 app_core.set_action_feedback(show, reason)
-            return (ep_opts, _ep_hdr(0), disabled_indices)
+            return
 
         new_ids = app_core.with_loading(
             f"Switching to {target_ttype.upper()}…",
@@ -570,29 +486,25 @@ def handle_episode_state(
             episode_ids = new_ids
             ms.total_eps = len(episode_ids)
             episode_labels = _episode_labels_for(show, ttype)
+            episodes_map = (show.get("_episodes_map_by_ttype") or {}).get(ttype) or show.get("_episodes_map") or {}
             display_order = list(range(len(episode_ids)))
             if app_core.get_episode_order(ms.show_id, cfg.get("episode_order", "asc")) == "desc":
                 display_order.reverse()
-            ep_opts = [_build_ep_option(i) for i in display_order]
-            disabled_indices = _compute_disabled_indices()
+            ep_opts = _build_ep_options()
+            app_core.set_action_feedback(show, f"Switched to {ttype.title()}.")
         else:
             p_name = (show.get("_provider_name") or (show.get("_provider") or "").title() or "this provider") if show else "this provider"
             app_core.set_action_feedback(show, f"{target_ttype.upper()} unavailable on {p_name}")
-        return (ep_opts, _ep_hdr(0), disabled_indices)
 
     def _ep_reverse_fn(opt=None):
-        nonlocal ep_opts, display_order, disabled_indices
-        _hdr_cache.clear()
-        app_core.toggle_episode_order(ms.show_id, cfg.get("episode_order", "asc"))
+        nonlocal ep_opts, display_order
+        new_order = app_core.toggle_episode_order(ms.show_id, cfg.get("episode_order", "asc"))
         display_order.reverse()
-        ep_opts = [_build_ep_option(i) for i in display_order]
-        disabled_indices = _compute_disabled_indices()
-        new_order = app_core.get_episode_order(ms.show_id, cfg.get("episode_order", "asc"))
+        ep_opts = ep_opts[::-1]
         app_core.set_action_feedback(show, f"Order: {'Newest first (N → 1)' if new_order == 'desc' else 'Oldest first (1 → N)'}")
-        return (ep_opts, _ep_hdr(0), disabled_indices)
 
     def _delete_ep_file(sel_idx):
-        nonlocal ep_opts, disabled_indices, deleted_download_keys
+        nonlocal ep_opts, deleted_download_keys
         if not (0 <= sel_idx < len(display_order)):
             return None
         orig_i = display_order[sel_idx]
@@ -600,8 +512,7 @@ def handle_episode_state(
         lbl = episode_label(eid, episode_labels)
         if not _is_ep_downloaded(eid, lbl):
             app_core.set_action_feedback(show, f"Episode {lbl} is not downloaded.")
-            _hdr_cache.clear()
-            return ep_opts, _ep_hdr(sel_idx)
+            return
 
         folder_name = show.get("_folder_name", ms.show_title)
         deleted = app_core.delete_offline_episode(folder_name, lbl, cfg)
@@ -627,10 +538,7 @@ def handle_episode_state(
         else:
             app_core.set_action_feedback(show, f"✘ Could not delete EP {lbl}")
 
-        _hdr_cache.clear()
-        ep_opts = [_build_ep_option(i) for i in display_order]
-        disabled_indices = _compute_disabled_indices()
-        return ep_opts, _ep_hdr(sel_idx)
+        ep_opts = _build_ep_options()
 
     def _can_delete_ep(oi):
         if not (0 <= oi < len(display_order)):
@@ -646,47 +554,49 @@ def handle_episode_state(
             eid = episode_ids[orig_i]
             lbl = episode_label(eid, episode_labels)
             clean_num = re.sub(r"^(?:episode|ep)\s*", "", str(lbl), flags=re.I).strip()
-            return f"Delete downloaded EP {clean_num}? y/N"
-        return "Delete downloaded episode? y/N"
+            return f"Delete downloaded EP {clean_num}?"
+        return "Delete downloaded episode?"
+
+    provider_id = show.get("_provider") or show.get("provider") or "downloads"
+    identity = show.get("_id") or show.get("id") or show.get("_folder_name") or ms.show_id
+    image_key = f"{provider_id}:{identity}"
+
+    def _episode_view():
+        context = tuple(part for part in (
+            mode_label(ui, ms), "[Offline]" if app_core.is_confirmed_offline() else "", provider_label(show),
+        ) if part)
+        return build_episode_menu_view(
+            show, ep_opts, view_id=f"episodes:{image_key}", image_key=image_key,
+            ttype=ttype, context=context, local_only=getattr(ms, "_is_downloads", False),
+            feedback=app_core.get_active_feedback(show), show_cover=show_cover,
+        )
+
+    def _confirm_delete(reference):
+        index = next((i for i, option in enumerate(ep_opts) if option.episode_id == reference), None)
+        if index is None or not _can_delete_ep(index):
+            return
+        from ..state.theme import APPLICATION_THEME
+        view = _episode_view()
+        if confirm_view_action(
+            flags, ui, view, item_id=view.items[index].id,
+            question=_ep_delete_prompt(index), theme=APPLICATION_THEME,
+        ):
+            _delete_ep_file(index)
 
     while True:
         if ms.total_eps <= 1:
             idx = 0
         else:
-            direct_single = ui.ep_prev_state == "SEARCH" and len(ms.shows) <= 1 and ms.just_searched
-            if len(display_order) > 80:
-                has_delete_actions = app_core.with_loading(
-                    loading_messages.local_file_scan(), _has_any_downloaded_episode
-                )
-            else:
-                has_delete_actions = _has_any_downloaded_episode()
-            hd6 = picker_help(
-                "Play episode",
-                "New search" if direct_single else "Go back",
-                "Quit" if direct_single else "Go back",
-                "Toggle Sub/Dub",
-                reverse_label="Flip order",
-                delete_label="Delete episode" if has_delete_actions else None,
-            )
             init_sel = display_order.index(ms.current_ep_index) if ms.current_ep_index in display_order else 0
-            idx = tui_pick(
-                flags, ui,
-                "Select episode", ep_opts,
-                header_fn=_ep_hdr,
-                tab_fn=_ep_tab_fn,
-                reverse_fn=_ep_reverse_fn,
-                delete_fn=_delete_ep_file if has_delete_actions else None,
-                delete_prompt=_ep_delete_prompt if has_delete_actions else None,
-                can_delete_fn=_can_delete_ep if has_delete_actions else None,
-                hints=_ep_hint_fn,
-                info_fn=app_core.make_single_show_info_fn(ui.ui_show_ctx, ui),
-                help_dict=hd6,
-                disabled_indices=disabled_indices,
-                initial_selected=init_sel,
+            outcome = run_details_menu(
+                flags, ui, read_view=_episode_view, switch_translation=_ep_tab_fn,
+                information=lambda: app_core.make_single_show_info_fn(show, ui)(0),
+                action_handlers={"flip": _ep_reverse_fn, "delete": _confirm_delete},
+                initial_selected_id=f"episode:{ttype}:{ep_opts[init_sel].episode_id}",
             )
-
-        if idx in (-2, -3):
-            return ui.ep_prev_state or "DETAILS"
+            if outcome.kind != "selected":
+                return "QUIT" if outcome.kind == "quit" else ui.ep_prev_state or "DETAILS"
+            idx = next(i for i, option in enumerate(ep_opts) if option.episode_id == outcome.action_id)
 
         target_idx = display_order[idx]
         target_eid = episode_id_at(episode_ids, target_idx)
@@ -694,7 +604,6 @@ def handle_episode_state(
         if getattr(ms, "_is_downloads", False) and not _is_ep_downloaded(target_eid, target_lbl):
             if not app_core.is_online():
                 app_core.set_action_feedback(show, "✘ Cannot download: Offline")
-                _hdr_cache.clear()
                 if ms.total_eps <= 1:
                     return ui.ep_prev_state or "DETAILS"
                 continue

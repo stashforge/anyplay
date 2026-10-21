@@ -510,6 +510,9 @@ def test_public_view_state_alias_and_constructor_order():
         "info",
         "reference",
         "details",
+        "adjustable",
+        "action_hints",
+        "footer_context",
     )
     assert tuple(signature(ViewSpec).parameters) == (
         "id",
@@ -527,5 +530,5 @@ def test_public_view_state_alias_and_constructor_order():
         "revision",
         "message_kind",
         "details",
-        "row_indentation",
+        "row_indentation", "help", "footer", "footer_statuses", "total_count",
     )

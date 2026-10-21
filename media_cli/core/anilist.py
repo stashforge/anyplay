@@ -570,14 +570,15 @@ def refresh_history_entry_from_anilist(entry, token):
     return changed
 
 
-def refresh_history_anilist_airing_batch(history_entries, *, force=False):
+def refresh_history_anilist_airing_batch(history_entries, *, force=False, persist=True):
     now = int(_time.time())
 
-    from ..domain.history import HISTORY_REFRESH_COOLDOWN_SECONDS
+    from ..domain.history import HISTORY_REFRESH_COOLDOWN_SECONDS, history_entry_should_auto_refresh
     COOLDOWN = HISTORY_REFRESH_COOLDOWN_SECONDS
 
     media_ids_to_fetch = []
     entry_map = {}
+    provider_checked = set()
 
     for entry in history_entries:
         show = entry.get("show")
@@ -685,8 +686,21 @@ def refresh_history_anilist_airing_batch(history_entries, *, force=False):
                     or (old_next_airing_at and old_next_airing_at <= now)
                     or (old_al_status != new_status and new_status == "FINISHED")
                 ):
-                    if _provider_catalog_refresh_fn and _provider_catalog_refresh_fn(entry):
-                        changed = True
+                    if _provider_catalog_refresh_fn:
+                        provider_checked.add(id(entry))
+                        if _provider_catalog_refresh_fn(entry):
+                            changed = True
+
+    # Provider failures have their own retry window, independent of fresh
+    # AniList metadata. Do not repeat a provider attempt made above.
+    if _provider_catalog_refresh_fn:
+        for entry in history_entries:
+            show = entry.get("show") or {}
+            if (id(entry) not in provider_checked and show.get("_provider_catalog_failed_at")
+                    and get_show_anilist_id(show)
+                    and (force or history_entry_should_auto_refresh(entry, now=now))):
+                if _provider_catalog_refresh_fn(entry):
+                    changed = True
 
     # Second pass: background-enrich shows missing AniList IDs via fallback title search
     for entry in history_entries:
@@ -714,7 +728,7 @@ def refresh_history_anilist_airing_batch(history_entries, *, force=False):
                 except Exception as e:
                     debug_warn("Background title search fallback failed", e)
 
-    if changed:
+    if changed and persist:
         for entry in history_entries:
             storage.patch_history_entry_state(entry)
         try:

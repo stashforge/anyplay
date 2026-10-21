@@ -367,10 +367,14 @@ def test_downloads_mark_watched_runs_completed_title_auto_delete(monkeypatch, tm
     ms._download_files = {"52": "/tmp/Shen Mu 3/Shen Mu 3 - Episode 52.mkv"}
     deleted = []
 
-    def choose_mark_watched(flags, ui, title, opts, **kwargs):
-        return opts.index("Mark Watched")
+    from media_cli.app.details_menu_controller import DetailsMenuResult
 
-    monkeypatch.setattr("media_cli.app.playback_menu.tui_pick", choose_mark_watched)
+    def choose_mark_watched(flags, ui, *, read_view, switch_translation, information):
+        view = read_view()
+        action_id = next(item.reference for item in view.items if item.label == "Mark Watched")
+        return DetailsMenuResult("selected", action_id)
+
+    monkeypatch.setattr("media_cli.app.playback_menu.run_details_menu", choose_mark_watched)
     monkeypatch.setattr("media_cli.app.playback_menu.app_core.ensure_episode_ids", lambda *a, **k: episode_ids)
     monkeypatch.setattr("media_cli.app.playback_menu.app_core.get_show_anilist_id", lambda *a, **k: None)
     monkeypatch.setattr("media_cli.app.playback_menu.app_core.get_resume_time", lambda *a, **k: 0)
@@ -444,18 +448,19 @@ def test_downloads_completed_provider_id_progress_does_not_show_play_next_ep4(mo
     ms._is_downloads = True
     ms._download_files = {"3": "/tmp/Shen Mu 3/Shen Mu 3 - Episode 3.mkv"}
 
-    captured_opts = []
+    captured_view = None
 
-    def capture_action(flags, ui, title, opts, **kwargs):
-        nonlocal captured_opts
-        captured_opts = list(opts)
-        return -2
+    def capture_action(flags, ui, *, read_view, switch_translation, information):
+        nonlocal captured_view
+        captured_view = read_view()
+        return DetailsMenuResult("back")
 
     monkeypatch.setattr("media_cli.app.details.app_core.ensure_episode_ids", lambda *a, **k: episode_ids)
     monkeypatch.setattr("media_cli.app.details.app_core.with_loading", lambda _msg, fn, *a, **k: fn(*a, **k))
     monkeypatch.setattr("media_cli.app.details.app_core.patch_history_entry_show", lambda *a, **k: None)
     monkeypatch.setattr("media_cli.app.details.app_core.get_resume_time", lambda *a, **k: 0)
-    monkeypatch.setattr("media_cli.app.playback_menu.tui_pick", capture_action)
+    from media_cli.app.details_menu_controller import DetailsMenuResult
+    monkeypatch.setattr("media_cli.app.playback_menu.run_details_menu", capture_action)
     monkeypatch.setattr("media_cli.app.playback_menu.app_core.ensure_episode_ids", lambda *a, **k: episode_ids)
     monkeypatch.setattr("media_cli.app.playback_menu.app_core.get_show_anilist_id", lambda *a, **k: None)
     monkeypatch.setattr("media_cli.app.playback_menu.app_core.get_resume_time", lambda *a, **k: 0)
@@ -464,8 +469,9 @@ def test_downloads_completed_provider_id_progress_does_not_show_play_next_ep4(mo
     state = handle_details_state(flags, ui, ms, {}, MagicMock(), "sub", lambda *a, **k: False)
 
     assert state == "DOWNLOADS"
-    assert "Start Rewatch" in captured_opts
-    assert "Play Next" not in captured_opts
+    labels = [item.label for item in captured_view.items]
+    assert "Start Rewatch" in labels
+    assert "Play Next" not in labels
     assert ms.current_ep == episode_ids[0]
 
 
@@ -495,16 +501,15 @@ def test_downloads_action_menu_prefers_download_progress_over_stale_history(monk
     ms.current_ep_index = 51
     ms.total_eps = 52
 
-    captured_opts = []
-    captured_hints = {}
+    captured_view = None
 
-    def capture_action(flags, ui, title, opts, hints=None, **kwargs):
-        nonlocal captured_opts, captured_hints
-        captured_opts = list(opts)
-        captured_hints = {opt: hints(i) for i, opt in enumerate(opts)} if callable(hints) else dict(hints or {})
-        return -2
+    def capture_action(flags, ui, *, read_view, switch_translation, information):
+        nonlocal captured_view
+        captured_view = read_view()
+        return DetailsMenuResult("back")
 
-    monkeypatch.setattr("media_cli.app.playback_menu.tui_pick", capture_action)
+    from media_cli.app.details_menu_controller import DetailsMenuResult
+    monkeypatch.setattr("media_cli.app.playback_menu.run_details_menu", capture_action)
     monkeypatch.setattr("media_cli.app.playback_menu.app_core.ensure_episode_ids", lambda *a, **k: episode_ids)
     monkeypatch.setattr("media_cli.app.playback_menu.app_core.get_show_anilist_id", lambda *a, **k: None)
     monkeypatch.setattr("media_cli.app.playback_menu.app_core.get_resume_time", lambda *a, **k: 0)
@@ -514,9 +519,10 @@ def test_downloads_action_menu_prefers_download_progress_over_stale_history(monk
     state = handle_action_menu_state(flags, ui, ms, {}, MagicMock(), "sub", lambda *a, **k: False)
 
     assert state == "DOWNLOADS"
-    assert "Start Rewatch" not in captured_opts
-    assert "Play Next" in captured_opts
-    assert captured_hints["Play Next"] == "play EP 52"
+    by_label = {item.label: item for item in captured_view.items}
+    assert "Start Rewatch" not in by_label
+    assert "Play Next" in by_label
+    assert by_label["Play Next"].hint == "play EP 52"
 
 
 def test_downloads_scan_migrates_legacy_episode_files_for_strict_delete(monkeypatch, tmp_path):
@@ -1355,13 +1361,13 @@ def test_playback_menu_session_toggles():
 
     # Session toggles live under the Playback submenu, not directly in details.
     captured_opts = []
+    captured_view = None
     captured_playback_opts = []
     playback_picks = 0
 
     def mock_pick(flags, ui, title, opts, acts=None, **kwargs):
-        nonlocal captured_opts, captured_playback_opts, playback_picks
+        nonlocal captured_playback_opts, playback_picks
         if title == "Select action":
-            captured_opts = list(opts)
             return opts.index("Playback")
         if title == "Playback":
             captured_playback_opts = list(opts)
@@ -1373,12 +1379,23 @@ def test_playback_menu_session_toggles():
                     return i
         return -2
 
-    with patch("media_cli.app.playback_menu.tui_pick", side_effect=mock_pick), \
+    from media_cli.app.details_menu_controller import DetailsMenuResult
+
+    def choose_playback_settings(flags, ui, *, read_view, switch_translation, information):
+        nonlocal captured_view
+        view = read_view()
+        captured_view = view
+        action_id = next(item.reference for item in view.items if item.label == "Playback")
+        return DetailsMenuResult("selected", action_id)
+
+    with patch("media_cli.app.playback_menu.run_details_menu", side_effect=choose_playback_settings), \
+         patch("media_cli.app.playback_menu.tui_pick", side_effect=mock_pick), \
          patch("media_cli.app_core.save_config"), \
          patch("media_cli.app_core.build_info_panel"):
         next_state = handle_action_menu_state(flags, ui, ms, {}, MagicMock(), "sub", lambda *a: False)
         assert next_state == "DETAILS"
         assert ms.auto_download_next == "adaptive"
+        captured_opts = [item.label for item in captured_view.items]
         assert captured_opts[-1] == "Playback"
         assert not any("Auto-Download" in opt for opt in captured_opts)
         assert any("Auto-Download" in opt for opt in captured_playback_opts)
@@ -1411,26 +1428,23 @@ def test_downloads_mode_action_menu_shows_continue_for_resume(monkeypatch):
     }
     ui.ui_show_ctx = show
 
-    captured_opts = []
-    captured_hints = {}
+    captured_view = None
 
-    def mock_pick(flags, ui, title, opts, acts=None, hints=None, **kwargs):
-        nonlocal captured_opts, captured_hints
-        captured_opts = list(opts)
-        if callable(hints):
-            captured_hints = {opt: hints(i) for i, opt in enumerate(opts)}
-        else:
-            captured_hints = dict(hints or {})
-        return -2
+    def mock_pick(flags, ui, *, read_view, switch_translation, information):
+        nonlocal captured_view
+        captured_view = read_view()
+        return DetailsMenuResult("back")
 
-    monkeypatch.setattr("media_cli.app.playback_menu.tui_pick", mock_pick)
+    from media_cli.app.details_menu_controller import DetailsMenuResult
+    monkeypatch.setattr("media_cli.app.playback_menu.run_details_menu", mock_pick)
     monkeypatch.setattr("media_cli.app.playback_menu.app_core.get_resume_time", lambda *a, **k: 95)
     monkeypatch.setattr("media_cli.app.playback_menu.app_core.build_info_panel", lambda *a, **k: [])
 
     handle_action_menu_state(flags, ui, ms, {}, MagicMock(), "sub", lambda *a, **k: False)
 
-    assert "Continue" in captured_opts
-    assert "resume EP 1" in captured_hints["Continue"]
+    by_label = {item.label: item for item in captured_view.items}
+    assert "Continue" in by_label
+    assert "resume EP 1" in by_label["Continue"].hint
 
 
 def test_playback_episodes_downloads_mode_options_and_hints(tmp_path):
@@ -1460,56 +1474,30 @@ def test_playback_episodes_downloads_mode_options_and_hints(tmp_path):
     }
     ui.ui_show_ctx = show
 
-    captured_opts = []
-    captured_disabled = None
-    captured_hints = None
-    captured_header_fn = None
-    captured_can_delete_fn = None
-    captured_delete_prompt = None
+    captured = []
 
-    def mock_pick(flags, ui, title, opts, header_fn=None, disabled_indices=None, hints=None, can_delete_fn=None, delete_prompt=None, **kwargs):
-        nonlocal captured_opts, captured_disabled, captured_hints, captured_header_fn, captured_can_delete_fn, captured_delete_prompt
-        captured_opts = list(opts)
-        captured_disabled = disabled_indices
-        captured_hints = hints
-        captured_header_fn = header_fn
-        captured_can_delete_fn = can_delete_fn
-        captured_delete_prompt = delete_prompt
-        return -2  # Esc / back
+    def mock_pick(flags, ui, **kwargs):
+        from media_cli.app.details_menu_controller import DetailsMenuResult
+        captured.append(kwargs["read_view"]())
+        kwargs["action_handlers"]["delete"]("1")
+        return DetailsMenuResult("back")
 
-    with patch("media_cli.app.playback_episodes.tui_pick", side_effect=mock_pick), \
+    with patch("media_cli.app.playback_episodes.run_details_menu", side_effect=mock_pick), \
+         patch("media_cli.app.playback_episodes.confirm_view_action") as confirmation, \
          patch("media_cli.app_core.is_online", return_value=True), \
          patch("media_cli.app_core.get_local_progress", return_value=None), \
          patch("media_cli.app_core.build_info_panel"):
         next_state = handle_episode_state(flags, ui, ms, {}, MagicMock(), "sub", lambda *a: False)
         assert next_state == "DETAILS"
 
-        # Check options formatting: EP 1 has no ✘ (clean dimmed), EP 3 has ✔
-        assert "✘" not in captured_opts[0]
-        assert "✔" in captured_opts[2]
-
-        # Check disabled indices: must be EMPTY so user can select/hover un-downloaded episodes
-        assert captured_disabled == set()
-
-        # Check dynamic hints on highlighted items: concise & human-friendly
-        assert callable(captured_hints)
-        assert "✘" in captured_hints(0)
-        assert "not downloaded" in captured_hints(0).lower()
-        assert "Enter=Download" not in captured_hints(0)
-        assert captured_hints(2) == "ready to watch"
-
-        # Check footer in header_fn: shows Enter=Download for EP 0, Enter=Play • Del=Delete for EP 2
-        assert callable(captured_header_fn)
-        assert "Enter=Download" in captured_header_fn(0)
-        assert "Enter=Play" in captured_header_fn(2)
-        assert "Del=Delete" in captured_header_fn(2)
-
-        # Check delete guards and prompt
-        assert callable(captured_can_delete_fn)
-        assert captured_can_delete_fn(0) is False  # EP 1 is not downloaded -> cannot delete
-        assert captured_can_delete_fn(2) is True   # EP 3 is downloaded -> can delete
-        assert callable(captured_delete_prompt)
-        assert captured_delete_prompt(2) == "Delete downloaded EP 3? y/N"
+        view = captured[0]
+        assert all(item.selectable for item in view.items)
+        assert "✘" not in view.items[0].label_text
+        assert "✔" in view.items[2].label_text
+        assert "not downloaded" in view.items[0].hint_text
+        assert view.items[2].hint_text == "ready to watch"
+        assert any(action.id == "delete" for action in view.actions)
+        confirmation.assert_not_called()
 
 
 def test_playback_episodes_delete_prunes_download_aliases(tmp_path):
@@ -1544,21 +1532,22 @@ def test_playback_episodes_delete_prunes_download_aliases(tmp_path):
     ui.ui_show_ctx = show
 
     captured_opts_after_delete = []
-    captured_can_delete_fn = None
-
-    def mock_pick(flags, ui, title, opts, delete_fn=None, can_delete_fn=None, **kwargs):
-        nonlocal captured_opts_after_delete, captured_can_delete_fn
-        captured_can_delete_fn = can_delete_fn
-        assert can_delete_fn(2) is True
-        new_opts, _header = delete_fn(2)
-        captured_opts_after_delete = list(new_opts)
-        return -2
+    def mock_pick(flags, ui, **kwargs):
+        from media_cli.app.details_menu_controller import DetailsMenuResult
+        nonlocal captured_opts_after_delete
+        assert "✔" in kwargs["read_view"]().items[2].label_text
+        kwargs["action_handlers"]["delete"]("3")
+        view = kwargs["read_view"]()
+        captured_opts_after_delete = [item.label_text for item in view.items]
+        assert not any(action.id == "delete" for action in view.actions)
+        return DetailsMenuResult("back")
 
     def mock_delete_offline_episode(*args, **kwargs):
         ep3_file.unlink()
         return True
 
-    with patch("media_cli.app.playback_episodes.tui_pick", side_effect=mock_pick), \
+    with patch("media_cli.app.playback_episodes.run_details_menu", side_effect=mock_pick), \
+         patch("media_cli.app.playback_episodes.confirm_view_action", return_value=True), \
          patch("media_cli.app_core.delete_offline_episode", side_effect=mock_delete_offline_episode), \
          patch("media_cli.app_core.find_offline_file_for_episode", return_value=None), \
          patch("media_cli.app_core.is_online", return_value=True), \
@@ -1568,7 +1557,6 @@ def test_playback_episodes_delete_prunes_download_aliases(tmp_path):
 
     assert next_state == "DETAILS"
     assert "✔" not in captured_opts_after_delete[2]
-    assert captured_can_delete_fn(2) is False
     assert ms._download_files == {}
 
 
@@ -1598,32 +1586,24 @@ def test_playback_episodes_allows_deleting_downloaded_episode_outside_downloads_
     }
     ui.ui_show_ctx = show
 
-    captured_delete_fn = None
-    captured_can_delete_fn = None
-    captured_delete_prompt = None
-    captured_header_fn = None
+    def mock_pick(flags, ui, **kwargs):
+        from media_cli.app.details_menu_controller import DetailsMenuResult
+        assert any(action.id == "delete" for action in kwargs["read_view"]().actions)
+        kwargs["action_handlers"]["delete"]("1")
+        confirmation.assert_not_called()
+        kwargs["action_handlers"]["delete"]("3")
+        return DetailsMenuResult("back")
 
-    def mock_pick(flags, ui, title, opts, header_fn=None, delete_fn=None, can_delete_fn=None, delete_prompt=None, **kwargs):
-        nonlocal captured_delete_fn, captured_can_delete_fn, captured_delete_prompt, captured_header_fn
-        captured_delete_fn = delete_fn
-        captured_can_delete_fn = can_delete_fn
-        captured_delete_prompt = delete_prompt
-        captured_header_fn = header_fn
-        return -2
-
-    with patch("media_cli.app.playback_episodes.tui_pick", side_effect=mock_pick), \
+    with patch("media_cli.app.playback_episodes.run_details_menu", side_effect=mock_pick), \
+         patch("media_cli.app.playback_episodes.confirm_view_action", return_value=False) as confirmation, \
          patch("media_cli.app_core.is_online", return_value=True), \
          patch("media_cli.app_core.get_local_progress", return_value=None), \
          patch("media_cli.app_core.build_info_panel"):
         next_state = handle_episode_state(flags, ui, ms, {}, MagicMock(), "sub", lambda *a: False)
 
     assert next_state == "HISTORY"
-    assert callable(captured_delete_fn)
-    assert callable(captured_can_delete_fn)
-    assert captured_can_delete_fn(0) is False
-    assert captured_can_delete_fn(2) is True
-    assert captured_delete_prompt(2) == "Delete downloaded EP 3? y/N"
-    assert "Del=Delete" in captured_header_fn(2)
+    confirmation.assert_called_once()
+    assert confirmation.call_args.kwargs["question"] == "Delete downloaded EP 3?"
 
 
 def test_playback_player_rolling_deletion(tmp_path):

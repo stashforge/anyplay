@@ -31,7 +31,10 @@ import shutil
 import tempfile
 import time
 import traceback
+from copy import deepcopy
 from datetime import datetime
+from functools import wraps
+from threading import RLock
 
 from ..context import FLAGS
 from ..domain import history as history_domain
@@ -94,6 +97,15 @@ _history_cache = None  # watch history
 _search_history_cache = None  # search history
 _incognito_cache_dir = None
 _incognito_history_allowed = False
+_history_lock = RLock()
+
+
+def _history_transaction(function):
+    @wraps(function)
+    def transact(*args, **kwargs):
+        with _history_lock:
+            return function(*args, **kwargs)
+    return transact
 
 
 def set_incognito_history_allowed(allowed: bool) -> None:
@@ -428,6 +440,7 @@ HISTORY_SHOW_STRIP_KEYS = ANILIST_HISTORY_STRIP_KEYS | {
     "watched_episodes",
     "_folder_name",
     "_download_files",
+    "_downloaded_episodes",
     "_is_downloads",
     "_enrichment_in_progress",
     # "_enrichment_attempted" - MUST persist across sessions to prevent re-enrichment
@@ -438,6 +451,18 @@ HISTORY_SHOW_STRIP_KEYS = ANILIST_HISTORY_STRIP_KEYS | {
 
 def sanitize_show_for_history(show):
     stored = dict(show or {})
+    from ..domain.episodes import episode_display_summary
+
+    summaries = {}
+    for ttype in ("sub", "dub", "raw"):
+        summary = episode_display_summary(stored, ttype)
+        if summary is not None:
+            available, latest = summary
+            summaries[ttype] = {"available": available, "latest_label": latest}
+    if summaries:
+        stored["_episode_display"] = summaries
+    else:
+        stored.pop("_episode_display", None)
     for key in HISTORY_SHOW_STRIP_KEYS:
         stored.pop(key, None)
     prov = stored.get("_provider") or stored.get("provider")
@@ -454,10 +479,23 @@ def sanitize_show_for_history(show):
     return stored
 
 
+def _capture_history_progress(entry, show=None):
+    # Retain a small progress snapshot before discarding provider catalogues.
+    source = show if show is not None else entry.get("show", {})
+    progress = history_domain.local_progress((entry,), source, entry.get("translation_type", "sub"))
+    if progress is not None:
+        entry["progress"] = progress
+    if source.get("_episode_labels_ttype", entry.get("translation_type", "sub")) == entry.get("translation_type", "sub"):
+        label = (source.get("_episode_labels") or {}).get(str(entry.get("episode")))
+        if label:
+            entry["episode_label"] = str(label)
+
+
 def sanitize_history_list(history):
     clean_history = []
     for entry in history:
         clean_entry = {**entry, "show": sanitize_show_for_history(entry.get("show"))}
+        _capture_history_progress(clean_entry, entry.get("show"))
         show = clean_entry["show"]
         show.pop("_local_progress", None)
         show.pop("_local_episode_label", None)
@@ -470,7 +508,13 @@ def sanitize_history_list(history):
     return clean_history
 
 
+@_history_transaction
 def load_history():
+    """Return a detached snapshot; mutations must use the history write APIs."""
+    return deepcopy(_load_history())
+
+
+def _load_history():
     global _history_cache
     if _history_cache is not None:
         return _history_cache
@@ -530,6 +574,8 @@ def get_local_episode_label(show, ttype="sub"):
         labels = (show or {}).get("_episode_labels") or (entry.get("show") or {}).get("_episode_labels") or {}
         if labels and str(eid) in labels:
             return str(labels[str(eid)])
+        if entry.get("episode_label"):
+            return entry["episode_label"]
         from ..domain.episodes import clean_episode_identifier
         if str(eid).startswith(("http://", "https://", "/")):
             cleaned = clean_episode_identifier(str(eid))
@@ -596,16 +642,29 @@ def episode_id_for_progress(show, ttype, progress):
 
 
 def write_history_progress(show, progress, ttype, last_synced=None, touch=False):
-    global _history_cache
-    if not is_incognito():
-        os.makedirs(paths.STATE_DIR, exist_ok=True)
-
     import decimal
     try:
         if decimal.Decimal(str(progress)) < 0:
             progress = "0"
     except decimal.InvalidOperation:
         pass
+    # Episode mapping may call a provider. Resolve it before the storage lock.
+    episode_id = episode_id_for_progress(show, ttype, progress)
+    if episode_id is None:
+        debug_warn(
+            "Skipped history progress update",
+            ValueError(f"No provider episode mapping for progress {progress}"),
+        )
+        return None
+    return _write_history_progress(show, progress, ttype, episode_id, last_synced, touch)
+
+
+@_history_transaction
+def _write_history_progress(show, progress, ttype, episode_id, last_synced, touch):
+    global _history_cache
+    import decimal
+    if not is_incognito():
+        os.makedirs(paths.STATE_DIR, exist_ok=True)
     history = load_history()
     old = get_history_entry(show, ttype)
     timestamp = int(time.time()) if touch else int((old or {}).get("timestamp") or time.time())
@@ -615,13 +674,6 @@ def write_history_progress(show, progress, ttype, last_synced=None, touch=False)
         stored_show = sanitize_show_for_history(merged_show)
     else:
         stored_show = sanitize_show_for_history(show)
-    episode_id = episode_id_for_progress(show, ttype, progress)
-    if episode_id is None:
-        debug_warn(
-            "Skipped history progress update",
-            ValueError(f"No provider episode mapping for progress {progress}"),
-        )
-        return None
     entry = {
         "show": stored_show,
         "episode": episode_id,
@@ -629,10 +681,15 @@ def write_history_progress(show, progress, ttype, last_synced=None, touch=False)
         "timestamp": timestamp,
     }
     if old:
+        if str(old.get("episode")) == str(episode_id) and "progress" in old:
+            entry["progress"] = old["progress"]
+        if str(old.get("episode")) == str(episode_id) and old.get("episode_label"):
+            entry["episode_label"] = old["episode_label"]
         if "was_caught_up" in old:
             entry["was_caught_up"] = old["was_caught_up"]
         if "has_new_release" in old:
             entry["has_new_release"] = old["has_new_release"]
+    _capture_history_progress(entry, show)
     from media_cli.domain.history import history_available_episode_count
     avail = history_available_episode_count(entry)
     try:
@@ -661,7 +718,7 @@ def write_history_progress(show, progress, ttype, last_synced=None, touch=False)
     history.insert(0, entry)
     history = history[:paths.HISTORY_MAX]
     _atomic_write_json(paths.HISTORY_PATH, sanitize_history_list(history), indent=2)
-    _history_cache = history
+    _history_cache = deepcopy(history)
     show["_local_progress"] = get_local_progress(show, ttype) or progress
     show["_local_episode_label"] = get_local_episode_label(show, ttype) or show.get("_local_progress")
     try:
@@ -714,12 +771,14 @@ def touch_history(show, ttype):
         write_history_progress(show, "0", ttype, touch=True)
 
 
-def delete_history_entry(show_id, ttype):
+@_history_transaction
+def delete_history_entry(show_id, ttype, *, provider_id=None):
     global _history_cache
     history, changed = list_state.delete_history_entry(
         load_history(),
         show_id,
         ttype,
+        provider_id=provider_id,
     )
     if not changed:
         return False
@@ -735,9 +794,10 @@ def delete_history_entry(show_id, ttype):
         return False
 
 
+@_history_transaction
 def save_refreshed_history(history):
     global _history_cache
-    clean_history = sanitize_history_list(history)
+    clean_history = deepcopy(sanitize_history_list(history))
     _history_cache = clean_history
     if is_incognito():
         return True
@@ -749,13 +809,15 @@ def save_refreshed_history(history):
         return False
 
 
-def patch_history_entry_show(show_id, ttype, updated_show):
+@_history_transaction
+def patch_history_entry_show(show_id, ttype, updated_show, *, fields=None):
     if not show_id:
         return False
     history = load_history()
     changed = False
     str_show_id = str(show_id)
     safe_keys = {
+        "_episode_display",
         "status", "episodeCount", "availableEpisodes", "availableEpisodesDetail",
         "name", "englishName", "nativeName", "thumbnail", "altNames",
         "type", "season", "airedStart", "airedEnd", "score",
@@ -766,7 +828,15 @@ def patch_history_entry_show(show_id, ttype, updated_show):
         "_next_airing_ep", "_next_airing_time", "_next_airing_at",
         "_anilist_score", "_anilist_status", "anilistMatch", "_title_enriched",
         "_metadata_fields_loaded",
+        "_enrichment_attempted",
+        "_provider_catalog_checked_at", "_provider_catalog_attempted_at",
+        "_provider_catalog_failed_at", "_provider_catalog_refresh_error",
     }
+    if fields is not None:
+        requested = set(fields)
+        if not requested <= safe_keys:
+            raise ValueError("Unsupported history metadata fields")
+        safe_keys = requested
     for entry in history:
         if ttype is None or entry.get("translation_type", "sub") == ttype:
             s = entry.get("show")
@@ -786,6 +856,7 @@ def patch_history_entry_show(show_id, ttype, updated_show):
     return False
 
 
+@_history_transaction
 def patch_history_entry_state(updated_entry):
     """Persist refreshed history show metadata and category flags for one entry."""
     if not isinstance(updated_entry, dict):
@@ -798,8 +869,9 @@ def patch_history_entry_state(updated_entry):
     history = load_history()
     changed = False
     str_show_id = str(show_id)
-    entry_keys = {"episode", "translation_type", "timestamp", "was_caught_up", "has_new_release", "last_synced_progress"}
+    entry_keys = {"was_caught_up", "has_new_release"}
     show_keys = {
+        "_episode_display",
         "status", "episodeCount", "availableEpisodes", "availableEpisodesDetail",
         "name", "englishName", "nativeName", "thumbnail", "altNames",
         "type", "season", "airedStart", "airedEnd", "score",
@@ -808,6 +880,7 @@ def patch_history_entry_state(updated_entry):
         "_episodes_by_number", "_episodes_by_number_by_ttype",
         "_episode_catalog_state", "_episode_catalog_error", "_allanime_checked_at",
         "_provider_catalog_checked_at", "_anilist_airing_checked_at",
+        "_provider_catalog_attempted_at", "_provider_catalog_failed_at", "_provider_catalog_refresh_error",
         "aniListId", "malId", "_provider", "_provider_id", "_provider_name",
         "description", "genres", "banner", "format",
         "_next_airing_ep", "_next_airing_time", "_next_airing_at",
@@ -824,8 +897,8 @@ def patch_history_entry_state(updated_entry):
         if entry is updated_entry:
             changed = True
         for key in entry_keys:
-            if key in updated_entry and entry.get(key) != updated_entry.get(key):
-                entry[key] = updated_entry.get(key)
+            if updated_entry.get(key) and not entry.get(key):
+                entry[key] = True
                 changed = True
         if not isinstance(entry.get("show"), dict):
             entry["show"] = {}
@@ -835,6 +908,11 @@ def patch_history_entry_state(updated_entry):
             if key in updated_show and show.get(key) != updated_show.get(key):
                 show[key] = updated_show.get(key)
                 changed = True
+        # A refresh's progress snapshot may predate playback. Classify using
+        # the latest stored progress, never write the worker's old episode back.
+        previous_category = (entry.get("was_caught_up"), entry.get("has_new_release"))
+        history_domain.history_entry_category(entry)
+        changed = changed or previous_category != (entry.get("was_caught_up"), entry.get("has_new_release"))
         break
     if changed:
         return save_refreshed_history(history)
@@ -1191,10 +1269,14 @@ def register_downloaded_episode_files(show_title: str, episode, files: list[str]
     """Remember the exact files Anyplay created for a downloaded episode."""
     if not show_title or episode is None:
         return False
+    from ..media.episode_identity import download_identity_conflicts
+
+    expected = ((metadata or {}).get("_episode_labels") or {}).get(str(episode), str(episode))
     clean_files = []
     for file_path in files or []:
         path = _normal_download_file_path(file_path)
-        if path and os.path.isfile(path) and path not in clean_files:
+        if (path and os.path.isfile(path) and path not in clean_files
+                and not download_identity_conflicts(expected, path)):
             clean_files.append(path)
     if not clean_files:
         return False
@@ -1403,6 +1485,8 @@ def delete_offline_episode(show_title: str, episode, cfg: dict | None = None, re
     downloads.db are removed. This keeps automatic cleanup from touching files
     the user may have copied into the download folder.
     """
+    from ..media.episode_identity import download_identity_conflicts
+
     db = load_downloads_db()
     show_data = None
     for title_key in _download_show_lookup_keys(show_title):
@@ -1412,6 +1496,8 @@ def delete_offline_episode(show_title: str, episode, cfg: dict | None = None, re
 
     registered_files: list[str] = []
     if show_data:
+        expected = (((show_data.get("metadata") or {}).get("_episode_labels") or {})
+                    .get(str(episode), str(episode)))
         episode_files = show_data.get("episode_files", {})
         for key in _matching_episode_file_keys(episode_files, episode):
             raw_files = episode_files.get(key, [])
@@ -1419,7 +1505,7 @@ def delete_offline_episode(show_title: str, episode, cfg: dict | None = None, re
                 raw_files = [raw_files]
             for raw_file in raw_files or []:
                 path = _normal_download_file_path(raw_file)
-                if path and path not in registered_files:
+                if path and path not in registered_files and not download_identity_conflicts(expected, path):
                     registered_files.append(path)
 
     if require_recorded and not registered_files:

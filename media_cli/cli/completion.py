@@ -82,7 +82,7 @@ CONFIG_KEYS = (
     "disabled_providers",
     "download_dir", "auto_download_next", "auto_delete_watched", "auto_delete_buffer",
     "binge", "sync", "anilist_token", "anilist_sort", "anilist_sort_reverse",
-    "cover", "spinner", "aniskip", "auto_skip",
+    "cover", "details_cover", "spinner", "aniskip", "auto_skip",
     "download_sub_langs", "download_audio_langs",
     "torrent_fallback", "torrent_search_limit", "torrent_min_seeders",
     "torrent_hydrate_top", "torrent_prefer_size", "torrent_allow_unknown_seeders",
@@ -189,7 +189,7 @@ def bash_completion():
                 return 0
             fi
             ;;
-        binge|sync|cover|aniskip|auto_skip|auto_download_next|auto_delete_watched|anilist_sort_reverse)
+        binge|sync|cover|details_cover|aniskip|auto_skip|auto_download_next|auto_delete_watched|anilist_sort_reverse)
             if [[ "$cmd" == "config" ]]; then
                 COMPREPLY=( $(compgen -W "{_words(BOOLEANS)}" -- "$cur") )
                 return 0

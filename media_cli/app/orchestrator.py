@@ -10,6 +10,8 @@ import sys
 import time
 from typing import Any
 
+from ..core.startup import startup_checkpoint
+
 from .. import app as handlers
 from ..constants import APP_NAME, LEGACY_APP_NAMES
 from ..cli.args import parse_cli_args
@@ -485,7 +487,9 @@ def main() -> None:
     args, pa = parse_cli_args()
     runtime_flags.debug_mode = bool(getattr(args, "debug", False))
     configure_file_logging(debug=runtime_flags.debug_mode)
+    startup_checkpoint("arguments")
 
+    cfg = None
     if getattr(args, "command", None) not in ("config", "logs") and not getattr(args, "completion_shell", None) and not getattr(args, "show_search_history", False) and not getattr(args, "clear_search_history", False) and not getattr(args, "list_providers", False):
         cfg = load_config()
         db = load_downloads_db()
@@ -493,6 +497,7 @@ def main() -> None:
         active_dl_dir = setup_download_directory(cfg, db, runtime_dl_dir)
         args.download_dir = active_dl_dir
         cfg["download_dir"] = active_dl_dir
+    startup_checkpoint("configuration_directory")
 
     if getattr(args, "completion_shell", None):
         globals()["SUPPRESS_FINAL_CURSOR_RESTORE"] = True
@@ -683,7 +688,9 @@ def main() -> None:
         return
 
     app_core.check_deps()
-    cfg = load_config()
+    startup_checkpoint("dependencies")
+    if cfg is None:
+        cfg = load_config()
     if getattr(args, "provider", None) is None:
         args.provider = cfg.get("provider", _DEFAULT_PROVIDER_ID)
     display._configure_spinner_from_config(cfg)
@@ -875,11 +882,10 @@ def main() -> None:
             fatal_terminal_exit(str(exc))
     quality = args.quality or cfg.get("quality", "1080p")
 
-    auto_download_val = getattr(args, "auto_download", None)
-    if auto_download_val is None:
-        auto_download_val = cfg.get("auto_download_next", "adaptive")
-    else:
-        auto_download_val = "adaptive" if auto_download_val else "off"
+    from .playback_player import initial_auto_download_mode
+    auto_download_val = initial_auto_download_mode(
+        cfg, incognito=runtime_flags.incognito_mode, requested=getattr(args, "auto_download", None),
+    )
 
     auto_delete_val = getattr(args, "auto_delete", None)
     if auto_delete_val is None:
@@ -959,6 +965,7 @@ def main() -> None:
         }.get(state, state)
         return run_screen_controller(handler, *handler_args, fallback=fallback)
 
+    startup_checkpoint("runtime_setup")
     while state != "QUIT":
         cur_ttype = ui.ui_ttype_ctx if ui.ui_ttype_ctx is not None else ttype
         if state == "DOWNLOADS":

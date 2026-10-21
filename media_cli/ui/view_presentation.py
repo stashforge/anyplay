@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import replace
 from itertools import count
 
@@ -10,10 +11,14 @@ from .actions import ActionAvailability, ActionBindings, ResolvedAction, key_lab
 from .background_loading import BackgroundLoadingStatus
 from .detail_panel import render_detail_lines
 from .footer import Footer, FooterStatus, StatusKind, render_footer
+from .loading_key_feedback import LoadingKeyFeedback
+from .loading_messages import result_wait_messages
 from .loading_model import LoadingInteraction, LoadingOwner, LoadingPlacement, LoadingTaskSpec
 from .picker_render import loading_frame
+from .styled_text import StyledText
+from .theme import DEFAULT_THEME, Theme
 from .tui_actions import tui_bindings
-from .view_model import ResolvedDetails, ViewItem, resolve_details
+from .view_model import ResolvedDetails, ViewItem, resolve_details, visible_items
 from .view_session import ViewSession
 
 # Match panels without importing its domain metadata and display dependencies.
@@ -26,7 +31,12 @@ _SEPARATOR = " \u2022 "
 
 
 class ViewPresentation:
-    def __init__(self, session: ViewSession, poster_manager):
+    def __init__(self, session: ViewSession, poster_manager, *, theme: Theme = DEFAULT_THEME, clock=time.monotonic):
+        if not isinstance(theme, Theme):
+            raise TypeError("ViewPresentation.theme requires Theme")
+        self.theme = theme
+        self._clock = clock
+        self._result_wait_feedback = LoadingKeyFeedback()
         self.session = session
         self.poster_manager = poster_manager
         self._shows = {}
@@ -39,6 +49,13 @@ class ViewPresentation:
         token = self.session.navigation_token
         if token is not None:
             self.loading.feedback(token, action)
+        elif self._waiting_for_results() and action.action.id in {"select", "move"}:
+            self._result_wait_feedback.show(action, (self.session.current.id, self.session.generation), self._clock(),
+                                           messages=result_wait_messages(action.action.id))
+
+    def _waiting_for_results(self) -> bool:
+        view = self.session.current
+        return view.state == "loading" and not any(item.selectable for item in view.items)
 
     def selected(self, item_id=None) -> ViewItem | None:
         return self.session.item(item_id)
@@ -53,6 +70,10 @@ class ViewPresentation:
 
     def image_enabled(self) -> bool:
         return bool(self.poster_manager.enabled())
+
+    def image_slot_enabled(self, item_id=None) -> bool:
+        image = self._image(item_id)
+        return self.image_enabled() and image is not None and image.state in {"available", "resolving"}
 
     def show_for(self, item_id=None) -> dict:
         item = self.selected(item_id)
@@ -75,7 +96,8 @@ class ViewPresentation:
             self._shows[slot] = (identity, show)
         else:
             show = existing[1]
-        show["name"] = sanitize_terminal_text(item.label if item is not None else self._details(item_id).title)
+        title = item.label if item is not None else self._details(item_id).title
+        show["name"] = sanitize_terminal_text(title.text if isinstance(title, StyledText) else title)
         show["_image_message"] = sanitize_terminal_text(image.message) if image is not None else ""
         return show
 
@@ -114,6 +136,10 @@ class ViewPresentation:
             snapshot = self.session.loading_snapshot()
             return snapshot.message if snapshot is not None else ""
         view = self.session.current
+        if (view.state == "ready" and view.items and self.session.position.query
+                and self.session.position.selected_id is None
+                and not any(item.selectable for item in visible_items(view, self.session.position.query))):
+            return "No matching results"
         message = sanitize_terminal_text(view.message)
         if not message and not view.items:
             message = {
@@ -143,6 +169,8 @@ class ViewPresentation:
     def _view_loading_status(self, frame):
         view = self.session.current
         message = self._view_message()
+        scope = (view.id, self.session.generation) if self._waiting_for_results() else None
+        message = self._result_wait_feedback.message(scope, self._clock()) or message
         active = (
             self.session.navigation is None and view.state == "loading"
             and bool(message)
@@ -165,22 +193,37 @@ class ViewPresentation:
     def status_text(self, item_id=None) -> str:
         """Readable current status; observing it never starts an image request."""
         return _SEPARATOR.join(part for part in (
+            *(status.message for status in self.session.current.footer_statuses),
             self._view_message(),
             self._image_status(self.show_for(item_id)),
         ) if part)
 
-    def _context(self) -> str:
-        return _SEPARATOR.join(text for part in self.session.current.context if (text := sanitize_terminal_text(part)))
+    def _context_parts(self, item_id=None) -> tuple[str, ...]:
+        item = self.selected(item_id)
+        parts = (*self.session.current.context, *(item.footer_context if item is not None else ()))
+        return tuple(text for part in parts if (text := sanitize_terminal_text(part)))
+
+    def _context(self, item_id=None) -> str:
+        return _SEPARATOR.join(self._context_parts(item_id))
 
     def _navigation(self) -> str:
         return _SEPARATOR.join(self._footer().context + self._footer().actions)
 
-    def _footer(self, statuses=()) -> Footer:
+    def _footer(self, statuses=(), *, item_id=None) -> Footer:
+        statuses = tuple(statuses) + tuple(self.session.current.footer_statuses)
+        supplied = self.session.current.footer
+        if supplied is not None:
+            return replace(supplied, statuses=tuple(statuses) + supplied.statuses)
         parts = []
         advertised = set()
         pending = self.session.navigation is not None
         bindings = tui_bindings(self.session.current, navigation_pending=pending)
+        item = self.selected(item_id)
+        hints = {hint.action_id: hint for hint in item.action_hints} if item is not None else {}
         for action in self.session.current.actions:
+            hint = hints.get(action.id)
+            if not (hint.visible if hint is not None else action.footer):
+                continue
             keys = []
             for key in action.keys:
                 binding = bindings.resolve(key)
@@ -196,7 +239,7 @@ class ViewPresentation:
                     advertised.add(canonical)
             if (action.keys and not keys) or (not action.keys and pending):
                 continue
-            label = sanitize_terminal_text(action.label)
+            label = sanitize_terminal_text(hint.label if hint is not None else action.label)
             parts.append(f"{'/'.join(keys)}={label}" if keys else label)
         defaults = tuple(
             key_label(key) for key in ("ESC",)
@@ -206,7 +249,7 @@ class ViewPresentation:
         if defaults:
             parts.append(f"{'/'.join(defaults)}=back")
         return Footer(statuses=tuple(statuses),
-                      context=tuple(text for part in self.session.current.context if (text := sanitize_terminal_text(part))),
+                      context=self._context_parts(item_id),
                       actions=tuple(part for part in parts if part))
 
     @staticmethod
@@ -217,7 +260,7 @@ class ViewPresentation:
     def details(self, item_id=None, width=80) -> str:
         fields = self._details(item_id)
         lines = list(render_detail_lines(
-            primary=fields.title, secondary=fields.secondary, details=fields.metadata, width=width,
+            primary=fields.title, secondary=fields.secondary, details=fields.metadata, width=width, theme=self.theme,
         ))
         show = self.show_for(item_id)
         message = self._view_message()
@@ -235,10 +278,10 @@ class ViewPresentation:
             statuses = [FooterStatus(message, kind, frame() if busy else "")] if message else []
         if self.image_enabled() and show["_image_state"] == "available":
             self.poster_manager.get(show)
-            footer = self.poster_manager.footer_line(show, self._footer(statuses), width, persistent=True)
+            footer = self.poster_manager.footer_line(show, self._footer(statuses, item_id=item_id), width, persistent=True)
         else:
             status = self._image_status(show)
-            if status:
+            if status and self._footer(item_id=item_id).include_cover_status:
                 resolving = show["_image_state"] == "resolving"
                 if resolving:
                     if cover_status is not None:
@@ -246,14 +289,24 @@ class ViewPresentation:
                 else:
                     kind = StatusKind.ERROR if show["_image_state"] == "failed" else StatusKind.WARNING
                     statuses.append(FooterStatus(status, kind))
-            footer = render_footer(self._footer(statuses), width)
+            footer = render_footer(self._footer(statuses, item_id=item_id), width, theme=self.theme)
         lines.append(footer)
         return "\n".join(lines)
 
     def plain_details(self, item_id=None) -> list[str]:
         fields = self._details(item_id)
-        return [sanitize_terminal_text(text) for text in (fields.title, fields.secondary, fields.metadata)] + [
-            _SEPARATOR.join(part for part in (self._context(), self.status_text(item_id)) if part)
+        supplied = self.session.current.footer
+        if supplied is not None:
+            footer_text = _SEPARATOR.join((
+                *(status.message for status in self.session.current.footer_statuses),
+                *(status.message for status in supplied.statuses),
+                *supplied.context, *supplied.actions,
+            ))
+        else:
+            footer_text = _SEPARATOR.join(part for part in (self._context(item_id), self.status_text(item_id)) if part)
+        return [sanitize_terminal_text(text.text if isinstance(text, StyledText) else text)
+                for text in (fields.title, fields.secondary, fields.metadata)] + [
+            footer_text
         ]
 
     def info(self, item_id=None) -> str:

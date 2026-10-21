@@ -7,6 +7,7 @@ from typing import Any, Callable
 from ..domain.metadata import (
     format_available_episodes,
     format_info_metadata_line,
+    format_info_metadata_parts,
     format_progress,
     format_years,
     prepare_show_display_state,
@@ -76,6 +77,8 @@ def build_info_panel(
         show.get("_anilist_list"),
         show.get("_sync_enabled"),
         tuple(str(ep) for ep in show.get("watched_episodes", [])),
+        format_info_metadata_parts(show, ttype, override_ep_str=override_ep_str,
+                                   local_only=local_only, hide_anilist_status=hide_anilist_status),
     )
     cached = _panel_cache.get(cache_key)
     if cached is not None:
@@ -102,6 +105,8 @@ def build_info_panel(
         show.get("_anilist_list"),
         show.get("_sync_enabled"),
         tuple(str(ep) for ep in show.get("watched_episodes", [])),
+        format_info_metadata_parts(show, ttype, override_ep_str=override_ep_str,
+                                   local_only=local_only, hide_anilist_status=hide_anilist_status),
     )
     cached = _panel_cache.get(cache_key_updated)
     if cached is not None:

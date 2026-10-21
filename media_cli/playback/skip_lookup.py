@@ -4,9 +4,10 @@ import logging
 import math
 from collections.abc import Iterable
 from concurrent.futures import Future
-from ..core.workers import DaemonExecutor
 
+from ..core.workers import DaemonExecutor
 from ..media.aniskip import fetch_skip_times, validated_skip_intervals
+from ..media.provider_skips import needs_skip_fallback, playback_skip_intervals
 
 log = logging.getLogger(__name__)
 SkipInterval = dict[str, object]
@@ -32,6 +33,8 @@ class SkipLookup:
         self._mal_id = mal_id
         self._episode = episode
         self._candidates = tuple(dict(item) for item in candidates)
+        self._provider_candidates = tuple(item for item in self._candidates if item.get("source") == "provider")
+        self._candidates = tuple(item for item in self._candidates if item.get("source") != "provider")
         self._attempted: set[float] = set()
         self._active: tuple[SkipInterval, ...] = ()
         self._duration: float | None = None
@@ -68,11 +71,12 @@ class SkipLookup:
                         log.debug("AniSkip ignored stale lookup completion: %r", request)
 
         if duration != self._duration:
-            self._active = tuple(validated_skip_intervals(self._candidates, duration))
+            self._active = tuple(playback_skip_intervals(self._provider_candidates + self._candidates, duration))
             self._duration = duration
         if (
             valid_duration
-            and (not self._active or len(self._active) < len(self._candidates))
+            and (not self._active or len(validated_skip_intervals(self._candidates, duration)) < len(self._candidates)
+                 or (self._provider_candidates and needs_skip_fallback(self._active)))
             and self._mal_id
             and self._episode is not None
             and self._future is None

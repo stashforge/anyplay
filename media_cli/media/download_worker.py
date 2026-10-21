@@ -195,6 +195,7 @@ class DownloadItem:
     download_audio_langs: str | None = None
     subtitle_mode: str | None = None
     output_files: list[str] = field(default_factory=list)
+    automatic: bool = False
 
 
 def _set_item_output_files(item: DownloadItem, files: list[str] | tuple[str, ...]) -> None:
@@ -514,6 +515,16 @@ class DownloadWorker:
                             item.url = ""
                         self._wake_event.set()
                         return True
+        return False
+
+    def discard_finished_item(self, item_id: str) -> bool:
+        """Forget a terminal queue row without removing downloaded files."""
+        terminal = {DownloadStatus.COMPLETED, DownloadStatus.FAILED, DownloadStatus.CANCELLED, DownloadStatus.SKIPPED}
+        with self.lock:
+            for item in self.items:
+                if item.id == item_id and item.status in terminal:
+                    self.items.remove(item)
+                    return True
         return False
 
     def stop(self):

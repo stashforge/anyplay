@@ -22,6 +22,7 @@ from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .ui.picker_state import PickerState
+    from .ui.view_position_memory import SavedViewPosition
 
 # ---------------------------------------------------------------------------
 # CliFlags
@@ -99,6 +100,7 @@ class UiState:
 
     _last_picker_position: tuple[str, PickerState] | None = None
     _resume_picker_position: tuple[str, PickerState] | None = None
+    _view_positions: dict[tuple[str, ...], SavedViewPosition] = field(default_factory=dict, repr=False)
 
     # Error message shown in the search-input header
     search_error: str = ""

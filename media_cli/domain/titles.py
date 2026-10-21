@@ -140,8 +140,9 @@ def get_display_titles(show, main_title):
     if english:
         english = str(english).strip()
 
-    alternate = ""
-    if english and romaji and english.lower() != romaji.lower():
+    preferred = show.get("preferredAltName")
+    alternate = preferred.strip() if isinstance(preferred, str) and preferred.strip().lower() != main_clean else ""
+    if not alternate and english and romaji and english.lower() != romaji.lower():
         if main_clean == english.lower():
             alternate = romaji
         elif main_clean == romaji.lower():

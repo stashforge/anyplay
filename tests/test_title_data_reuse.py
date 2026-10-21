@@ -258,7 +258,10 @@ def test_background_enrichment_accepts_no_results(monkeypatch, shows):
 
 
 @pytest.mark.parametrize("openings", [1, 2])
-def test_search_selection_fetches_catalog_once_with_separate_history_show(monkeypatch, openings):
+@pytest.mark.parametrize("requested_episode", [None, "1", "404"])
+@pytest.mark.parametrize("identity_field", ["_id", "id"])
+@pytest.mark.parametrize("available", [True, False])
+def test_search_selection_fetches_catalog_once_with_separate_history_show(monkeypatch, openings, requested_episode, identity_field, available):
     from media_cli import app_core
     from media_cli.app import search
     from media_cli.context import CliFlags, MachineState, UiState
@@ -272,19 +275,24 @@ def test_search_selection_fetches_catalog_once_with_separate_history_show(monkey
         "genres": ["Drama"],
     }
     entry = {"show": {"_id": "150672", "_provider": "anikoto"}, "episode": "1"}
+    if identity_field == "id":
+        show["id"] = show.pop("_id")
     fetches = []
 
     def ensure(target, translation, **kwargs):
         if target.get("_episode_ids_ttype") != translation:
-            fetches.append(target["_id"])
-            target.update(_episode_ids=["1", "2"], _episode_ids_ttype=translation, _episode_catalog_state="loaded")
+            fetches.append(target.get("_id") or target.get("id"))
+            target.update(_episode_ids=["1", "2"] if available else [], _episode_ids_ttype=translation,
+                          _episode_catalog_state="loaded" if available else "unavailable")
         return target["_episode_ids"]
 
     def pick(*args, **kwargs):
-        assert kwargs["select_fn"](0)
-        return 0
+        from media_cli.app.search_results_controller import SearchResultsResult
 
-    monkeypatch.setattr(search, "tui_pick", pick)
+        assert kwargs["select"](show)
+        return SearchResultsResult("selected", show)
+
+    monkeypatch.setattr(search, "run_search_results", pick)
     monkeypatch.setattr(
         app_core,
         "_cached_search_results",
@@ -303,6 +311,7 @@ def test_search_selection_fetches_catalog_once_with_separate_history_show(monkey
     monkeypatch.setattr(app_core, "batch_prepare_shows_display_state", lambda *args: None)
     monkeypatch.setattr(app_core, "enter_alt_screen", lambda: None)
     monkeypatch.setattr(app_core, "with_loading", lambda message, fn, *args: fn(*args))
+    monkeypatch.setattr(app_core, "_clear_streams", lambda: None)
     ms = MachineState(query_str="example")
     for _ in range(openings):
         result = search.handle_search_state(
@@ -310,12 +319,14 @@ def test_search_selection_fetches_catalog_once_with_separate_history_show(monkey
             UiState(),
             ms,
             {},
-            SimpleNamespace(provider="anikoto", episode=None, download=False),
+            SimpleNamespace(provider="anikoto", episode=requested_episode, download=False),
             "sub",
             lambda *args: False,
         )
-        assert result == "DETAILS"
-        assert ms.current_ep == "2"
+        assert result == ("DETAILS" if not available or requested_episode is None else "PLAY" if requested_episode == "1" else "EPISODE")
+        if available:
+            assert ms.current_ep == ("2" if requested_episode is None else "1")
+        assert ms.show_id == "150672"
     assert fetches == ["150672"]
 
 

@@ -2,7 +2,7 @@
 
 import time
 
-from .episodes import clean_episode_identifier, episode_id_at, episode_index_for_id
+from .episodes import clean_episode_identifier, episode_id_at, episode_index_for_id, explicit_episode_number
 from .metadata import positive_int, provider_status_is_authoritative
 from .titles import get_show_display_title
 
@@ -36,6 +36,11 @@ def _episode_ids_for_translation(show, translation_type):
 def local_progress(entries, show, translation_type="sub"):
     if not show:
         return None
+
+    def numeric_identifier(value):
+        cleaned = clean_episode_identifier(str(value))
+        return cleaned if cleaned and cleaned.replace(".", "", 1).isdigit() else None
+
     show_id = str(show.get("_id") or "")
     from .matching import is_same_show
     target_entry = None
@@ -74,12 +79,12 @@ def local_progress(entries, show, translation_type="sub"):
     )
     if episode_ids:
         if labels and str(episode_id) in labels:
-            clean_lbl = clean_episode_identifier(labels[str(episode_id)])
-            if clean_lbl:
+            clean_lbl = numeric_identifier(labels[str(episode_id)])
+            if clean_lbl is not None:
                 return clean_lbl
 
-        clean_eid = clean_episode_identifier(str(episode_id))
-        if clean_eid and not str(episode_id).startswith(("http://", "https://", "/")):
+        clean_eid = numeric_identifier(episode_id)
+        if clean_eid is not None and not str(episode_id).startswith(("http://", "https://", "/")):
             return clean_eid
 
         index = episode_index_for_id(
@@ -89,12 +94,26 @@ def local_progress(entries, show, translation_type="sub"):
         )
         if index is not None:
             cand_id = episode_ids[index]
-            if labels and str(cand_id) in labels:
-                clean_lbl = clean_episode_identifier(labels[str(cand_id)])
-                if clean_lbl:
+            candidate_label = labels.get(str(cand_id))
+            if candidate_label:
+                clean_lbl = numeric_identifier(candidate_label)
+                if clean_lbl is not None:
                     return clean_lbl
+            else:
+                # Partial catalogues may start at episode 12, not episode 1.
+                clean_id = (
+                    explicit_episode_number(str(cand_id))
+                    if str(cand_id).startswith(("http://", "https://", "/"))
+                    else numeric_identifier(cand_id)
+                )
+                if clean_id is not None:
+                    return clean_id
+            # Movie/OVA/named labels remain presentation data, not progress.
             return index + 1
         return None
+    stored_progress = numeric_identifier(target_entry.get("progress"))
+    if stored_progress is not None:
+        return int(stored_progress) if stored_progress.isdigit() else stored_progress
     try:
         return max(0, int(float(str(episode_id))))
     except (TypeError, ValueError):
@@ -161,14 +180,15 @@ def history_entry_progress(
         get_local_progress=None):
     show = entry.get("show", {})
     translation_type = entry.get("translation_type", "sub")
+    resolved_progress = local_progress((entry,), show, translation_type)
     if "_local_progress" not in show:
-        show["_local_progress"] = entry.get("episode", 0)
+        show["_local_progress"] = resolved_progress if resolved_progress is not None else entry.get("episode", 0)
     if "_local_episode_label" not in show:
         show["_local_episode_label"] = entry.get("episode", 0)
     if callable(prepare_display_state):
         prepare_display_state(show, translation_type)
     label = "LOCAL"
-    raw_val = entry.get("episode")
+    raw_val = resolved_progress if resolved_progress is not None else entry.get("episode")
     from .episodes import clean_episode_identifier
     progress_val = clean_episode_identifier(raw_val) if raw_val else "0"
 
@@ -236,6 +256,7 @@ def history_can_skip_finished_provider_refresh(show, *, require_genres=False):
 
 
 HISTORY_REFRESH_COOLDOWN_SECONDS = 30 * 60
+HISTORY_REFRESH_FAILURE_COOLDOWN_SECONDS = 60
 
 
 def history_refresh_last_checked_at(show):
@@ -262,7 +283,14 @@ def history_entry_refresh_is_stale(
     cooldown=HISTORY_REFRESH_COOLDOWN_SECONDS,
 ):
     now = int(time.time() if now is None else now)
-    last_checked = history_refresh_last_checked_at((entry or {}).get("show", {}))
+    show = (entry or {}).get("show", {})
+    try:
+        failed_at = int(float(show.get("_provider_catalog_failed_at") or 0))
+    except (TypeError, ValueError):
+        failed_at = 0
+    if failed_at > 0:
+        return (now - failed_at) >= HISTORY_REFRESH_FAILURE_COOLDOWN_SECONDS
+    last_checked = history_refresh_last_checked_at(show)
     return last_checked <= 0 or (now - last_checked) >= int(cooldown)
 
 
@@ -412,7 +440,7 @@ def playback_ep_from_history_entry(h, ttype=None, *, episode_ids=None, episode_l
     )
 
 
-def refresh_history_entry_provider_catalog(entry):
+def refresh_history_entry_provider_catalog(entry, *, enrich=True):
     import time
     from contextlib import contextmanager
 
@@ -431,8 +459,25 @@ def refresh_history_entry_provider_catalog(entry):
     show_id = show.get("_id")
 
     changed = False
+    catalog_succeeded = False
     if not show_id:
         return False
+
+    def record_success():
+        nonlocal changed, catalog_succeeded
+        now = int(time.time())
+        show.update(_provider_catalog_attempted_at=now, _provider_catalog_checked_at=now,
+                    _provider_catalog_failed_at=0, _provider_catalog_refresh_error="",
+                    _episode_catalog_state="loaded")
+        show["_episode_catalog_error"] = ""
+        changed = catalog_succeeded = True
+
+    def record_failure(error):
+        nonlocal changed
+        now = int(time.time())
+        show.update(_provider_catalog_attempted_at=now, _provider_catalog_failed_at=now,
+                    _provider_catalog_refresh_error=str(error))
+        changed = True
 
     @contextmanager
     def _cached_provider_fetch(provider):
@@ -456,17 +501,17 @@ def refresh_history_entry_provider_catalog(entry):
 
     pkey = title_provider_key(show)
     if pkey == "allanime":
+        allanime_show = None
         try:
             allanime_show = get_allanime_show(show_id)
-            if allanime_show:
-                if apply_provider_metadata_to_history_show(show, allanime_show):
-                    changed = True
         except Exception as e:
             debug_warn("Failed to fetch show metadata during AllAnime refresh", e)
 
         try:
             catalog = fetch_episode_catalog(show_id, ttype)
             if catalog.get("state") == "loaded":
+                if allanime_show:
+                    apply_provider_metadata_to_history_show(show, allanime_show)
                 old_avail = (show.get("availableEpisodes") or {}).get(ttype)
                 new_avail = len(catalog.get("ids", []))
 
@@ -491,31 +536,30 @@ def refresh_history_entry_provider_catalog(entry):
                 if show.get("_allanime_checked_at") != new_checked:
                     show["_allanime_checked_at"] = new_checked
                     changed = True
+                record_success()
+            else:
+                record_failure(catalog.get("error") or "Episode catalogue unavailable")
         except Exception as e:
             debug_warn("Failed to fetch episode catalog during AllAnime refresh", e)
-            # Ensure state is set even on failure to prevent repeated retries
-            if show.get("_episode_catalog_state") != "loaded":
-                show["_episode_catalog_state"] = "loaded"
-            show["_provider_catalog_checked_at"] = int(time.time())
+            record_failure(e)
     else:
         try:
             prov = _provider_for_title(show)
             invalidate = getattr(prov, "invalidate_title_cache", None)
             if callable(invalidate):
                 invalidate(show_id)
+            prov_show = None
             with _cached_provider_fetch(prov):
                 if hasattr(prov, "get_title"):
                     try:
                         prov_show = prov.get_title(show_id)
-                        if prov_show and isinstance(prov_show, dict):
-                            from .metadata import apply_provider_metadata_to_history_show
-                            if apply_provider_metadata_to_history_show(show, prov_show):
-                                changed = True
                     except Exception as e:
                         debug_warn(f"Failed to refresh title metadata for {pkey}", e)
 
                 catalog = prov.episode_catalog(show_id, ttype=ttype)
             if catalog and catalog.get("state") == "loaded":
+                if isinstance(prov_show, dict):
+                    apply_provider_metadata_to_history_show(show, prov_show)
                 old_avail = (show.get("availableEpisodes") or {}).get(ttype)
                 episode_ids = catalog.get("ids", [])
                 labels = catalog.get("labels", {})
@@ -537,22 +581,17 @@ def refresh_history_entry_provider_catalog(entry):
                                 entry["has_new_release"] = True
                         except (ValueError, TypeError):
                             pass
-            # Always mark catalog as checked, even if fetch failed
-            if show.get("_episode_catalog_state") != "loaded":
-                show["_episode_catalog_state"] = "loaded"
-                changed = True
-            show["_provider_catalog_checked_at"] = int(time.time())
+                record_success()
+            else:
+                record_failure((catalog or {}).get("error") or "Episode catalogue unavailable")
             if "aniListId" not in show and catalog and catalog.get("aniListId"):
                 show["aniListId"] = str(catalog["aniListId"])
                 changed = True
         except Exception as e:
             debug_warn(f"Failed to refresh episode catalog for {pkey}", e)
-            # Ensure state is set even on failure to prevent repeated retries
-            if show.get("_episode_catalog_state") != "loaded":
-                show["_episode_catalog_state"] = "loaded"
-            show["_provider_catalog_checked_at"] = int(time.time())
+            record_failure(e)
 
-    if not show.get("description") or not show.get("genres"):
+    if enrich and catalog_succeeded and (not show.get("description") or not show.get("genres")):
         try:
             from ..core.enrichment import enrich_show_if_missing
             if enrich_show_if_missing(show):

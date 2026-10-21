@@ -25,7 +25,7 @@ import signal
 import sys
 import termios
 import time
-from collections.abc import Sequence
+from collections.abc import Hashable, Sequence
 from typing import TYPE_CHECKING, Callable
 
 from ..core.terminal import (
@@ -111,8 +111,15 @@ _needs_redraw: bool = True
 _persistent_rendered_lines: list[str] = []
 
 
+def cached_frame_rows() -> int:
+    """Report cached frame size for diagnostics, not proof of terminal contents."""
+    return len(_persistent_rendered_lines)
+
+
 def invalidate_screen_buffer() -> None:
     global _persistent_rendered_lines
+    if _persistent_rendered_lines:
+        logging.getLogger(__name__).debug("Picker frame cache invalidated: rows=%d", cached_frame_rows())
     _persistent_rendered_lines = []
 
 
@@ -227,6 +234,9 @@ def tui_pick(
     adjust_fn: Callable[[int, int], bool] | None = None,
     frame_ready_fn: Callable[[], None] | None = None,
     input_pending_fn: Callable[[], bool] | None = None,
+    item_render_fn: Callable[[int, str, bool, int], str | None] | None = None,
+    confirmation_index: int | None = None,
+    item_key_fn: Callable[[int], Hashable] | None = None,
 ):
     """Bottom-anchored alt-screen picker with flipped (bottom-up) item list.
 
@@ -333,6 +343,16 @@ def tui_pick(
         sys.stdout.flush()
 
     options = list(options or [])
+
+    def option_keys(items):
+        if item_key_fn is None:
+            return tuple(items)
+        keys = tuple(item_key_fn(index) for index in range(len(items)))
+        if len(set(keys)) != len(keys):
+            raise ValueError("Picker item keys must be unique")
+        return keys
+
+    keys = option_keys(options)
     first_frame_pending = True
     frame_ack_pending = frame_ready_fn is not None
     loading_input = None
@@ -356,7 +376,7 @@ def tui_pick(
     last_clock_minute = int(time.time() // 60)
     last_hint_poll_time = 0.0
     last_rendered_hint_val = None
-    pending_delete_index = None
+    pending_delete_index = confirmation_index
     boundary_hint = ""
     boundary_hint_time = 0.0
     boundary_action = ""
@@ -412,6 +432,11 @@ def tui_pick(
             if eligible(option_index):
                 return pos
         return 0
+
+    def restored_selection(previous_key, previous_position):
+        selectable = [pos for pos, index in enumerate(filt) if eligible(index)]
+        matching = [pos for pos in selectable if keys[filt[pos]] == previous_key]
+        return min(matching or selectable, key=lambda pos: abs(pos - previous_position), default=0)
 
     def move_selection(filt, current, delta):
         if not filt:
@@ -551,7 +576,8 @@ def tui_pick(
             "/data/data/com.termux"
         ) or os.path.exists("/data/data/com.termux")
         top_header_n = (
-            (9 if is_tmx else 8) if (show_img and top_header_fn is not None) else 0
+            # None means no slot; an empty string retains space while loading.
+            (9 if is_tmx else 8) if (show_img and top_header_fn is not None and actual_top_header is not None) else 0
         )
         top_margin = 1 if top_header_n > 0 else 0
 
@@ -632,13 +658,16 @@ def tui_pick(
             prefix_w = _display_width(prefix)
             eff_max_w = max(10, item_max_w - prefix_w - indent_width)
             if disabled:
-                label = _truncate_display(
-                    str(options[oi] or ""), max(0, cols - 2 - prefix_w - indent_width)
-                )
+                width = max(0, cols - 2 - prefix_w - indent_width)
+                label = item_render_fn(oi, "", False, width) if item_render_fn else None
+                if label is None:
+                    label = _truncate_display(str(options[oi] or ""), width)
                 out.append(f"\033[2K{_fit_terminal_line(f'{indent}  {prefix}{label}', cols)}")
                 continue
             ptr = f"{_C_PTR}\u276f{_RST}" if is_sel and not disabled else " "
-            label = _render_item(options[oi], query, is_sel, max_w=eff_max_w)
+            label = item_render_fn(oi, query, is_sel, eff_max_w) if item_render_fn else None
+            if label is None:
+                label = _render_item(options[oi], query, is_sel, max_w=eff_max_w)
             if multi_select:
                 is_marked = oi in marked_indices
                 box = (
@@ -757,6 +786,9 @@ def tui_pick(
         elapsed = time.monotonic() - render_started
         if first_frame_pending:
             first_frame_pending = False
+            from ..core.startup import startup_first_frame
+
+            startup_first_frame()
             logging.getLogger(__name__).debug(
                 "Picker first frame ready: elapsed=%.3fs rows=%s items=%s",
                 time.monotonic() - picker_started, rows, len(options),
@@ -912,29 +944,23 @@ def tui_pick(
                 if state is None and (new_opts or live_done) and initial_query and query == initial_query:
                     query = ""
                     cursor_pos = 0
-                opts_changed = new_opts != options
+                new_keys = option_keys(new_opts)
+                opts_changed = new_opts != options or new_keys != keys
                 filt_invalid = bool(
                     filt and any(oi >= len(new_opts) or oi < 0 for oi in filt)
                 )
                 if opts_changed or filt_invalid:
                     prev_selected = (
-                        options[filt[sel]]
+                        keys[filt[sel]]
                         if filt
                         and 0 <= sel < len(filt)
                         and 0 <= filt[sel] < len(options)
                         else None
                     )
                     options = list(new_opts)
+                    keys = new_keys
                     filt = filt_list()
-                    if prev_selected is not None:
-                        for i, oi in enumerate(filt):
-                            if 0 <= oi < len(options) and options[oi] == prev_selected:
-                                sel = i
-                                break
-                        else:
-                            sel = max(0, min(sel, len(filt) - 1)) if filt else 0
-                    else:
-                        sel = max(0, min(sel, len(filt) - 1)) if filt else 0
+                    sel = restored_selection(prev_selected, sel)
                     _needs_redraw = True
                 elif not was_done and live_done:
                     filt = filt_list()
@@ -1096,11 +1122,17 @@ def tui_pick(
                 continue
 
             if pending_delete_index is not None:
+                if confirmation_index is not None:
+                    if key == "CTRL_C":
+                        raise KeyboardInterrupt
+                    result = confirmation_index if key in ("y", "Y") else -2
+                    break
                 if key in ("y", "Y"):
                     if delete_fn:
                         res = delete_fn(pending_delete_index)
                         if res:
                             options, cur_header = list(res[0] or []), res[1]
+                            keys = option_keys(options)
                             filt = filt_list()
                             sel = max(0, min(sel, len(filt) - 1)) if filt else 0
                     pending_delete_index = None
@@ -1394,6 +1426,7 @@ def tui_pick(
                         res = tab_fn(selected)
                     if res:
                         options, cur_header = list(res[0] or []), res[1]
+                        keys = option_keys(options)
                         if len(res) > 2:
                             disabled_indices.clear()
                             disabled_indices.update(res[2] or ())
@@ -1415,6 +1448,7 @@ def tui_pick(
                         res = tab_fn(selected)
                     if res:
                         options, cur_header = list(res[0] or []), res[1]
+                        keys = option_keys(options)
                         if len(res) > 2:
                             disabled_indices.clear()
                             disabled_indices.update(res[2] or ())
@@ -1423,38 +1457,23 @@ def tui_pick(
                         _persistent_rendered_lines.clear()
                         last_poster_key = None
                         _needs_redraw = True
-            elif key == "CTRL_R":
+            elif key in ("CTRL_R", "ALT_R", "F5"):
                 boundary_hint = ""
 
                 boundary_action = ""
-                if reverse_fn:
-                    selected = filt[sel] if filt and sel < len(filt) else None
-                    res = reverse_fn(selected)
-                    if res:
-                        options, cur_header = list(res[0] or []), res[1]
-                        if len(res) > 2:
-                            disabled_indices.clear()
-                            disabled_indices.update(res[2] or ())
-                        filt = filt_list()
-                        sel = first_selectable(filt)
-                        _persistent_rendered_lines.clear()
-                        last_poster_key = None
-                        _needs_redraw = True
-            elif key in ("ALT_R", "F5"):
-                boundary_hint = ""
-
-                boundary_action = ""
-                fn = alt_reverse_fn or reverse_fn
+                fn = reverse_fn if key == "CTRL_R" else alt_reverse_fn or reverse_fn
                 if fn:
                     selected = filt[sel] if filt and sel < len(filt) else None
+                    previous_key = keys[selected] if selected is not None else None
                     res = fn(selected)
                     if res:
                         options, cur_header = list(res[0] or []), res[1]
+                        keys = option_keys(options)
                         if len(res) > 2:
                             disabled_indices.clear()
                             disabled_indices.update(res[2] or ())
                         filt = filt_list()
-                        sel = first_selectable(filt)
+                        sel = restored_selection(previous_key, sel)
                         _persistent_rendered_lines.clear()
                         last_poster_key = None
                         _needs_redraw = True

@@ -5,7 +5,7 @@ from __future__ import annotations
 import shutil
 from typing import TYPE_CHECKING
 
-from .actions import ActionAvailability, normalize_key
+from .actions import ActionAvailability, ResolvedAction, normalize_key
 from .input_result import KeyResult
 from .picker_actions import loading_bindings, picker_bindings
 from .tui_actions import tui_bindings
@@ -54,6 +54,12 @@ class TuiViewBackend:
             if binding is not None:
                 context.blocked(binding)
             return KeyResult.CONSUMED
+        if view.state == "loading" and not any(item.selectable for item in view.items) and not view.selection_policy.query_input:
+            candidate = binding or loading_bindings(picker_bindings()).resolve(name)
+            editing = bool(session.position.query) and name in {"HOME", "END", "RIGHT"}
+            if candidate is not None and candidate.action.id in {"select", "move"} and not editing:
+                context.blocked(ResolvedAction(candidate.action, ActionAvailability.BLOCKED, "Waiting for results"))
+                return KeyResult.CONSUMED
         context.focus(index)
         if name in {"UP", "DOWN", "HOME", "END", "PAGE_UP", "PAGE_DOWN"}:
             session.cancel_navigation()
@@ -71,7 +77,7 @@ class TuiViewBackend:
                 return False
             if kind == "tab":
                 if view.tabs:
-                    context.tab(index, -1 if name == "BTAB" else 1)
+                    context.tab(index, -1 if name in {"BTAB", "CTRL_P"} else 1)
             elif name == "CTRL_O" and action.id == "info":
                 return False
             else:

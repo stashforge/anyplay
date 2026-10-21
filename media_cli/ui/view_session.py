@@ -630,6 +630,11 @@ class ViewSession:
         elif event.kind == "action":
             if event.value not in {action.id for action in self.current.actions}:
                 return False
+            if event.value in {"increase", "decrease"}:
+                item = self.item(event.item_id)
+                if (self.input_blocked or self.current.state == "loading" or event.item_id is None or item is None
+                        or not item.selectable or not item.adjustable):
+                    return False
         if event.kind == "back" and self._handoff is not None:
             return self.cancel_navigation()
         if self.navigation is not None:

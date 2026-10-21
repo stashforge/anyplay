@@ -14,13 +14,17 @@ def load_json_list(path, cached=None):
     return data if isinstance(data, list) else []
 
 
-def delete_history_entry(entries, show_id, translation_type):
+def delete_history_entry(entries, show_id, translation_type, *, provider_id=None):
+    from ..domain.titles import title_provider_key
+
+    provider = title_provider_key({"_provider": provider_id}) if provider_id is not None else None
     filtered = [
         entry
         for entry in entries
         if not (
-            str(entry.get("show", {}).get("_id")) == str(show_id)
-            and entry.get("translation_type") == translation_type
+            str(entry.get("show", {}).get("_id") or entry.get("show", {}).get("id")) == str(show_id)
+            and entry.get("translation_type", "sub") == translation_type
+            and (provider is None or title_provider_key(entry.get("show")) == provider)
         )
     ]
     return filtered, len(filtered) != len(entries)

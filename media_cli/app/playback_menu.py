@@ -34,7 +34,9 @@ from ..ui.picker import tui_pick
 from ..ui.picker_state import PickerState
 from ..ui.spinner import spinner_from_config
 from . import playback as playback_mod
-from .footer import context_footer
+from .details_menu_controller import run_details_menu
+from .details_menu_view import DetailsMenuOption, build_details_menu_view
+from .footer import context_footer, mode_label, provider_label
 
 _torrent_mirror_augmenting: set[tuple] = set()
 _torrent_mirror_augment_lock = threading.RLock()
@@ -110,32 +112,39 @@ def handle_action_menu_state(
     action_show = ui.ui_show_ctx
     resolve_tracking_fn(ui.search_prev_state, args, cfg, action_show)
 
-    episode_ids = app_core.ensure_episode_ids(action_show, ttype)
+    episode_ids = (
+        [] if action_show.get("_episode_catalog_state") in {"unavailable", "error"}
+        and not (action_show.get("_episode_ids") and action_show.get("_episode_ids_ttype") == ttype)
+        else app_core.ensure_episode_ids(action_show, ttype)
+    )
 
     if not episode_ids:
         err_msg = app_core.episode_catalog_error(action_show)
         app_core.set_action_feedback(action_show, err_msg)
-        ui.search_error = err_msg
-        return ui.action_prev_state or ui.search_prev_state or "SEARCH"
+
+    catalog_independent = {
+        "PROGRESS", "STATUS", "RATE", "CHANGE_MATCH", "CHANGE_PROVIDER", "LINK_ANILIST",
+        "ANIME_SONGS", "PLAYBACK_SETTINGS", "RETRY_CATALOG", "REFRESH_TITLE",
+    }
 
     ms.total_eps = len(episode_ids) or ms.total_eps
     ms.current_ep_index = episode_index_for_id(
         episode_ids, ms.current_ep, labels=ui.ui_show_ctx.get("_episode_labels")
     )
 
-    if ms.current_ep_index is None:
+    if episode_ids and ms.current_ep_index is None:
         app_core.err(f"EP {ms.current_ep} is not present in the provider catalog.")
         ui.ep_prev_state = "DETAILS"
         return "EPISODE"
 
     next_ep = (
         episode_id_at(episode_ids, ms.current_ep_index + 1)
-        if ms.current_ep_index + 1 < ms.total_eps
+        if episode_ids and ms.current_ep_index + 1 < len(episode_ids)
         else None
     )
     prev_ep = (
         episode_id_at(episode_ids, ms.current_ep_index - 1)
-        if ms.current_ep_index > 0
+        if episode_ids and ms.current_ep_index > 0
         else None
     )
     current_ep_label = playback_mod._display_episode_label(
@@ -512,10 +521,11 @@ def handle_action_menu_state(
                 opts.append("Change Match" if has_provider_link else "Link Provider")
                 acts.append("CHANGE_MATCH")
                 action_hints[opts[-1]] = "link different streaming title"
-            elif (
+            elif has_provider_link and (
                 getattr(ui, "action_prev_state", "") == "HISTORY"
                 or getattr(ui, "search_prev_state", "") == "HISTORY"
-            ) and has_provider_link:
+                or not episode_ids
+            ):
                 opts.append("Change Provider")
                 acts.append("CHANGE_PROVIDER")
                 action_hints["Change Provider"] = "switch streaming source"
@@ -534,7 +544,7 @@ def handle_action_menu_state(
                 action_hints[opts[-1]] = "link tracking title"
 
         # Episodes (if ms.total_eps > 1)
-        if ms.total_eps > 1:
+        if len(episode_ids) > 1:
             opts.append("Episodes")
             acts.append("EPISODES")
             first_lbl = playback_mod._display_episode_label(
@@ -548,10 +558,13 @@ def handle_action_menu_state(
                 if (first_lbl and last_lbl)
                 else f"browse (1–{ms.total_eps})"
             )
+        elif not episode_ids:
+            opts.append("Episodes")
+            acts.append("EPISODES")
 
-        opts.append("Anime Songs")
+        opts.append("OP/ED Songs")
         acts.append("ANIME_SONGS")
-        action_hints["Anime Songs"] = "openings & endings from AnimeThemes"
+        action_hints["OP/ED Songs"] = "openings & endings for this title"
 
         # Mirrors (if not downloads)
         if not getattr(ms, "_is_downloads", False):
@@ -567,6 +580,10 @@ def handle_action_menu_state(
         opts.append("Playback")
         acts.append("PLAYBACK_SETTINGS")
         action_hints["Playback"] = "session playback options"
+        if not episode_ids:
+            opts.append("Retry Provider")
+            acts.append("RETRY_CATALOG")
+            action_hints["Retry Provider"] = "try loading episodes again"
 
     action_hints = {}
     _build_menu()
@@ -630,7 +647,7 @@ def handle_action_menu_state(
         if not allowed:
             if reason:
                 app_core.set_action_feedback(action_show, reason)
-            return (opts, _action_hdr(0))
+            return
 
         from copy import deepcopy
         from .details_preparation import PreparedDetails, commit_details_transition
@@ -679,6 +696,7 @@ def handle_action_menu_state(
             )
             _check_watched()
             _build_menu()
+            app_core.set_action_feedback(action_show, f"Switched to {ttype.title()}.")
 
         else:
             p_name = (
@@ -693,7 +711,6 @@ def handle_action_menu_state(
             app_core.set_action_feedback(
                 action_show, f"{target_ttype.upper()} unavailable on {p_name}"
             )
-        return (opts, _action_hdr(0))
 
     def _action_hints_fn(opt_idx):
         if opt_idx < 0 or opt_idx >= len(opts):
@@ -710,7 +727,7 @@ def handle_action_menu_state(
             return f"resume {playback_mod._fmt_ep(current_ep_label)} from {app_core.format_video_time(eff_r)}"
         return action_hints.get(opt_name, "")
 
-    def _action_live_fn(q):
+    def _refresh_action_menu():
         nonlocal _last_menu_resume, _last_menu_watched, _last_menu_al_prog, _last_menu_local_prog
         cur_rt = _current_resume_time()
         cur_al_p = action_show.get("_anilist_progress")
@@ -736,84 +753,83 @@ def handle_action_menu_state(
             _hdr_cache.clear()
             _build_menu()
 
-        return (opts, _action_hdr(0), True)
+        return state_changed
+
+    def _action_view(*, playback_settings=False, setting_controls=()):
+        changed = _refresh_action_menu()
+        if changed:
+            app_core.prepare_show_display_state(
+                action_show, ttype,
+                action_show.get("_sync_enabled") if "_sync_enabled" in action_show else None,
+                prefer_watched_episodes=getattr(ms, "_is_downloads", False),
+            )
+        provider_id = action_show.get("_provider") or action_show.get("provider") or (
+            "downloads" if getattr(ms, "_is_downloads", False) else "anilist"
+        )
+        identity = action_show.get("_id")
+        if identity is None:
+            identity = action_show.get("id") or action_show.get("_folder_name") or ms.show_id
+        if identity is None or not str(identity).strip():
+            raise ValueError("Details menu requires a title identity")
+        image_key = f"{provider_id}:{identity}"
+        submenu_actions = {
+            "PROGRESS", "STATUS", "RATE", "CHANGE_MATCH", "CHANGE_PROVIDER", "LINK_ANILIST",
+            "EPISODES", "ANIME_SONGS", "MIRRORS", "DOWNLOAD_MENU", "PLAYBACK_SETTINGS",
+        }
+        choices = tuple(
+            DetailsMenuOption(
+                action, label,
+                _action_hints_fn(index) if episode_ids or action in catalog_independent else "episodes unavailable",
+                opens_menu=action in submenu_actions, enabled=bool(episode_ids) or action in catalog_independent,
+            )
+            for index, (label, action) in enumerate(zip(opts, acts, strict=True))
+        )
+        context = tuple(part for part in (
+            mode_label(ui, ms), "[Offline]" if app_core.is_confirmed_offline() else "", provider_label(action_show),
+        ) if part)
+        if playback_settings:
+            from .playback_settings_view import build_playback_settings_view
+
+            return build_playback_settings_view(
+                action_show, cfg, ms, view_id=f"details:{image_key}:playback", image_key=image_key,
+                ttype=ttype, context=context, local_only=getattr(ms, "_is_downloads", False),
+                feedback=app_core.get_active_feedback(action_show),
+                show_cover=flags.show_image and cfg.get("details_cover", True),
+                controls=setting_controls,
+            )
+        return build_details_menu_view(
+            action_show, choices, view_id=f"details:{image_key}", image_key=image_key,
+            ttype=ttype, context=context, local_only=getattr(ms, "_is_downloads", False),
+            feedback=app_core.get_active_feedback(action_show),
+            show_cover=flags.show_image and cfg.get("details_cover", True),
+            refresh_enabled=bool(
+                episode_ids and not getattr(ms, "_is_downloads", False)
+                and (action_show.get("_provider") or action_show.get("provider"))
+                and action_show.get("_has_provider_link") is not False
+            ),
+        )
 
     def _playback_settings_menu():
-        selected_idx = 0
-        picker_state = PickerState()
+        from .playback_settings_view import playback_toggle_controls
 
-        def _settings_options():
-            from .playback_player import auto_download_mode
-            dl_mode = auto_download_mode(cfg, getattr(ms, "auto_download_next", None))
-            dl_status = "Adaptive" if dl_mode == "adaptive" else "Off"
-            del_status = "ON" if getattr(ms, "auto_delete_watched", False) else "OFF"
-            buf = getattr(ms, "auto_delete_buffer", cfg.get("auto_delete_buffer", 1))
-            return (
-                [
-                    f"Auto-Download Next: {dl_status}",
-                    f"Auto-Delete Watched: {del_status}",
-                    f"Auto-Delete Buffer: {buf} ep" + ("" if buf == 1 else "s"),
-                    "Skip Settings",
-                ],
-                [
-                    "TOGGLE_AUTO_DOWNLOAD",
-                    "TOGGLE_AUTO_DELETE",
-                    "CYCLE_AUTO_DELETE_BUFFER",
-                    "SKIP_SETTINGS",
-                ],
-                {
-                    f"Auto-Download Next: {dl_status}": "session only; download next when playback is safe",
-                    f"Auto-Delete Watched: {del_status}": "session only; delete older watched downloads",
-                    f"Auto-Delete Buffer: {buf} ep" + ("" if buf == 1 else "s"): "session only; keep recent watched downloads",
-                    "Skip Settings": "AniSkip and custom opening/ending skips",
-                },
-            )
+        def download_changed(enabled):
+            from .playback_player import set_auto_download_enabled
+            set_auto_download_enabled(ms, enabled)
+            status = "Adaptive" if ms.auto_download_next == "adaptive" else "Off"
+            app_core.set_action_feedback(action_show, f"Auto-Download: {status}")
 
-        hd = picker_help("Playback", "Back", "Back")
-        hd["Left Arrow"] = "OFF / previous value at filter start; otherwise move cursor or go back"
-        hd["Right Arrow"] = "ON / next value at filter end; otherwise move cursor or open"
-        while True:
-            setting_opts, setting_acts, setting_hints = _settings_options()
-            adjustment = None
+        def delete_changed(enabled):
+            ms.auto_delete_watched = enabled
+            status = "ON" if ms.auto_delete_watched else "OFF"
+            app_core.set_action_feedback(action_show, f"Auto-Delete: {status}")
 
-            def adjust(index, direction):
-                nonlocal adjustment
-                if setting_acts[index] == "SKIP_SETTINGS":
-                    return False
-                adjustment = (index, direction)
-                return True
+        def controls():
+            return playback_toggle_controls(cfg, ms, on_download=download_changed, on_delete=delete_changed)
 
-            sidx = tui_pick(
-                flags,
-                ui,
-                "Playback",
-                setting_opts,
-                header_fn=_action_hdr,
-                hints=setting_hints,
-                help_dict=hd,
-                info_fn=app_core.make_single_show_info_fn(action_show, ui),
-                initial_selected=selected_idx,
-                state=picker_state,
-                adjust_fn=adjust,
-            )
-            direction = None
-            if sidx == -6 and adjustment is not None:
-                sidx, direction = adjustment
-            if sidx in (-2, -3) or sidx < 0:
-                return "DETAILS"
-
-            selected_idx = sidx
-            selected = setting_acts[sidx]
-            if selected == "TOGGLE_AUTO_DOWNLOAD":
-                from .playback_player import auto_download_mode
-                enabled = direction > 0 if direction is not None else auto_download_mode(cfg, getattr(ms, "auto_download_next", None)) != "adaptive"
-                ms.auto_download_next = "adaptive" if enabled else "off"
-                status = "Adaptive" if ms.auto_download_next == "adaptive" else "Off"
-                app_core.set_action_feedback(action_show, f"Auto-Download: {status}")
-            elif selected == "TOGGLE_AUTO_DELETE":
-                ms.auto_delete_watched = direction > 0 if direction is not None else not getattr(ms, "auto_delete_watched", False)
-                status = "ON" if ms.auto_delete_watched else "OFF"
-                app_core.set_action_feedback(action_show, f"Auto-Delete: {status}")
+        def activate(selected, direction):
+            control = next((control for control in controls() if control.id == f"action:{selected}"), None)
+            if control is not None:
+                control.change(1 if direction is None else direction)
             elif selected == "CYCLE_AUTO_DELETE_BUFFER":
                 current = getattr(ms, "auto_delete_buffer", cfg.get("auto_delete_buffer", 1))
                 try:
@@ -833,6 +849,13 @@ def handle_action_menu_state(
                 app_core.set_action_feedback(action_show, f"Auto-Delete Buffer: {next_buf}")
             elif selected == "SKIP_SETTINGS":
                 _skip_settings_menu()
+
+        information = app_core.make_single_show_info_fn(action_show, ui)
+        outcome = run_details_menu(
+            flags, ui, read_view=lambda: _action_view(playback_settings=True, setting_controls=controls()),
+            switch_translation=lambda: None, information=lambda: information(0), activate=activate,
+        )
+        return "QUIT" if outcome.kind == "quit" else "DETAILS"
 
     def _title_keys_for_custom_skips():
         from ..media.custom_skips import stable_title_keys
@@ -866,122 +889,78 @@ def handle_action_menu_state(
         return "OFF"
 
     def _skip_settings_menu():
-        selected_idx = 0
-        picker_state = PickerState()
+        from .skip_settings_view import SkipSettingsState, build_skip_settings_view, skip_toggle_controls
 
-        def _options():
+        def state():
             aniskip_enabled = getattr(args, "aniskip", None)
             if aniskip_enabled is None:
                 aniskip_enabled = cfg.get("aniskip", cfg.get("aniskip_enabled", True))
             auto_skip = getattr(args, "auto_skip", None)
             if auto_skip is None:
                 auto_skip = cfg.get("auto_skip", cfg.get("aniskip_auto", True))
-            status = _custom_skip_status()
-            opts2 = [
-                f"AniSkip: {'ON' if aniskip_enabled else 'OFF'}",
-                f"Auto-Skip: {'ON' if auto_skip else 'OFF'}",
-                f"Custom Skips: {status}",
-                "Edit Custom Skips",
-                "Clear Session Skips",
-                "Clear Saved Title Skips",
-            ]
-            acts2 = [
-                "TOGGLE_ANISKIP",
-                "TOGGLE_AUTO_SKIP",
-                "TOGGLE_CUSTOM_SKIPS",
-                "EDIT_CUSTOM_SKIPS",
-                "CLEAR_SESSION_SKIPS",
-                "CLEAR_SAVED_SKIPS",
-            ]
-            hints2 = {
-                opts2[0]: "global/configured AniSkip lookup",
-                opts2[1]: "auto-skip when skip intervals are available",
-                opts2[2]: "custom skips override AniSkip when present",
-                "Edit Custom Skips": "open editor for this title/provider skip form",
-                "Clear Session Skips": "remove custom skips for this title until exit",
-                "Clear Saved Title Skips": "remove persisted custom skips for this title",
-            }
-            return opts2, acts2, hints2
+            return SkipSettingsState(bool(aniskip_enabled), bool(auto_skip), _custom_skip_status())
 
-        hd = picker_help("Skip Settings", "Back", "Back")
-        hd["Left Arrow"] = "OFF at filter start; otherwise move cursor or go back"
-        hd["Right Arrow"] = "ON at filter end; otherwise move cursor or open"
-        while True:
-            opts2, acts2, hints2 = _options()
-            adjustment = None
+        def controls(snapshot):
+            return skip_toggle_controls(snapshot, on_aniskip=aniskip_changed,
+                                        on_auto_skip=auto_skip_changed, on_custom=custom_changed)
 
-            def adjust(index, direction):
-                nonlocal adjustment
-                if not acts2[index].startswith("TOGGLE_"):
-                    return False
-                adjustment = (index, direction)
-                return True
-
-            sidx = tui_pick(
-                flags,
-                ui,
-                "Skip Settings",
-                opts2,
-                header_fn=_action_hdr,
-                hints=hints2,
-                help_dict=hd,
-                info_fn=app_core.make_single_show_info_fn(action_show, ui),
-                initial_selected=selected_idx,
-                state=picker_state,
-                adjust_fn=adjust,
+        def read_view():
+            snapshot = state()
+            base = _action_view(playback_settings=True)
+            return build_skip_settings_view(
+                action_show,
+                snapshot,
+                view_id=f"{base.id}:skips", image_key=base.image.key if base.image is not None else base.id,
+                ttype=ttype, context=base.context,
+                local_only=getattr(ms, "_is_downloads", False),
+                feedback=app_core.get_active_feedback(action_show),
+                show_cover=flags.show_image and cfg.get("details_cover", True),
+                controls=controls(snapshot),
             )
-            direction = None
-            if sidx == -6 and adjustment is not None:
-                sidx, direction = adjustment
-            if sidx in (-2, -3) or sidx < 0:
+
+        def aniskip_changed(enabled):
+            args.aniskip = enabled
+            app_core.set_action_feedback(action_show, f"AniSkip: {'ON' if args.aniskip else 'OFF'}")
+
+        def auto_skip_changed(enabled):
+            args.auto_skip = enabled
+            app_core.set_action_feedback(action_show, f"Auto-Skip: {'ON' if args.auto_skip else 'OFF'}")
+
+        def custom_changed(enable):
+            keys = [str(key) for key in _title_keys_for_custom_skips() if str(key)]
+            if not keys:
+                keys = [str(ms.show_id or ms.show_title or "")]
+            disabled = getattr(ms, "custom_skip_disabled_titles", set())
+            has_custom = bool(_session_entries_for_title() or _saved_entries_for_title())
+            if enable and (_custom_skips_disabled() or has_custom):
+                for key in keys:
+                    disabled.discard(key)
+                app_core.set_action_feedback(action_show, "Custom skips enabled.")
+            elif has_custom:
+                for key in keys:
+                    disabled.add(key)
+                app_core.set_action_feedback(action_show, "Custom skips disabled for this session.")
+            else:
+                app_core.set_action_feedback(action_show, "No custom skips yet. Use Edit Custom Skips.")
+            ms.custom_skip_disabled_titles = disabled
+
+        def activate(act, direction):
+            control = next((control for control in controls(state()) if control.id == f"action:{act}"), None)
+            if control is not None:
+                control.change(1 if direction is None else direction)
                 return
-            selected_idx = sidx
-            act = acts2[sidx]
-            if act == "TOGGLE_ANISKIP":
-                current = getattr(args, "aniskip", None)
-                if current is None:
-                    current = cfg.get("aniskip", cfg.get("aniskip_enabled", True))
-                args.aniskip = direction > 0 if direction is not None else not bool(current)
-                app_core.set_action_feedback(action_show, f"AniSkip: {'ON' if args.aniskip else 'OFF'}")
-                continue
-            if act == "TOGGLE_AUTO_SKIP":
-                current = getattr(args, "auto_skip", None)
-                if current is None:
-                    current = cfg.get("auto_skip", cfg.get("aniskip_auto", True))
-                args.auto_skip = direction > 0 if direction is not None else not bool(current)
-                app_core.set_action_feedback(action_show, f"Auto-Skip: {'ON' if args.auto_skip else 'OFF'}")
-                continue
-            if act == "TOGGLE_CUSTOM_SKIPS":
-                keys = [str(key) for key in _title_keys_for_custom_skips() if str(key)]
-                if not keys:
-                    keys = [str(ms.show_id or ms.show_title or "")]
-                disabled = getattr(ms, "custom_skip_disabled_titles", set())
-                has_custom = bool(_session_entries_for_title() or _saved_entries_for_title())
-                enable = direction > 0 if direction is not None else _custom_skips_disabled()
-                if enable and (_custom_skips_disabled() or has_custom):
-                    for key in keys:
-                        disabled.discard(key)
-                    app_core.set_action_feedback(action_show, "Custom skips enabled.")
-                elif has_custom:
-                    for key in keys:
-                        disabled.add(key)
-                    app_core.set_action_feedback(action_show, "Custom skips disabled for this session.")
-                else:
-                    app_core.set_action_feedback(action_show, "No custom skips yet. Use Edit Custom Skips.")
-                ms.custom_skip_disabled_titles = disabled
-                continue
             if act == "CLEAR_SESSION_SKIPS":
                 for key in _title_keys_for_custom_skips():
                     ms.custom_skip_sessions.pop(str(key), None)
                     ms.custom_skip_disabled_titles.discard(str(key))
                 app_core.set_action_feedback(action_show, "Custom session skips cleared.")
-                continue
+                return
             if act == "CLEAR_SAVED_SKIPS":
                 app_core.clear_custom_skips(action_show, ms.show_id)
                 for key in _title_keys_for_custom_skips():
                     ms.custom_skip_disabled_titles.discard(str(key))
                 app_core.set_action_feedback(action_show, "Saved custom skips cleared.")
-                continue
+                return
             if act == "EDIT_CUSTOM_SKIPS":
                 from ..media import custom_skips
                 from ..providers import get_provider_registry
@@ -1011,7 +990,7 @@ def handle_action_menu_state(
                     )
                 except Exception as exc:
                     app_core.set_action_feedback(action_show, f"Custom skips not saved: {exc}")
-                    continue
+                    return
                 entry = {
                     "providers": spec["providers"],
                     "exclude_providers": spec["exclude_providers"],
@@ -1039,21 +1018,26 @@ def handle_action_menu_state(
                             ms.custom_skip_disabled_titles.discard(str(key))
                     app_core.set_action_feedback(action_show, "Custom skips saved for this session.")
 
-    hd7 = picker_help("Select action", "Go back", "Go back", tab_label="Toggle Sub/Dub")
-    idx = tui_pick(
-        flags,
-        ui,
-        "Select action",
-        opts,
-        header_fn=_action_hdr,
-        live_fn=_action_live_fn,
-        tab_fn=_action_tab_fn,
-        info_fn=app_core.make_single_show_info_fn(action_show, ui),
-        hints=_action_hints_fn,
-        help_dict=hd7,
+        information = app_core.make_single_show_info_fn(action_show, ui)
+        run_details_menu(
+            flags, ui, read_view=read_view, switch_translation=lambda: None,
+            information=lambda: information(0), activate=activate,
+        )
+
+    app_core.prepare_show_display_state(
+        action_show, ttype,
+        action_show.get("_sync_enabled") if "_sync_enabled" in action_show else None,
+        prefer_watched_episodes=getattr(ms, "_is_downloads", False),
+    )
+    information = app_core.make_single_show_info_fn(action_show, ui)
+    outcome = run_details_menu(
+        flags, ui, read_view=_action_view, switch_translation=_action_tab_fn,
+        information=lambda: information(0),
     )
 
-    if idx in (-2, -3):
+    if outcome.kind == "quit":
+        return "QUIT"
+    if outcome.kind == "back":
         previous = ui.action_prev_state or "DETAILS"
         if should_clear_query_on_child_left(previous, len(ms.shows) <= 1):
             ms.query_str = ""
@@ -1192,7 +1176,34 @@ def handle_action_menu_state(
         app_core.prepare_show_display_state(action_show, ttype)
         return True
 
-    a = acts[idx]
+    a = outcome.action_id
+    if a == "REFRESH_TITLE":
+        from ..ui.transition import PreparationCancelled, call_on_ui_thread
+        from .details_preparation import commit_details_transition, prepare_title_refresh
+
+        try:
+            prepared = app_core.with_loading("Refreshing title…", prepare_title_refresh, action_show, ttype)
+        except PreparationCancelled:
+            return "DETAILS"
+
+        def accept_refresh():
+            commit_details_transition(action_show, prepared)
+            if not flags.incognito_mode:
+                app_core.patch_history_entry_state({"show": action_show, "translation_type": ttype})
+            error = action_show.get("_provider_catalog_refresh_error")
+            app_core.set_action_feedback(
+                action_show, f"Couldn't refresh: {error}" if error else "Title refreshed",
+            )
+
+        call_on_ui_thread(accept_refresh)
+        return "DETAILS"
+    if a == "RETRY_CATALOG":
+        action_show.pop("_episode_catalog_state", None)
+        action_show.pop("_episode_catalog_error", None)
+        app_core.set_action_feedback(action_show, "")
+        return "DETAILS"
+    if not episode_ids and a not in catalog_independent:
+        return "DETAILS"
     pending_ep = getattr(ms, "_android_pending_watched_ep", None)
     pending_idx = getattr(ms, "_android_pending_watched_idx", None)
 
@@ -1311,8 +1322,8 @@ def handle_action_menu_state(
         return _playback_settings_menu()
 
     elif a == "TOGGLE_AUTO_DOWNLOAD":
-        from .playback_player import auto_download_mode
-        ms.auto_download_next = "off" if auto_download_mode(cfg, getattr(ms, "auto_download_next", None)) == "adaptive" else "adaptive"
+        from .playback_player import auto_download_mode, set_auto_download_enabled
+        set_auto_download_enabled(ms, auto_download_mode(cfg, getattr(ms, "auto_download_next", None)) != "adaptive")
         status = "Adaptive" if ms.auto_download_next == "adaptive" else "Off"
         app_core.set_action_feedback(action_show, f"Auto-Download: {status}")
         return "DETAILS"
