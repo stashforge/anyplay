@@ -5,6 +5,7 @@ from copy import deepcopy
 from urllib.parse import urlencode, urljoin
 
 from ...media.sources import quality_from_dimensions
+from ...services.requirements import dependency_hint_messages, optional_dependency_hint, optional_python
 from .anipm_sources import _https_url
 
 log = logging.getLogger(__name__)
@@ -12,14 +13,12 @@ _CHANNELS = {"sub": ("sub", "Sub"), "subhard": ("subHard", "Hard Sub"),
              "dub": ("dub", "Dub"), "dubhard": ("dubHard", "Hard Dub")}
 
 
-def _variants(source: dict, fetch_playlist) -> list[dict]:
-    import m3u8
-
+def _variants(source: dict, fetch_playlist, parser) -> list[dict]:
     url = source["streamUrl"]
     text = fetch_playlist(url, extra_hdrs=source.get("headers") or {})
     if not text.lstrip().startswith("#EXTM3U"):
         return []
-    master = m3u8.loads(text, uri=url)
+    master = parser.loads(text, uri=url)
     variants = []
     seen = set()
     for playlist in master.playlists:
@@ -49,6 +48,8 @@ def _variants(source: dict, fetch_playlist) -> list[dict]:
 def collect_mirrors(base: dict, language: str, availability: dict, *, resolve_channel, fetch_playlist) -> dict:
     ordered = [language, language + "hard"]
     sources = []
+    parser_checked = False
+    parser = None
     for priority, channel in enumerate(ordered):
         flag, label = _CHANNELS[channel]
         if channel != language and availability.get(flag) is not True:
@@ -57,11 +58,14 @@ def collect_mirrors(base: dict, language: str, availability: dict, *, resolve_ch
             payload = base if channel == language else resolve_channel(channel)
             rows = (payload or {}).get("episode", {}).get("sourceUrls", [])
             for original in rows:
+                if not parser_checked:
+                    parser = optional_python("m3u8")
+                    parser_checked = True
                 source = deepcopy(original)
                 source.update(sourceName=f"AniPM [{label}]", channel=channel, priority=priority,
                               allow_ytdlp_expansion=False)
                 try:
-                    variants = _variants(source, fetch_playlist)
+                    variants = _variants(source, fetch_playlist, parser) if parser is not None else []
                 except Exception as exc:
                     log.warning("AniPM %s playlist expansion failed (%s)", channel, type(exc).__name__)
                     variants = []
@@ -70,4 +74,12 @@ def collect_mirrors(base: dict, language: str, availability: dict, *, resolve_ch
             log.warning("AniPM %s channel unavailable (%s)", channel, type(exc).__name__)
     result = deepcopy(base)
     result["episode"]["sourceUrls"] = sources
+    parser_hint = optional_dependency_hint("m3u8", fallback="Adaptive playback", feature="individual qualities")
+    hints = [hint for hint in dependency_hint_messages(base) if hint != parser_hint]
+    if sources and parser_checked and parser is None:
+        hints.insert(0, parser_hint)
+    if hints:
+        result["dependency_hints"] = hints
+    else:
+        result.pop("dependency_hints", None)
     return result

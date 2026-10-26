@@ -8,32 +8,15 @@ import time
 import urllib.parse
 
 from .base import BaseExtractor
+from .routing import ROUTES
 
 
 class DoodExtractor(BaseExtractor):
     """Extractor for DoodStream and clones."""
 
     name = "DoodStream"
-    domains = [
-        "dood.to",
-        "dood.watch",
-        "doodstream.com",
-        "ds2play.com",
-        "d0o0d.com",
-        "do0od.com",
-        "d000d.com",
-        "dood.so",
-        "dood.la",
-        "dood.ws",
-        "dood.sh",
-        "dood.cx",
-        "dood.pm",
-        "dood.re",
-        "playmogo.com",
-        "dooodster.com",
-        "doodstream.co",
-        "ds2video.com",
-    ]
+    domains = ROUTES['doodstream'].domains
+    patterns = ROUTES['doodstream'].patterns
 
     def extract(
         self,

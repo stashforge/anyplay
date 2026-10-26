@@ -1,8 +1,7 @@
 """Subcommand builders for parser."""
 
 from ..constants import APP_NAME
-from ..providers import available_providers
-
+from ..provider_manifest import available_provider_metadata
 from .args_common import (
     ANILIST_COMMAND_TARGETS,
     MinimalHelpFormatter,
@@ -21,13 +20,13 @@ from .args_common import (
 def add_search_subcommand(commands, provider_id=None):
     if provider_id == "animethemes":
         return add_animethemes_subcommand(commands)
-    provider = available_providers().get(provider_id)
+    provider = available_provider_metadata().get(provider_id)
     query_usage = f"{provider_id}:<query>" if provider_id else "[provider:]<query>"
     search = commands.add_parser(
         "search",
         help="Search and watch anime",
         usage=f"{APP_NAME} search {query_usage} [options]",
-        description=(f"Search and watch anime from {provider.name}." if provider else
+        description=(f"Search and watch anime from {provider['name']}." if provider else
                      "Search using your default provider, or prefix the query with a provider ID."),
         epilog=(
             "Examples:\n"
@@ -260,6 +259,35 @@ def add_auth_subcommand(commands):
     return auth
 
 
+def add_companion_subcommand(commands):
+    companion = commands.add_parser(
+        "companion",
+        help="Pair or check the Android WebView companion",
+        usage=f"{APP_NAME} companion <pair|status>",
+        description=(
+            "Manage the Android WebView companion from Termux.\n\n"
+            "Actions:\n"
+            "  pair           Connect once using a hidden pairing code\n"
+            "  status         Check saved pairing and service status without starting it"
+        ),
+        epilog=(
+            "Examples:\n"
+            f"  {APP_NAME} companion pair\n"
+            f"  {APP_NAME} companion status"
+        ),
+        add_help=False,
+        formatter_class=MinimalHelpFormatter,
+    )
+    _configure_help_parser(companion)
+    companion._positionals.title = "Arguments"
+    companion.add_argument("companion_action", choices=["pair", "status"], metavar="<action>")
+    global_options = companion.add_argument_group("Global options")
+    _add_debug_option(global_options, suppress_default=True)
+    _add_plain_option(global_options, suppress_default=True)
+    global_options.add_argument("-h", "--help", action="help", help="Show this help message and exit")
+    return companion
+
+
 def add_providers_subcommand(commands):
     providers = commands.add_parser(
         "providers",
@@ -437,6 +465,7 @@ def register_all_subcommands(commands, search_provider=None):
     add_history_subcommand(commands)
     add_continue_subcommand(commands)
     add_auth_subcommand(commands)
+    add_companion_subcommand(commands)
     add_providers_subcommand(commands)
     add_completion_subcommand(commands)
     add_config_subcommand(commands)

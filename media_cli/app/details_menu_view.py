@@ -46,6 +46,8 @@ def build_details_menu_view(
     feedback: str = "",
     show_cover: bool = True,
     refresh_enabled: bool = False,
+    loading_message: str = '',
+    loading_indicator: str = '',
 ) -> ViewSpec:
     """Callers supply identity, choices and context; no fetching or action decisions."""
     if not isinstance(show_cover, bool):
@@ -81,7 +83,8 @@ def build_details_menu_view(
             include_cover_status=False,
         )
         if feedback
-        else None,
+        else (Footer(statuses=(FooterStatus(loading_message, StatusKind.LOADING, indicator=loading_indicator),), include_cover_status=False)
+              if loading_message else None),
         actions=(
             ViewAction("select", "select", ("ENTER", "RIGHT")),
             ViewAction("translation", "Sub/Dub", ("TAB",)),

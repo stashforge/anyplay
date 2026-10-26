@@ -4,17 +4,18 @@ import os
 from pathlib import Path
 
 from ..constants import APP_NAME
-from ..providers import available_providers
+from ..provider_manifest import available_provider_metadata
 
 BASE_COMMANDS = (
     "search", "downloads", "anilist", "history", "continue",
-    "auth", "providers", "completion", "config", "logs",
+    "auth", "companion", "providers", "completion", "config", "logs",
 )
 ANILIST_LISTS = (
     "airing", "watching", "planning", "completed", "dropped", "paused", "rewatching",
     "search",
 )
 AUTH_ACTIONS = ("login", "logout", "status", "token")
+COMPANION_ACTIONS = ("pair", "status")
 SHELLS = ("bash", "zsh", "fish")
 QUALITIES = ("best", "1080p", "720p", "480p")
 PLAYERS = ("mpv", "rex", "mpvrx", "mpvrex", "vlc", "next")
@@ -24,7 +25,7 @@ SPINNERS = ("braille", "dots", "line", "arc", "simple")
 ANILIST_SORTS = ("recent", "title", "score", "progress")
 BOOLEANS = ("true", "false")
 
-PROVIDERS = tuple(sorted(available_providers()))
+PROVIDERS = tuple(sorted(available_provider_metadata()))
 SEARCH_PROVIDERS = PROVIDERS + ("animethemes",)
 PROVIDER_PREFIXES = tuple(provider + ":" for provider in SEARCH_PROVIDERS)
 COMMANDS = BASE_COMMANDS
@@ -69,6 +70,7 @@ RESUME_OPTIONS = (
 )
 
 AUTH_OPTIONS = ("--raw", "--debug", "--plain", "--no-tui", "-h", "--help")
+COMPANION_OPTIONS = ("--debug", "--plain", "--no-tui", "-h", "--help")
 
 PROVIDERS_OPTIONS = ("--debug", "--plain", "--no-tui", "-h", "--help")
 
@@ -236,6 +238,13 @@ def bash_completion():
         auth)
             COMPREPLY=( $(compgen -W "{_words(AUTH_ACTIONS)} {_words(AUTH_OPTIONS)}" -- "$cur") )
             ;;
+        companion)
+            if [[ $COMP_CWORD -eq 2 ]]; then
+                COMPREPLY=( $(compgen -W "{_words(COMPANION_ACTIONS)} {_words(COMPANION_OPTIONS)}" -- "$cur") )
+            else
+                COMPREPLY=( $(compgen -W "{_words(COMPANION_OPTIONS)}" -- "$cur") )
+            fi
+            ;;
         providers)
             COMPREPLY=( $(compgen -W "{_words(PROVIDERS_OPTIONS)}" -- "$cur") )
             ;;
@@ -265,6 +274,7 @@ commands=(
   'history:Browse watch history'
   'continue:Continue the last watched title'
   'auth:Login or logout from AniList'
+  'companion:Pair or check the Android WebView companion'
   'providers:List available providers'
   'completion:Generate shell completion'
   'config:Manage or open configuration'
@@ -277,6 +287,13 @@ case $words[2] in
     ;;
   auth)
     _arguments '*:: :(({_words(AUTH_ACTIONS)} {_words(AUTH_OPTIONS)}))'
+    ;;
+  companion)
+    if [[ $CURRENT -eq 3 ]]; then
+      _arguments '*:: :(({_words(COMPANION_ACTIONS)} {_words(COMPANION_OPTIONS)}))'
+    else
+      _arguments '*:: :(({_words(COMPANION_OPTIONS)}))'
+    fi
     ;;
   providers)
     _arguments '*:: :(({_words(PROVIDERS_OPTIONS)}))'
@@ -330,6 +347,12 @@ def fish_completion():
             "'__fish_seen_subcommand_from auth' -a "
             f"{item}"
         )
+    for item in COMPANION_ACTIONS:
+        lines.append(
+            f"complete -c {APP_NAME} -n "
+            "'__fish_seen_subcommand_from companion; and not __fish_seen_subcommand_from pair status' -a "
+            f"{item}"
+        )
     for item in SHELLS:
         lines.append(
             f"complete -c {APP_NAME} -n "
@@ -356,6 +379,7 @@ def fish_completion():
         "history": RESUME_OPTIONS,
         "continue": RESUME_OPTIONS,
         "auth": AUTH_OPTIONS,
+        "companion": COMPANION_OPTIONS,
         "providers": PROVIDERS_OPTIONS,
         "completion": COMPLETION_OPTIONS,
         "config": CONFIG_OPTIONS,
@@ -384,6 +408,21 @@ def generate_completion(shell):
     if shell == "fish":
         return fish_completion()
     raise ValueError(f"Unsupported shell: {shell}")
+
+
+def handle_completion_command(args):
+    if getattr(args, "completion_install", False):
+        path = install_completion(args.completion_shell)
+        print(f"Installed {args.completion_shell} completion:")
+        print(path)
+        if args.completion_shell == "bash":
+            print(f"Restart your shell, or run: source {path}")
+        elif args.completion_shell == "zsh":
+            print("Ensure ~/.zfunc is in fpath, then run: compinit")
+        elif args.completion_shell == "fish":
+            print("Restart fish, or run: exec fish")
+        return
+    print(generate_completion(args.completion_shell), end="")
 
 
 def completion_install_path(shell, home=None):

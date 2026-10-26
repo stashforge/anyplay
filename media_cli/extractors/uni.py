@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import json
-import re
 import urllib.parse
 from typing import Any
 
 from .base import BaseExtractor
+from .routing import ROUTES
 
 KEY = b"kiemtienmua911ca"
 IV = b"1234567890oiuytr"
@@ -17,13 +17,8 @@ class UniExtractor(BaseExtractor):
     """Extractor for uns.bio (Uni) player used by AllAnime/Mkissa."""
 
     name = "Uni"
-    domains = [
-        "uns.bio",
-        "watchanime.uns.bio",
-    ]
-    patterns = [
-        re.compile(r"uns\.bio", re.IGNORECASE),
-    ]
+    domains = ROUTES['uni'].domains
+    patterns = ROUTES['uni'].patterns
 
     def extract(
         self,
@@ -44,6 +39,10 @@ class UniExtractor(BaseExtractor):
             video_id = parsed.path.rstrip("/").split("/")[-1]
         if not video_id:
             return []
+
+        from ..services.requirements import require_python
+
+        require_python("cryptography.hazmat.primitives.ciphers", "Uni extraction")
 
         embedder_host = "mkissa.to"
         api_url = f"{origin}/api/v1/video?id={video_id}&w=1920&h=1080&r={embedder_host}"

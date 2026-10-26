@@ -28,6 +28,7 @@ import time
 from collections.abc import Hashable, Sequence
 from typing import TYPE_CHECKING, Callable
 
+from ..core.api import ProviderDependencyError
 from ..core.terminal import (
     absolute_terminal_frame as _absolute_terminal_frame,
 )
@@ -338,8 +339,12 @@ def tui_pick(
         from . import display as _display
 
         _display.enter_alt_screen()
+    except ProviderDependencyError:
+        tty_file.close()
+        raise
     except Exception:
-        sys.stdout.write("\033[?1049h\033[2J\033[?25l")
+        from .terminal_output import write_terminal
+        write_terminal("\033[?1049h\033[2J\033[?25l")
         sys.stdout.flush()
 
     options = list(options or [])
@@ -803,9 +808,6 @@ def tui_pick(
 
     old_status_sink = reporting._status_sink
     reporting.set_status_sink(lambda msg, color: True)
-    old_stderr = sys.stderr
-    devnull_stderr = open(os.devnull, "w")
-    sys.stderr = devnull_stderr
     filt = []
     try:
         tty_file.write(b"\033[?25l")
@@ -1052,7 +1054,8 @@ def tui_pick(
 
             # A destination must drain loading keys before paint; acknowledgement
             # may release the caller's pending state only after that paint.
-            if frame_ack_pending and not partial_input:
+            # Paint the first ready frame before the idle keyboard wait too.
+            if (frame_ack_pending or first_frame_pending) and not partial_input:
                 render(filt)
                 _needs_redraw = False
             if loading_active:
@@ -1584,11 +1587,6 @@ def tui_pick(
         except Exception:
             pass
         reporting.set_status_sink(old_status_sink)
-        sys.stderr = old_stderr
-        try:
-            devnull_stderr.close()
-        except Exception:
-            pass
 
     return result
 

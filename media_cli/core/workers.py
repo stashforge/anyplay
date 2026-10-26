@@ -7,6 +7,7 @@ import threading
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import Future
+from contextvars import copy_context
 from dataclasses import dataclass
 from itertools import islice
 from types import TracebackType
@@ -37,12 +38,13 @@ class DaemonExecutor:
 
     def submit(self, function: Callable[P, T], *args: P.args, **kwargs: P.kwargs) -> Future[T]:
         future: Future[T] = Future()
+        context = copy_context()
 
         def run() -> None:
             if not future.set_running_or_notify_cancel():
                 return
             try:
-                future.set_result(function(*args, **kwargs))
+                future.set_result(context.run(function, *args, **kwargs))
             except BaseException as exc:
                 future.set_exception(exc)
 

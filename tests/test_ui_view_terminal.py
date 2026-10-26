@@ -36,6 +36,13 @@ import time
 from dataclasses import asdict, replace
 from types import SimpleNamespace
 
+def terminal_marker(*values, sep=' ', end='\\n', flush=True):
+    # Test-control markers are explicit instrumentation, not production output.
+    # Use a separate writer so application stdout containment remains exercised.
+    sys.__stdout__.write(sep.join(str(value) for value in values) + end)
+    if flush:
+        sys.__stdout__.flush()
+
 def forbid_network(event, args):
     if event in {'socket.connect', 'socket.getaddrinfo'}:
         raise AssertionError('Terminal tests must not access the network')

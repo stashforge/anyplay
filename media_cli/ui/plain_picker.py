@@ -18,6 +18,7 @@ from weakref import WeakKeyDictionary
 from .picker_render import match
 from .picker_state import PickerState
 from .row_layout import DEFAULT_ROW_INDENTATION, RowIndentation, RowKind
+from .terminal_output import write_terminal
 
 ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 # Partial pipe lines must survive adapter restarts without retaining dead streams.
@@ -122,6 +123,9 @@ def plain_pick(
     text-buffer read-ahead when switching between legacy and structured views.
     """
 
+    if output_fn is print:
+        output_fn = lambda text: write_terminal(str(text) + '\n')
+
     if not isinstance(row_indentation, RowIndentation):
         raise TypeError("row_indentation requires RowIndentation")
     if state is not None:
@@ -196,11 +200,14 @@ def plain_pick(
 
     def read_input(prompt):
         if input_fd is None:
+            if input_fn is input:
+                write_terminal(prompt)
+                return input_fn('')
             return input_fn(prompt)
         if poll_input:
             _emit(prompt, output_fn)
         else:
-            sys.stdout.write(prompt)
+            write_terminal(prompt)
         sys.stdout.flush()
         pending = None if terminal_input else _pipe_input_buffers.setdefault(sys.stdin, bytearray())
 

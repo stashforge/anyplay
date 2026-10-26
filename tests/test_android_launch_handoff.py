@@ -13,6 +13,8 @@ from media_cli.ui import player_screen
 from media_cli.ui.actions import ActionAvailability
 from media_cli.ui.transition import PreparationCancelled
 
+pytestmark = pytest.mark.usefixtures("installed_android_launcher")
+
 
 def test_android_dispatch_runs_on_owner_and_only_wait_runs_on_worker(monkeypatch):
     owner = threading.current_thread()

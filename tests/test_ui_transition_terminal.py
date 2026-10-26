@@ -62,7 +62,7 @@ terminal_images.mark_active()
 terminal_images.clear_terminal_images = lambda: 'SOURCE_IMAGE_REMOVED'
 display.with_loading('Fetching destination', lambda: time.sleep(0.35))
 preserved = terminal_images._active
-print('PREPARATION COMPLETE', flush=True)
+terminal_marker('PREPARATION COMPLETE')
 display.restore_terminal()
 finish(preserved)
 '''
@@ -87,7 +87,7 @@ def header(index):
     calls += 1
     if calls == 2:
         time.sleep(0.2)
-        print('DESTINATION HEADER PREPARED', flush=True)
+        terminal_marker('DESTINATION HEADER PREPARED')
     return 'DESTINATION FRAME READY'
 
 finish(picker_module.tui_pick(flags, ui, 'Destination', ['Open'], header_fn=header, return_on_quit=True))

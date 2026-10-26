@@ -27,6 +27,8 @@ assert not any('firefox' in str(command).lower() for command in commands), comma
 
 
 def test_browser_setup_waits_until_first_request_and_runs_once(monkeypatch):
+    # Legacy non-Linux cookie setup; desktop isolation has dedicated coverage.
+    monkeypatch.setattr("media_cli.services.browser_access.integration.linux_desktop", lambda: False)
     monkeypatch.delenv("ANIMEPAHE_COOKIE", raising=False)
     monkeypatch.delenv("ANIMEPAHE_USER_AGENT", raising=False)
     cookies = Mock(return_value={"cf_clearance": "browser-cookie"})
@@ -38,8 +40,7 @@ def test_browser_setup_waits_until_first_request_and_runs_once(monkeypatch):
     factory = Mock(return_value=session)
     monkeypatch.setattr(animepahe, "_find_browser_cookies", cookies)
     monkeypatch.setattr(animepahe, "_detect_firefox_user_agent", user_agent)
-    monkeypatch.setattr(animepahe, "CURL_CFFI_AVAILABLE", True)
-    monkeypatch.setattr(animepahe, "cffi_requests", SimpleNamespace(Session=factory))
+    monkeypatch.setattr(animepahe, "optional_curl_requests", lambda: SimpleNamespace(Session=factory))
 
     provider = animepahe.AnimePaheProvider()
     cookies.assert_not_called()
@@ -60,7 +61,7 @@ def test_explicit_cookie_and_user_agent_do_not_need_browser_lookup(monkeypatch):
     user_agent = Mock()
     monkeypatch.setattr(animepahe, "_find_browser_cookies", cookies)
     monkeypatch.setattr(animepahe, "_detect_firefox_user_agent", user_agent)
-    monkeypatch.setattr(animepahe, "CURL_CFFI_AVAILABLE", False)
+    monkeypatch.setattr(animepahe, "optional_curl_requests", lambda: None)
     provider = animepahe.AnimePaheProvider()
     assert provider._get_session() is None
     assert provider._cookies == {"cf_clearance": "explicit"}

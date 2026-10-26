@@ -7,6 +7,7 @@ import urllib.parse
 from typing import Any
 
 from .base import BaseExtractor
+from .routing import ROUTES
 from .unpack import JsUnpacker
 
 
@@ -14,19 +15,8 @@ class MixDropExtractor(BaseExtractor):
     """Extractor for MixDrop video hosts."""
 
     name = "MixDrop"
-    domains = [
-        "mixdrop.co",
-        "mixdrop.to",
-        "mixdrop.sx",
-        "mixdrop.bz",
-        "mixdrop.ch",
-        "mixdrop.ag",
-        "mixdrop.gl",
-        "mixdrop.club",
-    ]
-    patterns = [
-        re.compile(r"mixdrop\.[a-z]+/(?:[ef])/([a-zA-Z0-9]+)", re.IGNORECASE),
-    ]
+    domains = ROUTES['mixdrop'].domains
+    patterns = ROUTES['mixdrop'].patterns
 
     def extract(
         self,

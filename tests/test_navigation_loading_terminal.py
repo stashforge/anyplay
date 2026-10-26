@@ -28,7 +28,7 @@ def complete():
 threading.Thread(target=complete, daemon=True).start()
 def pick(*args, **kwargs):
     if args[2] == 'DESTINATION':
-        print('QUEUE-DESTINATION-INPUT', flush=True)
+        terminal_marker('QUEUE-DESTINATION-INPUT')
         time.sleep(0.2)
     return picker_module.terminal_pick(*args, **kwargs)
 result = run_view_session(flags, ui, session, picker=pick, poster_manager=manager)

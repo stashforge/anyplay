@@ -49,6 +49,52 @@ pipx install -e .
 
 You also need a player. On desktop, `mpv` is the main target. On Android, install one of the supported external players.
 
+The normal install includes `requests`, `curl-cffi`, `beautifulsoup4`, `m3u8`, and
+`pycryptodome`. Individual qualities and common provider/parser support do not need
+extra installation groups. Libraries load when used; playback and download tools
+are checked when the selected action needs them.
+
+Optional groups are `native-crypto` (the `cryptography` backend, including Uni
+extraction), `legacy-browser` (the older Playwright fallback), and `dev` (tests and
+build tools). For a fresh install with the crypto backend, use
+`pipx install '.[native-crypto]'` from the checkout. Existing extra names remain
+supported. Shared Linux verification uses installed Chromium and does not require
+Playwright; the Android companion is a separate APK.
+
+See [installation dependencies](docs/installation-dependencies.md) for the group
+and system-tool distinctions. These instructions describe this checkout; the
+published package may not yet include these changes.
+
+Senshi on Termux additionally needs the paired Anyplay WebView companion (version
+8 or newer). It starts the service only when source extraction needs it; it does
+not require Node.js, bubblewrap or a browser window. The existing private pairing
+is reused. Missing pairing or an outdated companion does not trigger automatic
+pairing or fall back to an unrestricted JavaScript runtime. The service stops
+after its existing idle timeout; Linux continues to use its isolated Node worker.
+
+### Android WebView Companion
+
+Get the companion APK from
+[Anyplay WebView releases](https://github.com/stashforge/anyplay-webview/releases).
+AnimePahe/Kwik website access requires companion versionCode 10 or newer.
+Use a companion-enabled Anyplay build; older public CLI releases do not contain
+this integration yet.
+
+```bash
+anyplay companion pair
+anyplay companion status
+```
+
+Pairing opens the companion if setup is needed. Tap **Pair**, copy the temporary
+code, return to Termux and enter it at the hidden prompt. A valid saved pairing
+is kept without opening setup again. No separate pairing script is required.
+
+`status` checks the saved pairing and, if already running, authenticates the
+service. It does not start the service, open the app, or change pairing. A paired
+but stopped service is normal; normal provider access starts it when needed.
+These commands are for Termux only and require no APK update for an existing
+versionCode 10 installation.
+
 ## Quick Start
 
 Search for a title:

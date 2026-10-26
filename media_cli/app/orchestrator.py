@@ -15,7 +15,7 @@ from ..core.startup import startup_checkpoint
 from .. import app as handlers
 from ..constants import APP_NAME, LEGACY_APP_NAMES
 from ..cli.args import parse_cli_args
-from ..cli.completion import generate_completion, install_completion
+from ..cli.completion import handle_completion_command
 from ..context import FLAGS as runtime_flags
 from ..context import MachineState, UiState
 from ..core.anilist import (
@@ -31,7 +31,6 @@ from ..core.anilist import (
     save_anilist_token,
     search_anilist,
 )
-from ..core.api import ProviderDependencyError
 from ..core.processes import (
     kill_active_subprocesses,
 )
@@ -58,7 +57,7 @@ from ..providers import (
     _DEFAULT_PROVIDER_ID,
     available_providers,
     disabled_providers_from_config,
-    get_provider,
+    get_provider as get_provider,
     get_provider_registry,
     provider_key,
 )
@@ -476,7 +475,7 @@ from ..ui.terminal_runtime import terminal_application
 
 
 @terminal_application
-def main() -> None:
+def main(parsed=None) -> None:
     from .. import app_core
 
     def _force_exit(sig, frame):
@@ -484,10 +483,18 @@ def main() -> None:
 
     signal.signal(signal.SIGINT, _force_exit)
 
-    args, pa = parse_cli_args()
+    args, pa = parse_cli_args() if parsed is None else parsed
     runtime_flags.debug_mode = bool(getattr(args, "debug", False))
     configure_file_logging(debug=runtime_flags.debug_mode)
     startup_checkpoint("arguments")
+
+    if getattr(args, "command", None) == "companion":
+        from ..cli.companion import handle_companion_command
+
+        result = handle_companion_command(args.companion_action)
+        if result:
+            raise SystemExit(result)
+        return
 
     cfg = None
     if getattr(args, "command", None) not in ("config", "logs") and not getattr(args, "completion_shell", None) and not getattr(args, "show_search_history", False) and not getattr(args, "clear_search_history", False) and not getattr(args, "list_providers", False):
@@ -501,18 +508,7 @@ def main() -> None:
 
     if getattr(args, "completion_shell", None):
         globals()["SUPPRESS_FINAL_CURSOR_RESTORE"] = True
-        if getattr(args, "completion_install", False):
-            path = install_completion(args.completion_shell)
-            print(f"Installed {args.completion_shell} completion:")
-            print(path)
-            if args.completion_shell == "bash":
-                print(f"Restart your shell, or run: source {path}")
-            elif args.completion_shell == "zsh":
-                print("Ensure ~/.zfunc is in fpath, then run: compinit")
-            elif args.completion_shell == "fish":
-                print("Restart fish, or run: exec fish")
-            return
-        print(generate_completion(args.completion_shell), end="")
+        handle_completion_command(args)
         return
 
     if getattr(args, "show_search_history", False):
@@ -687,8 +683,6 @@ def main() -> None:
         )
         return
 
-    app_core.check_deps()
-    startup_checkpoint("dependencies")
     if cfg is None:
         cfg = load_config()
     if getattr(args, "provider", None) is None:
@@ -872,14 +866,6 @@ def main() -> None:
         or _DEFAULT_PROVIDER_ID
     )
     ui.ui_provider_ctx = provider_key(active_provider)
-    p_inst = get_provider(ui.ui_provider_ctx)
-    if hasattr(p_inst, "validate_environment"):
-        try:
-            p_inst.validate_environment()
-        except ProviderDependencyError as exc:
-            from ..ui.display import fatal_terminal_exit
-
-            fatal_terminal_exit(str(exc))
     quality = args.quality or cfg.get("quality", "1080p")
 
     from .playback_player import initial_auto_download_mode

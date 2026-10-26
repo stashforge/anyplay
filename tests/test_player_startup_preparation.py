@@ -88,6 +88,7 @@ def test_socket_wait_cooperatively_cancels_and_releases_started_process(monkeypa
 
     cancelled = threading.Event()
     closed = []
+    monkeypatch.setattr("shutil.which", lambda _: "/test/mpv")
     monkeypatch.setattr(mpv, "cleanup_mpv_runtime", lambda path: closed.append(path))
     monkeypatch.setattr(mpv, "create_mpv_runtime", lambda: ("runtime", "socket", "conf", "chapters", "lua"))
     monkeypatch.setattr(mpv.subprocess, "Popen", lambda *a, **kw: SimpleNamespace(poll=lambda: None, wait=lambda **kw: None))

@@ -81,6 +81,7 @@ def call_on_ui_thread(function: Callable[[], T]) -> T:
     if abandoned.is_set():
         raise PreparationCancelled
     calls.put_nowait(invoke)
+    _worker.wake.set()
     while not done.wait(0.01):
         if abandoned.is_set():
             raise PreparationCancelled
@@ -115,14 +116,18 @@ def run_preparation(
     started = time.monotonic()
     abandoned = threading.Event()
     ui_calls: queue.Queue[Callable[[], None]] = queue.Queue(maxsize=1)
+    wake = threading.Event()
 
     def work() -> None:
         _worker.active = True
         _worker.ui_calls = ui_calls
+        _worker.wake = wake
         _worker.abandoned = abandoned
         _worker.status_cb = status_cb
         try:
-            value = prepare()
+            from ..services.browser_access.operation import browser_operation
+            with browser_operation(cancel=abandoned, status=status_cb):
+                value = prepare()
             outcome = PreparedResult(value=value)
         except BaseException as exc:
             _log.debug("Preparation failed", exc_info=True)
@@ -135,6 +140,7 @@ def run_preparation(
             _log.debug("Discarded abandoned preparation after %.3fs", time.monotonic() - started)
         else:
             result.put_nowait(outcome)
+            wake.set()
 
     context = copy_context()
     thread = threading.Thread(target=lambda: context.run(work), name="anyplay-preparation", daemon=True)
@@ -147,6 +153,8 @@ def run_preparation(
     completed: PreparedResult[T] | None = None
     try:
         while True:
+            # Clear before reading either queue so a later enqueue cannot be lost.
+            wake.clear()
             tick()
             if cancelled():
                 raise PreparationCancelled
@@ -166,9 +174,11 @@ def run_preparation(
                     on_ui_return()
             try:
                 if completed is None:
-                    completed = result.get(timeout=0.04)
+                    completed = result.get_nowait()
             except queue.Empty:
-                on_wait()
+                # Either a ready screen or the final result can wake the UI owner.
+                if not wake.wait(0.04):
+                    on_wait()
                 continue
             # Consume any input that arrived at completion before accepting data.
             tick()

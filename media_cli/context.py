@@ -211,6 +211,9 @@ class MachineState:
     just_picked_anime: bool = False
     """True immediately after a title was selected from search results."""
 
+    _details_catalog_session: str = ''
+    _details_catalog_loading_target: tuple[object, object, str] | None = None
+
     # Episode data cache (avoid re-fetching for the same episode)
     ep_cache_key: object = None
     """Cache key ``(show_id, episode, ttype)`` for the last fetched episode."""

@@ -3,56 +3,117 @@
 from __future__ import annotations
 
 import importlib
-import json
-import os
 import pkgutil
 from collections import OrderedDict
-from collections.abc import Iterable
-from threading import Lock
-from typing import Any, Dict
+from collections.abc import Iterable, Iterator, Mapping
+from threading import Lock, RLock
+from typing import Any
 
-_PROVIDER_ALIASES = {
-    "anidbapp": "anidb",
-    "allanime": "mkissa",
-}
-
-class _RegistryDict(dict):
-    def __getitem__(self, key):
-        k = str(key).casefold() if isinstance(key, str) else key
-        if k not in self and k in _PROVIDER_ALIASES:
-            k = _PROVIDER_ALIASES[k]
-        return super().__getitem__(k)
-
-    def get(self, key, default=None):
-        k = str(key).casefold() if isinstance(key, str) else key
-        if k not in self and k in _PROVIDER_ALIASES:
-            k = _PROVIDER_ALIASES[k]
-        return super().get(k, default)
-
-# Load the JSON registry
-_REGISTRY_PATH = os.path.join(os.path.dirname(__file__), "registry.json")
-try:
-    with open(_REGISTRY_PATH, encoding="utf-8") as _f:
-        PROVIDER_REGISTRY = _RegistryDict(json.load(_f).get("providers", {}))
-except Exception:
-    PROVIDER_REGISTRY = _RegistryDict()
-
+from ..provider_manifest import (
+    _PROVIDER_ALIASES,
+    PROVIDER_REGISTRY,
+    disabled_providers_from_config,
+)
+from ..provider_manifest import _RegistryDict as _RegistryDict
+from .shared.models import title_provider_id as title_provider_id
+from .shared.models import title_provider_key as title_provider_key
 
 _SKIPPED_MODULES = {"shared"}
-_DISABLED_PROVIDERS = set()
+_DISABLED_PROVIDERS: set[str] = set()
 _DEFAULT_PROVIDER_ID = "miruro"
 _SESSION_PROVIDERS: OrderedDict[tuple, Any] = OrderedDict()
 _SESSION_PROVIDERS_LOCK = Lock()
 _MAX_SESSION_PROVIDERS = 16
 
-from .shared.models import (
-    title_provider_id,
-    title_provider_key,
-)
+_PROVIDER_MODULES = {key: meta["module"] for key, meta in PROVIDER_REGISTRY.items() if meta.get("module")}
+_LOAD_LOCK = RLock()
+
+
+def _canonical_key(key: str) -> str:
+    key = str(key).casefold()
+    return _PROVIDER_ALIASES.get(key, key)
+
+
+class _ProviderFactories(Mapping[str, type]):
+    """Known factory keys are metadata; indexing imports just that factory."""
+
+    def __init__(self):
+        self._loaded: dict[str, type] = {}
+
+    def __iter__(self) -> Iterator[str]:
+        return iter((*_PROVIDER_MODULES, *_PROVIDER_ALIASES))
+
+    def __len__(self) -> int:
+        return len(_PROVIDER_MODULES) + len(_PROVIDER_ALIASES)
+
+    def __contains__(self, key: object) -> bool:
+        return isinstance(key, str) and _canonical_key(key) in _PROVIDER_MODULES
+
+    def __getitem__(self, key: str) -> type:
+        key = _canonical_key(key)
+        if key not in _PROVIDER_MODULES:
+            raise KeyError(key)
+        with _LOAD_LOCK:
+            if key not in self._loaded:
+                from ..services.requirements import require_provider_operation
+
+                require_provider_operation(key, "import", metadata=PROVIDER_REGISTRY.get(key, {}))
+                module = importlib.import_module(f"{__name__}.{_PROVIDER_MODULES[key]}")
+                factory = next((cls for cls in _provider_classes_from_module(module)
+                                if str(getattr(cls, "id", "")).casefold() == key), None)
+                if factory is None:
+                    raise ImportError(f"Provider {key} has no matching factory")
+                self._loaded[key] = factory
+            return self._loaded[key]
+
+
+class _ProviderInstances(Mapping[str, Any]):
+    def __init__(self):
+        self._loaded: dict[str, Any] = {}
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(PROVIDER_FACTORIES)
+
+    def __len__(self) -> int:
+        return len(PROVIDER_FACTORIES)
+
+    def __contains__(self, key: object) -> bool:
+        return key in PROVIDER_FACTORIES
+
+    def __getitem__(self, key: str):
+        key = _canonical_key(key)
+        with _LOAD_LOCK:
+            if key not in self._loaded:
+                instance = PROVIDER_FACTORIES[key]()
+                instance.metadata = PROVIDER_REGISTRY.get(key, {})
+                instance.domains = list(instance.metadata.get("domains") or ())
+                self._loaded[key] = instance
+            return self._loaded[key]
+
+
+class _AvailableProviders(Mapping[str, Any]):
+    """Snapshot active keys without materializing each provider value."""
+
+    def __init__(self, keys: Iterable[str]):
+        self._keys = dict.fromkeys(keys)
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._keys)
+
+    def __len__(self) -> int:
+        return len(self._keys)
+
+    def __contains__(self, key: object) -> bool:
+        return key in self._keys
+
+    def __getitem__(self, key: str):
+        if key not in self._keys:
+            raise KeyError(key)
+        return PROVIDERS[key]
 
 
 def _provider_classes_from_module(module) -> list[type]:
-    classes = []
+    classes: list[type] = []
     provider_class = getattr(module, "PROVIDER_CLASS", None)
     if provider_class is not None:
         if isinstance(provider_class, (list, tuple)):
@@ -71,12 +132,14 @@ def _provider_classes_from_module(module) -> list[type]:
 def discover_provider_factories(
     package_path: Iterable[str] | None = None,
     package_name: str | None = None,
-) -> dict[str, type]:
+) -> Mapping[str, type]:
     """Discover provider classes from provider modules.
 
-    A built-in provider module only needs to expose ``PROVIDER_CLASS`` or
-    ``PROVIDER_CLASSES``.  The registry handles the rest.
+    Built-ins declare their module in registry.json and load on indexing. Custom
+    package discovery remains an explicit, eager operation for compatibility.
     """
+    if package_path is None and package_name is None:
+        return PROVIDER_FACTORIES
     package_path = __path__ if package_path is None else package_path
     package_name = __name__ if package_name is None else package_name
 
@@ -92,7 +155,7 @@ def discover_provider_factories(
             logging.getLogger(__name__).debug("Failed to load provider module %s: %s", name, exc)
             continue
         for provider_class in _provider_classes_from_module(module):
-            provider_id = str(provider_class.id).casefold()
+            provider_id = str(getattr(provider_class, "id", "")).casefold()
             if provider_id in _DISABLED_PROVIDERS:
                 continue
             factories[provider_id] = provider_class
@@ -103,68 +166,21 @@ def discover_provider_factories(
     return factories
 
 
-PROVIDER_FACTORIES = discover_provider_factories()
-if _DEFAULT_PROVIDER_ID not in PROVIDER_FACTORIES:
-    try:
-        from .miruro import MiruroProvider
-        PROVIDER_FACTORIES[_DEFAULT_PROVIDER_ID] = MiruroProvider
-    except Exception:
-        pass
-
-# Order PROVIDERS according to registry.json ordering
-PROVIDERS: dict[str, Any] = {}
-for p_id in PROVIDER_REGISTRY:
-    if p_id in PROVIDER_FACTORIES:
-        try:
-            PROVIDERS[p_id] = PROVIDER_FACTORIES[p_id]()
-        except Exception:
-            pass
-for p_id, factory in PROVIDER_FACTORIES.items():
-    if p_id not in PROVIDERS and p_id not in _DISABLED_PROVIDERS:
-        try:
-            PROVIDERS[p_id] = factory()
-        except Exception:
-            pass
-
-# Attach metadata directly to instances for backward compatibility,
-# and so providers can self-reference their JSON domains.
-for p_id, p_inst in PROVIDERS.items():
-    meta = PROVIDER_REGISTRY.get(p_id, {})
-    p_inst.metadata = meta
-    p_inst.domains = meta.get("domains", [])
-
-ALLANIME = PROVIDERS.get("mkissa") or PROVIDERS[_DEFAULT_PROVIDER_ID]
+PROVIDER_FACTORIES = _ProviderFactories()
+PROVIDERS = _ProviderInstances()
 
 
-def _split_provider_list(value: Any) -> set[str]:
-    if value is None:
-        return set()
-    if isinstance(value, (list, tuple, set)):
-        raw_items = value
-    else:
-        raw_items = str(value).replace(";", ",").split(",")
-    out = set()
-    for item in raw_items:
-        key = str(item or "").strip().casefold()
-        if not key:
-            continue
-        out.add(_PROVIDER_ALIASES.get(key, key))
-    return out
-
-
-def disabled_providers_from_config(config: dict[str, Any] | None = None) -> set[str]:
-    if config is None:
-        try:
-            from ..state import paths
-            from ..state.config import load_config_file
-            config = load_config_file(paths.CONFIG_PATH, disabled=True)
-        except Exception:
-            config = {}
-    return _split_provider_list((config or {}).get("disabled_providers", ""))
+def __getattr__(name: str):
+    if name == "ALLANIME":
+        return PROVIDERS["mkissa"]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def available_providers():
-    return {k: v for k, v in PROVIDERS.items() if k in PROVIDER_REGISTRY and is_provider_active(k)}
+    disabled = _DISABLED_PROVIDERS | disabled_providers_from_config()
+    return _AvailableProviders(key for key, meta in PROVIDER_REGISTRY.items()
+                               if key in PROVIDERS and key not in disabled
+                               and meta.get("status", "active") not in {"broken", "disabled", "deprecated"})
 
 def get_provider_registry() -> dict[str, Any]:
     return PROVIDER_REGISTRY
@@ -173,9 +189,7 @@ def get_provider_registry() -> dict[str, Any]:
 def is_provider_active(provider_id: str) -> bool:
     if not provider_id:
         return False
-    key = str(provider_id).casefold()
-    if key not in PROVIDERS and key in _PROVIDER_ALIASES:
-        key = _PROVIDER_ALIASES[key]
+    key = _canonical_key(provider_id)
     if key in _DISABLED_PROVIDERS or key not in PROVIDERS:
         return False
     if key in disabled_providers_from_config():
@@ -187,7 +201,7 @@ def is_provider_active(provider_id: str) -> bool:
 
 
 def provider_key(provider_id=_DEFAULT_PROVIDER_ID):
-    key = str(provider_id or "").casefold()
+    key = _canonical_key(provider_id or "")
     if is_provider_active(key):
         return key
     alias = _PROVIDER_ALIASES.get(key)

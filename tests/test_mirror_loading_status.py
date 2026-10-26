@@ -1,3 +1,5 @@
+import sys
+from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
@@ -11,6 +13,8 @@ from media_cli.ui.loading_model import LoadingProgress
 @pytest.mark.parametrize("next_state", [
     "complete", "progress", "back", "error", "counted-back", "counted-error",
     "torrent-back", "torrent-error", "torrent-complete", "torrent-handoff", "torrent-combined",
+    "hint-complete", "hint-fresh", "hint-added", "hint-cleared",
+    "dependency-error", "dependency-alternative",
 ])
 def test_mirror_loading_states_use_shared_status_and_retire(monkeypatch, next_state):
     from media_cli.app import playback_menu as menu
@@ -30,6 +34,12 @@ def test_mirror_loading_states_use_shared_status_and_retire(monkeypatch, next_st
             stats.update(resolved=1, total=3, status_msg="Resolving provider")
     key = ("show", "1", "sub", "anikoto", "best")
     data = {"episode": {"sourceUrls": []}}
+    hint_case = next_state.startswith("hint-")
+    if hint_case:
+        monkeypatch.setitem(sys.modules, "m3u8", None)
+        if next_state != "hint-added":
+            data["dependency_hints"] = ["Adaptive playback; install m3u8 for individual qualities."]
+    cache = [data]
 
     class ObservedStatus(BackgroundLoadingStatus):
         def read(self, active, *, progress=None):
@@ -50,12 +60,36 @@ def test_mirror_loading_states_use_shared_status_and_retire(monkeypatch, next_st
     monkeypatch.setattr(menu.streams, "start_bg_resolve", lambda *args: None)
     monkeypatch.setattr(menu, "_torrent_mirror_augmenting", {key} if torrent_at_entry else set())
     monkeypatch.setattr(menu, "_start_torrent_mirror_augmentation", lambda *args: None)
-    monkeypatch.setattr(menu.app_core, "_get_cached_ep_data", lambda *args: data)
+    monkeypatch.setattr(menu.app_core, "_get_cached_ep_data", lambda *args: None if next_state == "hint-fresh" else cache[0])
+    if next_state == "hint-fresh":
+        monkeypatch.setattr(menu.app_core, "with_loading", lambda *args, **kwargs: data)
     monkeypatch.setattr(menu.app_core, "_set_cached_ep_data", lambda *args: None)
     monkeypatch.setattr(menu.app_core, "_stream_snapshot", lambda *args: [])
     monkeypatch.setattr(menu.app_core, "make_single_show_info_fn", lambda *args: None)
+    from media_cli.services.requirements import MissingPythonDependency
+
+    failure = MissingPythonDependency(("bs4",), "Filemoon extraction")
+    dependency_case = next_state.startswith("dependency-")
+    monkeypatch.setattr(menu.streams, "resolution_feedback", lambda key: (
+        (("Some sources unavailable; install beautifulsoup4 for native extraction.",), failure)
+        if dependency_case else ((), None)
+    ))
+    if next_state == "dependency-alternative":
+        monkeypatch.setattr(menu.app_core, "_stream_snapshot", lambda *a: [{"link": "good", "source_name": "Good", "resolution": "720p"}])
 
     def pick(*args, **kwargs):
+        if dependency_case:
+            assert "install beautifulsoup4" not in strip_ansi(kwargs["header"]), "Loading takes precedence"
+            alive[0] = False
+            stats.update(resolved=0, failed=1, total=1)
+            if next_state == "dependency-error":
+                kwargs["live_fn"]()
+                pytest.fail("Missing requirements must reach the owning CLI")
+            else:
+                rows, header, done = kwargs["live_fn"]()
+                assert rows and done
+                assert "install beautifulsoup4" in strip_ansi(header)
+            return -2
         if torrent_at_entry:
             header = strip_ansi(kwargs["header"])
             assert reads == [False]
@@ -86,7 +120,7 @@ def test_mirror_loading_states_use_shared_status_and_retire(monkeypatch, next_st
             assert "Loading sources…" in strip_ansi(kwargs["header"])
             assert reads == [True]
             assert checks == [(False, None)]
-        if next_state in ("complete", "progress"):
+        if next_state in ("complete", "progress", "hint-complete", "hint-fresh", "hint-added", "hint-cleared"):
             alive[0] = next_state == "progress"
             stats.update(resolved=1, total=2 if alive[0] else 1)
             _, header, done = kwargs["live_fn"]()
@@ -94,6 +128,19 @@ def test_mirror_loading_states_use_shared_status_and_retire(monkeypatch, next_st
             assert ("checking (1/2)" in strip_ansi(header)) is alive[0]
             assert done is not alive[0]
             assert reads == [True, False]
+            if hint_case and next_state != "hint-added":
+                assert "install m3u8 for individual qualities" in strip_ansi(header)
+                assert "Esc=back" in strip_ansi(header)
+                assert "may fail" not in strip_ansi(header)
+            if next_state in ("hint-added", "hint-cleared"):
+                replacement = deepcopy(data)
+                if next_state == "hint-added":
+                    replacement["dependency_hints"] = ["Adaptive playback; install m3u8 for individual qualities."]
+                else:
+                    replacement.pop("dependency_hints", None)
+                cache[0] = replacement
+                _, refreshed_header, _ = kwargs["live_fn"]()
+                assert ("individual qualities" in strip_ansi(refreshed_header)) is (next_state == "hint-added")
             if next_state == "progress":
                 assert checks[-1] == (True, LoadingProgress(1, 2))
                 stats.update(resolved=1, failed=1, total=3)
@@ -112,10 +159,14 @@ def test_mirror_loading_states_use_shared_status_and_retire(monkeypatch, next_st
     def run():
         return menu.handle_mirrors_state(
             CliFlags(), UiState(), MachineState(show_id="show", current_ep="1"),
-            {}, SimpleNamespace(provider="anikoto"), "sub", lambda *args: False,
+            {}, SimpleNamespace(provider="anipm" if hint_case else "anikoto"), "sub", lambda *args: False,
         )
 
-    if next_state.endswith("error"):
+    if next_state == "dependency-error":
+        with pytest.raises(MissingPythonDependency) as caught:
+            run()
+        assert caught.value is failure
+    elif next_state.endswith("error"):
         with pytest.raises(ValueError, match="Picker stopped"):
             run()
     else:

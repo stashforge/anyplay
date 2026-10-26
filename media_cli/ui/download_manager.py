@@ -1110,7 +1110,7 @@ def prompt_download_exit_cli(active_count: int, queued_count: int, tty_fd: int |
         ]
         return "".join(lines)
 
-    out = sys.stdout
+    from .terminal_output import write_terminal
     alt_already_active = False
     try:
         from . import display as _display
@@ -1120,12 +1120,11 @@ def prompt_download_exit_cli(active_count: int, queued_count: int, tty_fd: int |
     alt_screen_open = False
     try:
         if alt_already_active:
-            out.write("\033[H\033[2J\033[?25l")
+            write_terminal("\033[H\033[2J\033[?25l")
         else:
-            out.write("\033[?1049h\033[H\033[2J\033[?25l")
+            write_terminal("\033[?1049h\033[H\033[2J\033[?25l")
             alt_screen_open = True
-        out.write(_prompt_frame())
-        out.flush()
+        write_terminal(_prompt_frame())
     except Exception:
         alt_screen_open = False
 
@@ -1153,7 +1152,8 @@ def prompt_download_exit_cli(active_count: int, queued_count: int, tty_fd: int |
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
     except Exception:
         try:
-            ans = input("Select [1]: ").strip()
+            write_terminal("Select [1]: ")
+            ans = input().strip()
             if ans in ("2", "f", "F"):
                 return "FINISH_QUIT"
             elif ans in ("3", "c", "C", "esc", "Esc"):
@@ -1165,14 +1165,12 @@ def prompt_download_exit_cli(active_count: int, queued_count: int, tty_fd: int |
         if alt_already_active:
             try:
                 request_download_manager_repaint()
-                out.write("\033[H\033[2J\033[?25l")
-                out.flush()
+                write_terminal("\033[H\033[2J\033[?25l")
             except Exception:
                 pass
         elif alt_screen_open:
             try:
-                out.write("\033[?25h\033[?1049l")
-                out.flush()
+                write_terminal("\033[?25h\033[?1049l")
             except Exception:
                 pass
 
@@ -2091,6 +2089,9 @@ def run_download_manager(worker: DownloadWorker | None = None, standalone: bool 
         'QUIT': User chose to quit application.
         'DONE': All downloads finished (standalone mode).
     """
+    from .stderr_capture import begin_stderr_capture
+
+    begin_stderr_capture()
     if worker is None:
         worker = get_global_worker()
     worker.start()
@@ -2119,7 +2120,8 @@ def run_download_manager(worker: DownloadWorker | None = None, standalone: bool 
         from . import terminal_images
         clear_images = terminal_images.replace_for_frame(has_image=False)
         if clear_images:
-            sys.stdout.write(clear_images)
+            from .terminal_output import write_terminal
+            write_terminal(clear_images)
             sys.stdout.flush()
         res = curses.wrapper(_runner)
     except curses.error:
@@ -2141,7 +2143,7 @@ def run_download_manager(worker: DownloadWorker | None = None, standalone: bool 
         if runtime is not None:
             runtime.ensure_raw()
 
-    if not standalone:
+    if not standalone or res == "BACK":
         try:
             from .display import enter_alt_screen, set_alt_screen_active
             from .picker import invalidate_screen_buffer
@@ -2150,7 +2152,8 @@ def run_download_manager(worker: DownloadWorker | None = None, standalone: bool 
             invalidate_screen_buffer()
         except Exception:
             try:
-                sys.stdout.write("\033[?1049h\033[2J\033[?25l")
+                from .terminal_output import write_terminal
+                write_terminal("\033[?1049h\033[2J\033[?25l")
                 sys.stdout.flush()
             except Exception:
                 pass

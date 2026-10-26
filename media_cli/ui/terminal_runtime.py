@@ -100,6 +100,9 @@ class TerminalRuntime:
     def _acquire(self) -> bool:
         self._assert_available()
         if self._fd is not None:
+            from .stderr_capture import begin_stderr_capture
+
+            begin_stderr_capture()
             return True
         if self._attempted:
             return False
@@ -114,6 +117,9 @@ class TerminalRuntime:
             # Keep this snapshot for the entire scope, including suspensions.
             self._original_attrs = termios.tcgetattr(self._fd)
             tty.setraw(self._fd, termios.TCSANOW)
+            from .stderr_capture import begin_stderr_capture
+
+            begin_stderr_capture()
         except (OSError, termios.error, ValueError):
             try:
                 self._release()
@@ -126,15 +132,20 @@ class TerminalRuntime:
         return True
 
     def _release(self) -> None:
+        from .stderr_capture import end_stderr_capture
+
         fd, attrs = self._fd, self._original_attrs
         self._fd = None
         self._original_attrs = None
-        if fd is not None:
-            try:
-                if attrs is not None:
-                    termios.tcsetattr(fd, termios.TCSAFLUSH, attrs)
-            finally:
-                os.close(fd)
+        try:
+            end_stderr_capture()
+        finally:
+            if fd is not None:
+                try:
+                    if attrs is not None:
+                        termios.tcsetattr(fd, termios.TCSAFLUSH, attrs)
+                finally:
+                    os.close(fd)
 
     def fileno(self) -> int:
         """Return the owned descriptor; consumers must duplicate before closing."""

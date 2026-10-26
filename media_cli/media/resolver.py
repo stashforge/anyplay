@@ -1,11 +1,12 @@
 """Resolve provider source entries into playable streams."""
 
 import re
+import shutil
 import urllib.request
 
+from ..core.api import ProviderDependencyError
 from ..core.terminal import sanitize_terminal_text
 from ..extractors import find_extractor
-from ..providers.allanime import get_clock_links
 from ..services.http import (
     REFERER,
     SSL_CTX,
@@ -14,6 +15,7 @@ from ..services.http import (
     is_alive,
     request_json,
 )
+from ..services.requirements import add_dependency_hints, dependency_failure_hint, dependency_hint_messages
 from .dash import resolve_dash_raw_urls
 from .proxy_rules import proxy_filtered_headers
 from .sources import decrypt_url, expand_wixmp, source_priority
@@ -23,6 +25,12 @@ from .ytdlp import resolve_ytdlp_embed
 
 def _info(message):
     return None
+
+
+def get_clock_links(*args, **kwargs):
+    from ..providers.allanime import get_clock_links as resolve_clock_links
+
+    return resolve_clock_links(*args, **kwargs)
 def _ok(message):
     return None
 def _warn(message):
@@ -127,6 +135,7 @@ def _pre_resolved_stream(source, name, priority, warn):
                 if def_sub:
                     stream_dict["subtitle_url"] = def_sub
     for key in (
+        "ip_version",
         "expiresAt",
         "audio_url",
         "audio_tracks",
@@ -200,6 +209,9 @@ def _extract_mp4upload(url):
 
 def resolve_source(source, silent=False):
     streams = _resolve_source_impl(source, silent=silent)
+    hints = dependency_hint_messages(source)
+    if hints:
+        streams = [add_dependency_hints(stream, hints) for stream in streams or []]
     raw_name = str(source.get("sourceName") or "")
     clean_name = sanitize_terminal_text(raw_name).title()
     for s in streams or []:
@@ -351,10 +363,11 @@ def _resolve_source_impl(source, silent=False):
                 })
         return result
 
-    extractor = find_extractor(url)
-    if extractor:
-        info(f"[{name}] extracting via {extractor.name} ...")
-        try:
+    dependency_error = None
+    try:
+        extractor = find_extractor(url)
+        if extractor:
+            info(f"[{name}] extracting via {extractor.name} ...")
             native_streams = extractor.extract(
                 url,
                 name=name,
@@ -367,8 +380,15 @@ def _resolve_source_impl(source, silent=False):
                 ok(f"[{name}] {extractor.name} found {len(native_streams)} stream(s)")
                 return native_streams
             warn(f"[{name}] {extractor.name} found no streams; falling back to yt-dlp ...")
-        except Exception as exc:
-            warn(f"[{name}] {extractor.name} failed: {exc}; falling back to yt-dlp ...")
+    except ProviderDependencyError as exc:
+        dependency_error = exc
+    except Exception as exc:
+        warn(f"[{name}] native extraction failed: {exc}; falling back to yt-dlp ...")
+
+    def with_hints(streams):
+        if dependency_error:
+            return [add_dependency_hints(stream, [dependency_failure_hint(dependency_error, fallback=True)]) for stream in streams]
+        return streams
 
     if "mp4upload.com" in url.casefold():
         info(f"[{name}] extracting direct mp4 ...")
@@ -392,7 +412,12 @@ def _resolve_source_impl(source, silent=False):
                 "source_priority": priority,
                 "android_safe": True,
             })
-            return result
+            return with_hints(result)
 
+    if dependency_error and not shutil.which("yt-dlp"):
+        raise dependency_error
     info(f"[{name}] extracting via yt-dlp ...")
-    return resolve_ytdlp_embed(url, name=name, priority=priority, ok=ok, warn=warn, subtitles=source.get("subtitles"))
+    fallback_streams = resolve_ytdlp_embed(url, name=name, priority=priority, ok=ok, warn=warn, subtitles=source.get("subtitles"))
+    if not fallback_streams and dependency_error:
+        raise dependency_error
+    return with_hints(fallback_streams)

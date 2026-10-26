@@ -41,6 +41,7 @@ def test_browser_cookie_lookup_is_domain_aware(monkeypatch, tmp_path):
 
 
 def test_animepahe_uses_browser_response_when_cookie_retry_is_not_enough(monkeypatch):
+    monkeypatch.setattr("media_cli.services.browser_access.integration.linux_desktop", lambda: False)
     class FakeCookies(dict):
         def update(self, values):
             super().update(values)
@@ -75,6 +76,7 @@ def test_animepahe_uses_browser_response_when_cookie_retry_is_not_enough(monkeyp
 
 
 def test_animepahe_treats_http_200_security_page_as_cloudflare(monkeypatch):
+    monkeypatch.setattr("media_cli.services.browser_access.integration.linux_desktop", lambda: False)
     class FakeCookies(dict):
         def update(self, values):
             super().update(values)

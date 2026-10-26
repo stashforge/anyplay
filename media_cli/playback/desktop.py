@@ -2,11 +2,15 @@
 
 import logging
 from contextlib import nullcontext
+from urllib.parse import urlsplit
 
 from ..media.proxy_rules import proxy_filtered_headers
 from ..media.urls import validate_optional_referer, validate_stream_url
+from ..services.network_affinity import bound_proxy_options
 
 log = logging.getLogger(__name__)
+# Central switch for the mpv HLS subtitle seek-duplication workaround.
+_HLS_LOCAL_SUBTITLES = True
 
 
 class PlaybackPreparationCancelled(Exception):
@@ -38,6 +42,7 @@ def play_desktop(
         cancel_check=None,
         prepare_torrent_fn=None,
         prepare_subtitles_fn=None,
+        prepare_subtitle_files_fn=None,
         prepare_proxy_fn=None,
         start_player_fn=None,
         playback_input_scope=None):
@@ -104,6 +109,32 @@ def play_desktop(
             return ("CANCELLED", 0, 0, 0, 0)
         except Exception:
             pass
+
+    prepared_subtitles = None
+    is_hls = str(stream.get("type") or "").lower() == "hls" or urlsplit(url).path.lower().endswith(".m3u8")
+    if _HLS_LOCAL_SUBTITLES and is_hls and subtitles:
+        from ..media.mpv_subtitle_files import SubtitleFilesCancelled, prepare_subtitle_files
+        try:
+            prepared_subtitles = (prepare_subtitle_files_fn or prepare_subtitle_files)(
+                subtitles, headers=headers, referer=referer, cancel_check=cancel_check,
+            )
+            subtitles = prepared_subtitles.subtitles
+        except (SubtitleFilesCancelled, PlaybackPreparationCancelled, KeyboardInterrupt) as exc:
+            if prepared_torrent is not None:
+                prepared_torrent.close()
+            if isinstance(exc, KeyboardInterrupt):
+                raise
+            return ("CANCELLED", 0, 0, 0, 0)
+        except Exception as exc:
+            log.warning("Subtitle file preparation unavailable (%s); retaining remote tracks", type(exc).__name__)
+
+    from ..core import reporting
+    from ..services.requirements import dependency_hint_messages
+
+    hints = list(dependency_hint_messages(stream))
+    hints.extend(getattr(prepared_subtitles, "dependency_hints", ()))
+    for hint in dict.fromkeys(hints):
+        reporting.warn(hint)
 
     subtitle_url = ""
     if subtitles:
@@ -179,6 +210,7 @@ def play_desktop(
     proxy_server = None
     if (
         stream.get("requires_proxy")
+        or stream.get("ip_version") == 4
         or "uwucdn.top" in url
         or "kwik." in referer
         or "megap." in url
@@ -192,13 +224,18 @@ def play_desktop(
                 headers,
                 stream_type=stream.get("type", "mp4"),
                 title=media_title,
-                subtitles=subtitles,
+                subtitles=[track for track in subtitles if not str(track.get("url") or track.get("file") or "").startswith("/")],
                 target_player="mpv",
                 flixcloud_w_payload=stream.get("flixcloud_w_payload"),
                 flixcloud_xor_mask=stream.get("flixcloud_xor_mask"),
+                **bound_proxy_options(stream),
             )
+            if stream.get("ip_version") == 4:
+                audio_url, audio_tracks = "", []
             replace_active_local_proxy(proxy_server)
         except (PlaybackPreparationCancelled, KeyboardInterrupt) as exc:
+            if prepared_subtitles is not None:
+                prepared_subtitles.close()
             if prepared_torrent is not None:
                 prepared_torrent.close()
             if isinstance(exc, KeyboardInterrupt):
@@ -206,6 +243,13 @@ def play_desktop(
             return ("CANCELLED", 0, 0, 0, 0)
         except Exception:
             proxy_server = None
+            if stream.get("ip_version") == 4:
+                if prepared_subtitles is not None:
+                    prepared_subtitles.close()
+                if prepared_torrent is not None:
+                    prepared_torrent.close()
+                log.warning("Stream network proxy unavailable; refusing a direct connection")
+                return ("ERROR", 0, 0, 0, 0)
 
     log.debug(
         "Playback selection: show_id=%r MAL=%r episode=%r source=%r resolution=%r remote_skips=%s",
@@ -258,6 +302,8 @@ def play_desktop(
     except PlaybackPreparationCancelled:
         return ("CANCELLED", 0, 0, 0, 0)
     finally:
+        if prepared_subtitles is not None:
+            prepared_subtitles.close()
         if proxy_server is not None:
             from ..media.local_proxy import cleanup_active_local_proxy
             cleanup_active_local_proxy()

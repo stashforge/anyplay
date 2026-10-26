@@ -72,6 +72,9 @@ class MpvIpc:
             if self.client:
                 self.running = True
             return
+        from ..services.requirements import require_executable
+
+        require_executable("mpv", "Desktop playback")
         cleanup_mpv_runtime(self.runtime_dir)
         self.runtime_dir, self.socket_path, self.conf_path, self.chapters_path, self.lua_path = create_mpv_runtime()
         try:
@@ -243,8 +246,10 @@ class MpvIpc:
             "yes" if self.aniskip_auto else "no",
             "clear" if self._suppress_skip_chapters or not intervals else "keep",
         )
-        _logger.debug("AniSkip activated %d validated interval(s), duration=%r",
-                      len(intervals), self.props.get("duration"))
+        _logger.debug("Skip intervals activated: source=%s intervals=%r duration=%r",
+                      "provider" if any(row.get("source") == "provider" for row in intervals) else "aniskip",
+                      [(row.get("type"), row.get("start"), row.get("end")) for row in intervals],
+                      self.props.get("duration"))
 
     def _attach_pending_external_tracks(self):
         if getattr(self, "_pending_audio_tracks", None):

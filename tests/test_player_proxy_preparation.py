@@ -117,3 +117,29 @@ def test_accepted_proxy_is_activated_on_owner_and_cleaned_after_playback(monkeyp
     }, get_resume_time=lambda *a: 0, get_preferred_mirror=lambda *a: {},
         update_stream_info=lambda info: None, prepare_proxy_fn=engine._prepare_proxy_for_playback)[0] == "QUIT"
     assert calls == ["activate", "load", "cleanup"]
+
+
+@pytest.mark.parametrize('failed', [False, True])
+def test_bound_desktop_audio_cannot_bypass_proxy(monkeypatch, failed):
+    calls = []
+    def start(*args, **kwargs):
+        assert kwargs['ip_version'] == 4
+        assert kwargs['audio_url'] == 'https://cdn.test/audio.m3u8'
+        if failed:
+            raise OSError('unavailable')
+        return 'http://127.0.0.1/master.m3u8', object()
+    def load(*args, **kwargs):
+        calls.append(args)
+        assert args[0] == 'http://127.0.0.1/master.m3u8'
+        assert args[6] == ''
+        assert kwargs['audio_tracks'] == []
+    monkeypatch.setattr(local_proxy, 'replace_active_local_proxy', lambda *a: None)
+    monkeypatch.setattr(local_proxy, 'cleanup_active_local_proxy', lambda: None)
+    ipc = SimpleNamespace(props={}, load=load, wait_for_playback=lambda *a: ('QUIT', 0))
+    result = desktop.play_desktop(ipc, 'Example', '1', {
+        'link': 'https://cdn.test/video.m3u8', 'type': 'hls', 'requires_proxy': True,
+        'ip_version': 4, 'audio_url': 'https://cdn.test/audio.m3u8',
+    }, get_resume_time=lambda *a: 0, get_preferred_mirror=lambda *a: {},
+        update_stream_info=lambda info: None, prepare_proxy_fn=start)
+    assert result[0] == ('ERROR' if failed else 'QUIT')
+    assert len(calls) == (0 if failed else 1)

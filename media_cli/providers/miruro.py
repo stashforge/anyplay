@@ -48,22 +48,9 @@ def _decode_pipe_response(encoded_str: str) -> dict:
 
 
 def _load_curl_requests():
-    try:
-        from curl_cffi import requests
-        return requests
-    except Exception as exc:
-        from ..constants import APP_NAME
-        from ..core.api import ProviderDependencyError
-        raise ProviderDependencyError(
-            f"\n\033[91m[ERROR] Miruro requires the 'curl_cffi' library.\n"
-            f"        Failed to import 'curl_cffi': {exc}\n\n"
-            f"        How to install 'curl_cffi':\n"
-            f"          pipx:    pipx inject {APP_NAME} curl_cffi\n"
-            f"          pip:     pip install curl_cffi\n"
-            f"          termux:  pkg install python-curl-cffi\n\n"
-            f"        Alternatively, switch to another provider:\n"
-            f"          {APP_NAME} --provider anikoto\033[0m\n"
-        )
+    from ..services.requirements import require_python
+
+    return require_python("curl_cffi.requests", "Miruro")
 
 
 def _fetch_pipe_urllib(encoded_req: str, domain: str, headers: dict[str, str]) -> dict | None:

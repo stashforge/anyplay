@@ -9,6 +9,8 @@ import urllib.request
 import uuid
 
 from ..services.http import SSL_CTX_SECURE
+from ..services.network_affinity import ipv4_curl_options, urlopen_ipv4
+from ..services.requirements import optional_curl_requests
 from .proxy_rules import (
     new_proxy_secret_path,
     proxy_filtered_headers,
@@ -18,14 +20,6 @@ from .proxy_rules import (
     proxy_response_headers,
 )
 from .urls import validate_http_url
-
-try:
-    from curl_cffi import requests as cffi_requests
-    CURL_CFFI_AVAILABLE = True
-except ImportError:
-    cffi_requests = None
-    CURL_CFFI_AVAILABLE = False
-
 
 _active_lock = threading.Lock()
 _active_server = None
@@ -391,7 +385,8 @@ def _flixcloud_ensure_token(segment_url: str, parent_url: str) -> str:
         return segment_url
 
 
-def _build_proxy_server(initial_entries, timeout, show_id=None, episode=None, duration=0.0, on_progress=None):
+def _build_proxy_server(initial_entries, timeout, show_id=None, episode=None, duration=0.0, on_progress=None,
+                        ip_version=None):
     """Spin up one local proxy server backing an arbitrary set of routes.
 
     initial_entries: {path: entry_dict}, where entry_dict is either
@@ -403,6 +398,11 @@ def _build_proxy_server(initial_entries, timeout, show_id=None, episode=None, du
     keys) on the fly while rewriting a playlist it just fetched.
     """
     registry = dict(initial_entries)
+    if ip_version not in (None, 4):
+        raise ValueError("Unsupported stream network policy")
+    def open_upstream(*args, **kwargs):
+        open_request = urlopen_ipv4 if ip_version == 4 else urllib.request.urlopen
+        return open_request(*args, **kwargs)
     registry_lock = threading.Lock()
     port_holder = {}
     progress_state = {
@@ -412,7 +412,7 @@ def _build_proxy_server(initial_entries, timeout, show_id=None, episode=None, du
     }
 
     def register(url, ref, hdrs, content_type=None, time_offset=None, extra=None):
-        ext = _guess_ext(url)
+        ext = "m3u8" if _is_playlist("", content_type) else _guess_ext(url)
         path = new_proxy_secret_path(ext)
         entry_content_type = content_type
         if not entry_content_type:
@@ -450,7 +450,8 @@ def _build_proxy_server(initial_entries, timeout, show_id=None, episode=None, du
             dec = decrypt_em3u8(text)
             if dec:
                 text = dec
-        base = base_url.rsplit("/", 1)[0] + "/"
+        base = base_url
+        is_master = "#EXT-X-STREAM-INF:" in text
         out = []
         running_time = 0.0
         pending_duration = None
@@ -486,7 +487,8 @@ def _build_proxy_server(initial_entries, timeout, show_id=None, episode=None, du
                         "flixcloud_w_payload": entry_options.get("flixcloud_w_payload"),
                         "flixcloud_xor_mask": entry_options.get("flixcloud_xor_mask"),
                     }
-                path = register(real, ref, hdrs, extra=extra)
+                child_type = "application/vnd.apple.mpegurl" if is_master and stripped.startswith("#EXT-X-MEDIA:") else None
+                path = register(real, ref, hdrs, content_type=child_type, extra=extra)
                 line = line[:start] + local_url_for(path) + line[end:]
                 out.append(line)
                 continue
@@ -508,7 +510,8 @@ def _build_proxy_server(initial_entries, timeout, show_id=None, episode=None, du
                 running_time += pending_duration
                 pending_duration = None
             else:
-                path = register(real, ref, hdrs, extra=extra)
+                child_type = "application/vnd.apple.mpegurl" if is_master else None
+                path = register(real, ref, hdrs, content_type=child_type, extra=extra)
             out.append(local_url_for(path))
 
         if running_time > 0:
@@ -609,17 +612,17 @@ def _build_proxy_server(initial_entries, timeout, show_id=None, episode=None, du
                 if range_header and not is_m3u8_fetch:
                     request.add_header("Range", range_header)
 
-                with urllib.request.urlopen(
+                with open_upstream(
                         request,
                         context=SSL_CTX_SECURE,
                         timeout=max(1, float(timeout))) as response:
-                    validate_http_url(response.geturl())
+                    final_url = validate_http_url(response.geturl())
                     content_type = _upstream_content_type(entry.get("content_type"), response.headers.get("Content-Type", ""))
 
                     if method == "GET" and _is_playlist(url, content_type):
                         body = response.read()
                         text = body.decode("utf-8", errors="replace")
-                        rewritten = rewrite_playlist(text, url, ref, hdrs, entry)
+                        rewritten = rewrite_playlist(text, final_url, ref, hdrs, entry)
                         data = rewritten.encode("utf-8")
                         try:
                             self.send_response(200)
@@ -730,7 +733,8 @@ def _build_proxy_server(initial_entries, timeout, show_id=None, episode=None, du
                 return
             except urllib.error.HTTPError as http_err:
                 # Upstream returned 403; fallback to curl_cffi if available (Cloudflare bypass)
-                if http_err.code == 403 and CURL_CFFI_AVAILABLE and cffi_requests is not None:
+                cffi_requests = optional_curl_requests() if http_err.code == 403 else None
+                if cffi_requests is not None:
                     try:
                         cffi_hdrs = dict(hdrs) if hdrs else {}
                         if "User-Agent" not in cffi_hdrs and "user-agent" not in cffi_hdrs:
@@ -751,20 +755,21 @@ def _build_proxy_server(initial_entries, timeout, show_id=None, episode=None, du
                             headers=cffi_hdrs,
                             timeout=max(1, float(timeout)),
                             impersonate=imp,
-                            verify=False,
+                            verify=ip_version == 4,
                             stream=True,
+                            **({"curl_options": ipv4_curl_options()} if ip_version == 4 else {}),
                         )
                         content_type = _upstream_content_type(
                             entry.get("content_type"), resp.headers.get("Content-Type") or resp.headers.get("content-type", ""),
                         )
-
                         if method == "GET" and _is_playlist(url, content_type):
+                            final_url = validate_http_url(str(resp.url))
                             raw_chunks = []
                             for chunk in resp.iter_content(65536):
                                 raw_chunks.append(chunk)
                             body = b"".join(raw_chunks)
                             text = body.decode("utf-8", errors="replace")
-                            rewritten = rewrite_playlist(text, url, ref, hdrs, entry)
+                            rewritten = rewrite_playlist(text, final_url, ref, hdrs, entry)
                             data = rewritten.encode("utf-8")
                             try:
                                 self.send_response(200)
@@ -931,8 +936,19 @@ def start_local_proxy(
         stream_type="mp4", title="stream", subtitles=None,
         target_player=None, show_id=None, episode=None,
         duration=0.0, on_progress=None,
-        flixcloud_w_payload=None, flixcloud_xor_mask=None):
+        flixcloud_w_payload=None, flixcloud_xor_mask=None,
+        ip_version=None, audio_url=None, audio_tracks=None):
     validate_http_url(target_url)
+    if ip_version not in (None, 4):
+        raise ValueError("Unsupported stream network policy")
+    if audio_url or audio_tracks:
+        return start_local_dual_proxy(
+            target_url, audio_url, referer, headers, timeout=timeout, title=title,
+            subtitles=subtitles, audio_tracks=audio_tracks, target_player=target_player,
+            show_id=show_id, episode=episode, duration=duration, on_progress=on_progress,
+            flixcloud_w_payload=flixcloud_w_payload, flixcloud_xor_mask=flixcloud_xor_mask,
+            ip_version=ip_version,
+        )
     is_hls = str(stream_type).lower() == "hls"
     extension = "m3u8" if is_hls else "mp4"
     base_secret = new_proxy_secret_path(extension, title=title)
@@ -960,6 +976,7 @@ def start_local_proxy(
                 "url": target_fetch_url,
                 "ref": referer,
                 "hdrs": dict(forwarded_headers),
+                "content_type": "application/vnd.apple.mpegurl",
                 "flixcloud_w_payload": flixcloud_w_payload,
                 "flixcloud_xor_mask": flixcloud_xor_mask,
             },
@@ -1004,7 +1021,7 @@ def start_local_proxy(
 
         port, registry, _register, server = _build_proxy_server(
             initial, timeout, show_id=show_id, episode=episode,
-            duration=duration, on_progress=on_progress
+            duration=duration, on_progress=on_progress, ip_version=ip_version,
         )
 
         # Build Master M3U8 content
@@ -1045,7 +1062,9 @@ def start_local_proxy(
                 if key.casefold() in ("user-agent", "referer"):
                     continue
                 req.add_header(key, value)
-            with urllib.request.urlopen(req, context=SSL_CTX_SECURE, timeout=max(1, float(timeout))) as resp:
+            open_upstream = urlopen_ipv4 if ip_version == 4 else urllib.request.urlopen
+            with open_upstream(req, context=SSL_CTX_SECURE, timeout=max(1, float(timeout))) as resp:
+                final_target_url = validate_http_url(resp.geturl())
                 body = resp.read().decode("utf-8", errors="replace")
 
             if body.startswith("EM3U8v1:"):
@@ -1055,7 +1074,7 @@ def start_local_proxy(
                     body = dec
 
             if "#EXT-X-STREAM-INF" in body:
-                base_target = target_fetch_url.rsplit("/", 1)[0] + "/"
+                base_target = final_target_url
                 pending_inf = None
                 skip_next_var = False
                 for line in body.splitlines():
@@ -1068,7 +1087,7 @@ def start_local_proxy(
                             u_end = stripped.index('"', u_start)
                             raw_a_uri = stripped[u_start:u_end]
                             abs_a_uri = urllib.parse.urljoin(base_target, raw_a_uri)
-                            a_path = _register(abs_a_uri, referer, forwarded_headers)
+                            a_path = _register(abs_a_uri, referer, forwarded_headers, content_type="application/vnd.apple.mpegurl")
                             stripped = stripped[:u_start] + f"http://127.0.0.1:{port}{a_path}" + stripped[u_end:]
                         master_lines.append(stripped)
                         continue
@@ -1102,7 +1121,8 @@ def start_local_proxy(
                                 "flixcloud_w_payload": flixcloud_w_payload,
                                 "flixcloud_xor_mask": flixcloud_xor_mask,
                             }
-                        var_path = _register(var_abs, referer, forwarded_headers, extra=extra)
+                        var_path = _register(var_abs, referer, forwarded_headers,
+                                             content_type="application/vnd.apple.mpegurl", extra=extra)
                         master_lines.append(f"http://127.0.0.1:{port}{var_path}")
                         pending_inf = None
             else:
@@ -1128,13 +1148,14 @@ def start_local_proxy(
             "url": target_fetch_url,
             "ref": referer,
             "hdrs": dict(forwarded_headers),
+            **({"content_type": "application/vnd.apple.mpegurl"} if is_hls else {}),
             "flixcloud_w_payload": flixcloud_w_payload,
             "flixcloud_xor_mask": flixcloud_xor_mask,
         }
     }
     port, _registry, _register, server = _build_proxy_server(
         initial, timeout, show_id=show_id, episode=episode,
-        duration=duration, on_progress=on_progress
+        duration=duration, on_progress=on_progress, ip_version=ip_version,
     )
     return f"http://127.0.0.1:{port}{base_secret}", server
 
@@ -1145,7 +1166,7 @@ def start_local_dual_proxy(
         width=1280, height=720, bandwidth=2_400_000, title="stream",
         subtitles=None, audio_tracks=None, target_player=None,
         show_id=None, episode=None, duration=0.0, on_progress=None,
-        flixcloud_w_payload=None, flixcloud_xor_mask=None):
+        flixcloud_w_payload=None, flixcloud_xor_mask=None, ip_version=None):
     """Like start_local_proxy, but for sources that split video and audio
     into two separate HLS manifests (Dailymotion does this) with no
     combined master. Builds the master ourselves; both sub-manifests go
@@ -1181,6 +1202,7 @@ def start_local_dual_proxy(
         video_secret: {
             "kind": "fetch", "url": video_url, "ref": referer,
             "hdrs": dict(forwarded_headers),
+            "content_type": "application/vnd.apple.mpegurl",
             **media_extra,
         },
     }
@@ -1200,6 +1222,7 @@ def start_local_dual_proxy(
         initial[a_secret] = {
             "kind": "fetch", "url": t_url, "ref": referer,
             "hdrs": dict(forwarded_headers),
+            "content_type": "application/vnd.apple.mpegurl",
             **media_extra,
         }
         t_name = track.get("label") or track.get("name") or f"Audio {idx+1}"
@@ -1250,7 +1273,7 @@ def start_local_dual_proxy(
 
     port, registry, _register, server = _build_proxy_server(
         initial, timeout, show_id=show_id, episode=episode,
-        duration=duration, on_progress=on_progress
+        duration=duration, on_progress=on_progress, ip_version=ip_version,
     )
 
     master_lines = [

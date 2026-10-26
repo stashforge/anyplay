@@ -58,7 +58,7 @@ def test_prompt_handoff_uses_line_mode_and_restores_owner(monkeypatch, raw_initi
 
 
 @pytest.mark.parametrize("answer,expected", [(" y ", "y"), ("NO", "no"), ("", ""), (EOFError, "s")])
-def test_android_hint_reads_choice_only_inside_prompt_scope(monkeypatch, answer, expected):
+def test_android_hint_reads_choice_only_inside_prompt_scope(monkeypatch, capsys, answer, expected):
     calls = []
 
     @contextmanager
@@ -69,9 +69,9 @@ def test_android_hint_reads_choice_only_inside_prompt_scope(monkeypatch, answer,
         finally:
             calls.append("leave")
 
-    def read(prompt):
+    def read(prompt=''):
         assert calls == ["enter"]
-        assert "Don't show again" in prompt
+        assert "Don't show again" in capsys.readouterr().out
         if answer is EOFError:
             raise EOFError
         return answer
@@ -86,13 +86,14 @@ def test_android_hint_ctrl_c_is_not_treated_as_skip_and_cursor_is_restored(monke
     from contextlib import nullcontext
 
     output = []
+    monkeypatch.setattr('media_cli.ui.terminal_output.write_terminal', output.append)
     monkeypatch.setattr(player_screen, "prompt_input_scope", nullcontext)
     monkeypatch.setattr(playback_player, "sys", SimpleNamespace(
         stdin=SimpleNamespace(isatty=lambda: True),
         stdout=SimpleNamespace(write=output.append, flush=lambda: None),
     ))
 
-    def interrupt(prompt):
+    def interrupt(prompt=''):
         raise KeyboardInterrupt
 
     monkeypatch.setattr("builtins.input", interrupt)

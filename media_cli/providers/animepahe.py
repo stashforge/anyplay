@@ -11,13 +11,16 @@ import shutil
 import sqlite3
 import sys
 import time
+import urllib.error
 import urllib.parse
 from threading import Lock
 from typing import Any
 
 from bs4 import BeautifulSoup
 
+from ..services.browser_access.bridge import BrowserRequestTimeout
 from ..services.http import SSL_CTX, UA
+from ..services.requirements import optional_curl_requests
 from .shared.base import Provider
 from .shared.models import (
     normalize_episode_catalog,
@@ -26,14 +29,6 @@ from .shared.models import (
 )
 
 _logger = logging.getLogger(__name__)
-
-try:
-    from curl_cffi import requests as cffi_requests
-    CURL_CFFI_AVAILABLE = True
-except ImportError:
-    cffi_requests = None
-    CURL_CFFI_AVAILABLE = False
-
 
 def _cookie_host_matches(cookie_host: str, request_host: str) -> bool:
     host = cookie_host.lstrip(".").lower()
@@ -265,7 +260,8 @@ class AnimePaheProvider(Provider):
             if not self._cookies_initialized:
                 self._init_cookies()
                 self._cookies_initialized = True
-        if self._session is None and CURL_CFFI_AVAILABLE and cffi_requests is not None:
+        cffi_requests = optional_curl_requests() if self._session is None else None
+        if cffi_requests is not None:
             if "Firefox" in self._user_agent:
                 self._session = cffi_requests.Session(impersonate="firefox147")
             else:
@@ -275,6 +271,14 @@ class AnimePaheProvider(Provider):
         return self._session
 
     def _fetch_page(self, url: str, headers: dict[str, str] | None = None, timeout: int = 15) -> str:
+        from ..services.browser_access.integration import fetch_text, is_termux, linux_desktop
+        termux = is_termux()
+        if linux_desktop() or termux:
+            req_headers = {"User-Agent": self._user_agent or UA, "Referer": f"{self.base_url}/", **(headers or {})}
+            explicit_cookie = os.environ.get("ANIMEPAHE_COOKIE", "").strip()
+            if explicit_cookie and not termux:
+                req_headers["Cookie"] = explicit_cookie
+            return fetch_text(self.id, list(self.domains), url, headers=req_headers, timeout=timeout)
         sess = self._get_session()
         req_headers = {
             "User-Agent": self._user_agent or UA,
@@ -334,7 +338,18 @@ class AnimePaheProvider(Provider):
             "X-Requested-With": "XMLHttpRequest",
             "Referer": f"{self.base_url}/",
         }
-        raw = self._fetch_page(url, headers=headers, timeout=timeout)
+        try:
+            raw = self._fetch_page(url, headers=headers, timeout=timeout)
+        except urllib.error.HTTPError as exc:
+            from ..services.browser_access.challenge import is_verification_challenge
+            if exc.code == 429 or is_verification_challenge(
+                    exc.code, dict(exc.headers or {}), exc.read().decode("utf-8", errors="replace")):
+                raise
+            return None
+        except BrowserRequestTimeout:
+            raise
+        except OSError:
+            return None
         if not raw:
             return None
         try:

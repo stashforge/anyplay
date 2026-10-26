@@ -1,9 +1,19 @@
 """Bounded subprocess output and timeout cleanup."""
 
 import subprocess
+import sys
 import threading
 
 MAX_YTDLP_JSON_BYTES = 8 * 1024 * 1024
+
+
+def diagnostic_subprocess_output() -> dict[str, int]:
+    """Background tools inherit diagnostics while the UI owns Python stdout.
+
+    Explicit output pipes take precedence at callers. Foreground players/editors
+    use their existing terminal handoff instead of this background-tool policy.
+    """
+    return {'stdout': 2, 'stderr': 2} if getattr(sys.stdout, '_anyplay_diagnostics', False) else {}
 
 
 def communicate_with_cleanup(process, timeout, shutdown_timeout=2):
@@ -127,17 +137,5 @@ def is_termux():
     import os
     return (os.environ.get("PREFIX", "").startswith("/data/data/com.termux")
             or os.path.exists("/data/data/com.termux"))
-
-
-def check_deps():
-    import shutil
-    import sys
-
-    from .reporting import err
-    needed = ["openssl"] + (["am"] if is_termux() else ["mpv"])
-    for p in needed:
-        if not shutil.which(p):
-            err(f"'{p}' not found.")
-            sys.exit(1)
 
 

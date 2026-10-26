@@ -10,6 +10,7 @@ import threading
 import time
 from concurrent.futures import as_completed
 from copy import deepcopy
+from dataclasses import replace
 from ..core.workers import DaemonExecutor
 from typing import TYPE_CHECKING, Any
 
@@ -118,9 +119,11 @@ def handle_history_state(
         history_mode = "Active"
 
     filtered_hist = app_core.filter_history_entries(hist, history_mode)
+    history_base_view = None
 
     def _rebuild_history_view():
-        nonlocal filtered_hist
+        nonlocal filtered_hist, history_base_view
+        history_base_view = None
         filtered_hist = app_core.filter_history_entries(hist, history_mode)
         fshows = [h.get("show") for h in filtered_hist if isinstance(h.get("show"), dict)]
         if fshows:
@@ -265,10 +268,7 @@ def handle_history_state(
             if app_core.delete_history_entry(reference.show_id, reference.translation_type, provider_id=reference.provider_id):
                 refresh_inbox.invalidate(reference)
                 hist = app_core.load_history()
-                filtered_hist = app_core.filter_history_entries(hist, history_mode)
-                fshows = [x.get("show") for x in filtered_hist if isinstance(x.get("show"), dict)]
-                if fshows:
-                    app_core.batch_prepare_shows_display_state(fshows, ttype)
+                _rebuild_history_view()
 
     def _set_history_mode(mode):
         nonlocal history_mode, filtered_hist
@@ -276,10 +276,7 @@ def handle_history_state(
             raise ValueError(f"Unknown History mode: {mode!r}")
         history_mode = mode
         ui.history_filter = history_mode
-        filtered_hist = app_core.filter_history_entries(hist, history_mode)
-        fshows = [entry.get("show") for entry in filtered_hist if isinstance(entry.get("show"), dict)]
-        if fshows:
-            app_core.batch_prepare_shows_display_state(fshows, ttype)
+        _rebuild_history_view()
 
     def _refresh_history_reference(reference):
         entry = next((entry for entry in filtered_hist if HistoryEntryReference.from_entry(entry) == reference), None)
@@ -311,6 +308,10 @@ def handle_history_state(
             return False
         refresh_inbox.invalidate(reference)
         selected_ttype = entry.get("translation_type", "sub")
+        from .details_catalog import interactive_catalog, ready_episode_ids
+        if interactive_catalog(flags, args):
+            selected_history_episode_ids[reference] = list(ready_episode_ids(entry.get('show', {}), selected_ttype))
+            return True
         from copy import deepcopy
         from ..ui.transition import PreparationCancelled
 
@@ -332,18 +333,25 @@ def handle_history_state(
         return True
 
     def _read_history_navigation():
+        nonlocal history_base_view
         status = _history_refresh_status()
-        return build_history_view(
-            filtered_hist, mode=history_mode, total_count=len(hist),
-            incognito=flags.incognito_mode, now=_history_open_time,
-            show_cover=flags.show_image,
-            footer_statuses=(status,) if status is not None else (),
-        )
+        if history_base_view is None:
+            history_base_view = build_history_view(
+                filtered_hist, mode=history_mode, total_count=len(hist),
+                incognito=flags.incognito_mode, now=_history_open_time,
+                show_cover=flags.show_image,
+            )
+        return (replace(history_base_view, footer_statuses=(status,))
+                if status is not None else history_base_view)
     def _show_history_information(reference):
+        nonlocal history_base_view
         entry = next((entry for entry in filtered_hist
                       if HistoryEntryReference.from_entry(entry) == reference), None)
         if entry is not None:
-            app_core.make_info_fn(lambda: [entry.get("show", {})], ui)(0)
+            try:
+                app_core.make_info_fn(lambda: [entry.get("show", {})], ui)(0)
+            finally:
+                history_base_view = None
 
     try:
         if not flags.plain_mode and sys.stdin.isatty():
@@ -501,6 +509,13 @@ def handle_search_state(
     loaded_episodes_map: dict[str, list[str]] = {}
 
     def _on_select(s):
+        from .details_catalog import interactive_catalog, ready_episode_ids
+        if interactive_catalog(flags, args):
+            loaded_episodes_map[str(s.get('_id') or s.get('id'))] = list(ready_episode_ids(s, ttype))
+            ui.ui_show_ctx = s
+            ui.ui_ttype_ctx = ttype
+            ui.hovered_show_obj = s
+            return True
         from .details_preparation import prepare_details_transition, commit_details_transition
         from ..ui.transition import PreparationCancelled
         try:
@@ -606,8 +621,10 @@ def handle_search_state(
             ms.current_ep_index = 0
             ms.current_ep = episode_id_at(episode_ids, 0)
         else:
-            err_msg = app_core.episode_catalog_error(s)
-            app_core.set_action_feedback(s, err_msg)
+            from .details_catalog import interactive_catalog
+            if not interactive_catalog(flags, args):
+                err_msg = app_core.episode_catalog_error(s)
+                app_core.set_action_feedback(s, err_msg)
             return "DETAILS"
 
         if requested_episode_missing:

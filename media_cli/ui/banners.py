@@ -7,19 +7,17 @@ orchestration logic.
 
 from __future__ import annotations
 
-import sys
-
 from ..constants import APP_NAME
 from ..domain.titles import extract_title_parts as _extract_title_parts
+from .terminal_output import write_terminal
 
 
 def print_app_banner() -> None:
     """Clear the screen and print the startup banner."""
-    sys.stdout.write("\033[2J\033[H")
-    sys.stdout.flush()
+    write_terminal("\033[2J\033[H")
     C, B, R = "\033[36m", "\033[1m", "\033[0m"
     line = f"{C}{'─' * 48}{R}"
-    print(f"{line}\n{C}{B}▶ {APP_NAME} — Stream Player{R}\n{line}")
+    write_terminal(f"{line}\n{C}{B}▶ {APP_NAME} — Stream Player{R}\n{line}\n")
 
 
 def print_episode_header(title: str, ep: object, total: int) -> None:
@@ -46,6 +44,4 @@ def print_episode_header(title: str, ep: object, total: int) -> None:
     if info_bits:
         bullet = "\u2022"
         ep_str += f"  {bullet}  {f' {bullet} '.join(info_bits)}"
-    print(f"\n{LABEL_C}now playing{R}\n{TITLE_C}{clean}{R}")
-    print(f"{SUB_C}{ep_str}{R}")
-    print()
+    write_terminal(f"\n{LABEL_C}now playing{R}\n{TITLE_C}{clean}{R}\n{SUB_C}{ep_str}{R}\n\n")

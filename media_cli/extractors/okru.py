@@ -8,6 +8,7 @@ import re
 from typing import Any
 
 from .base import BaseExtractor
+from .routing import ROUTES
 
 QUALITY_MAP = {
     "ultra": ("2160p", 2160),
@@ -25,13 +26,8 @@ class OkruExtractor(BaseExtractor):
     """Extractor for Ok.ru (Odnoklassniki) video embeds and links."""
 
     name = "Ok.ru"
-    domains = [
-        "ok.ru",
-        "odnoklassniki.ru",
-    ]
-    patterns = [
-        re.compile(r"(?:ok\.ru|odnoklassniki\.ru)/(?:video|videoembed)/(\d+)", re.IGNORECASE),
-    ]
+    domains = ROUTES['okru'].domains
+    patterns = ROUTES['okru'].patterns
 
     def _extract_id(self, url: str) -> str | None:
         for pattern in self.patterns:

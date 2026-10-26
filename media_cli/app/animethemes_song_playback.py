@@ -4,6 +4,7 @@ import logging
 from dataclasses import replace
 
 from .. import app_core
+from ..core.api import ProviderDependencyError
 from ..services import animethemes as service
 from ..state.theme import APPLICATION_THEME
 from ..ui.footer import StatusKind
@@ -113,6 +114,8 @@ def create_song_menu(flags, ui, cfg, args, songs, selected, *, collection_id, se
             try:
                 result = (play_callback(row) if play_callback is not None
                           else play_variant(row, flags, cfg, args, show, ui, collection))
+            except ProviderDependencyError:
+                raise
             except Exception:
                 _LOG.exception("AnimeThemes song playback failed")
                 view = replace(controller.session.current, message="Could not play this song. Try another version.",

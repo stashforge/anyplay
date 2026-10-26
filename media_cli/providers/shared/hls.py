@@ -8,6 +8,7 @@ from typing import Any
 
 
 _PASSTHROUGH_KEYS = (
+    "ip_version",
     "audio_url",
     "audio_tracks",
     "split_audio_url",

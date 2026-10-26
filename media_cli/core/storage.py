@@ -541,10 +541,10 @@ def _load_history():
         return _history_cache
 
 
-def get_history_entry(show, ttype="sub"):
+def get_history_entry(show, ttype="sub", *, history_entries=None):
     show_id = str((show or {}).get("_id") or (show or {}).get("id") or "")
     from media_cli.domain.matching import is_same_show
-    for entry in load_history():
+    for entry in load_history() if history_entries is None else history_entries:
         if entry.get("translation_type", "sub") != ttype:
             continue
         entry_show = entry.get("show", {})
@@ -557,16 +557,17 @@ def get_history_entry(show, ttype="sub"):
 
 
 
-def get_local_progress(show, ttype="sub"):
+def get_local_progress(show, ttype="sub", *, history_entries=None):
     return history_domain.local_progress(
-        load_history(),
+        load_history() if history_entries is None else history_entries,
         show,
         ttype,
     )
 
 
-def get_local_episode_label(show, ttype="sub"):
-    entry = get_history_entry(show, ttype)
+def get_local_episode_label(show, ttype="sub", *, history_entries=None):
+    entry = (get_history_entry(show, ttype) if history_entries is None else
+             get_history_entry(show, ttype, history_entries=history_entries))
     if entry and "episode" in entry:
         eid = entry["episode"]
         if str(eid) in ("0", "0.0"):

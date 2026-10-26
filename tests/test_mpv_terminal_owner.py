@@ -6,6 +6,7 @@ def test_ipc_player_cannot_compete_for_tui_keyboard_input(monkeypatch):
     from media_cli.playback import mpv
 
     launches = []
+    monkeypatch.setattr("shutil.which", lambda _: "/test/mpv")
 
     def launch(command, **kwargs):
         launches.append((command, kwargs))

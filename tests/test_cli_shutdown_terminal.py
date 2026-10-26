@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from media_cli.cli import main
+from media_cli.cli import application as main
 from media_cli.ui import terminal_runtime
 
 
@@ -46,6 +46,8 @@ def test_cli_keeps_input_silent_through_cleanup_and_discards_exit_keys(monkeypat
     monkeypatch.setattr(main.app, "flush_anilist_writes", cleanup)
     monkeypatch.setattr(main.app, "_ipc_player", SimpleNamespace(quit=lambda: None))
     monkeypatch.setattr(main.app, "kill_active_subprocesses", lambda: None)
+    monkeypatch.setattr("media_cli.services.browser_access.integration.close_browser_sessions",
+                        lambda **kw: events.append("browser_cleanup") if kw.get("shutdown") else None)
     monkeypatch.setattr("media_cli.services.catalog._catalog_executor.shutdown", lambda **kw: None)
     monkeypatch.setattr("media_cli.media.local_proxy.cleanup_active_local_proxy", lambda: None)
     monkeypatch.setattr("media_cli.core.storage.cleanup_incognito_cache", lambda: None)
@@ -56,7 +58,7 @@ def test_cli_keeps_input_silent_through_cleanup_and_discards_exit_keys(monkeypat
                 main.run()
         else:
             assert main.run() == 0
-        assert events == ["ui", "cleanup", "restore"]
+        assert events == ["ui", "browser_cleanup", "cleanup", "restore"]
         assert termios.tcgetattr(slave) == original
         tty.setraw(slave)
         assert not select.select([slave], [], [], 0)[0], "Exit keys leaked back to the shell"

@@ -230,7 +230,7 @@ entries = [dict(show=dict(_id=identity, _provider='example', name=name), transla
            for identity, name in [('one', 'First title'), ('two', 'Second title')]]
 def focus(reference):
     focused.append((reference.show_id, time.monotonic() - started))
-    print('IDLE_REFRESH_READY', flush=True)
+    terminal_marker('IDLE_REFRESH_READY')
 result = run_history_menu(flags, ui,
     read_view=lambda: build_history_view(entries, mode='All', total_count=2, show_cover=False),
     switch_mode=lambda mode: None, select=lambda ref: True,

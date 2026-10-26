@@ -150,7 +150,7 @@ local function apply_chapters()
         local s_label = item.label or "Skip"
         if s_end > s_start then
             if s_start > curr then
-                local pre_title = (curr == 0.0) and "Intro" or "Episode"
+                local pre_title = (curr == 0.0 and (item.type == "op" or item.type == "mixed-op")) and "Intro" or "Episode"
                 table.insert(chaps, { title = pre_title, time = curr })
             end
             table.insert(chaps, { title = s_label, time = s_start })

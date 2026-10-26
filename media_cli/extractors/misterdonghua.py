@@ -10,6 +10,7 @@ from typing import Any
 
 from ..services.http import UA
 from .base import BaseExtractor
+from .routing import ROUTES
 
 _logger = logging.getLogger(__name__)
 
@@ -62,12 +63,8 @@ class MisterDonghuaExtractor(BaseExtractor):
     """Native extractor for misterdonghua.in video player embeds."""
 
     name = "MisterDonghua"
-    domains = [
-        "misterdonghua.in",
-    ]
-    patterns = [
-        re.compile(r"misterdonghua\.in/(?:embed/|v/|#)?([a-zA-Z0-9]+)", re.IGNORECASE),
-    ]
+    domains = ROUTES['misterdonghua'].domains
+    patterns = ROUTES['misterdonghua'].patterns
 
     def _extract_id(self, url: str) -> str | None:
         if not url:
@@ -99,6 +96,13 @@ class MisterDonghuaExtractor(BaseExtractor):
         video_id = self._extract_id(url)
         if not video_id:
             return []
+
+        from ..services.requirements import require_any_python
+
+        require_any_python(
+            ("cryptography.hazmat.primitives.ciphers", "Cryptodome.Cipher.AES", "Crypto.Cipher.AES"),
+            "MisterDonghua extraction",
+        )
 
         api_url = f"https://misterdonghua.in/api/v1/video?id={video_id}"
         req_headers = {

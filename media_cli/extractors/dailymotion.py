@@ -7,21 +7,15 @@ import re
 from typing import Any
 
 from .base import BaseExtractor
+from .routing import ROUTES
 
 
 class DailymotionExtractor(BaseExtractor):
     """Extractor for Dailymotion video embeds and links."""
 
     name = "Dailymotion"
-    domains = [
-        "dailymotion.com",
-        "dai.ly",
-    ]
-    patterns = [
-        re.compile(r"dailymotion\.com/(?:embed/)?video/([a-zA-Z0-9]+)", re.IGNORECASE),
-        re.compile(r"dai\.ly/([a-zA-Z0-9]+)", re.IGNORECASE),
-        re.compile(r"geo\.dailymotion\.com/player\.html\?video=([a-zA-Z0-9]+)", re.IGNORECASE),
-    ]
+    domains = ROUTES['dailymotion'].domains
+    patterns = ROUTES['dailymotion'].patterns
 
     def _extract_id(self, url: str) -> str | None:
         for pattern in self.patterns:

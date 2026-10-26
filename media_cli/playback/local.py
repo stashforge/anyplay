@@ -1,11 +1,11 @@
 """Launch locally downloaded videos."""
 
 import os
-import shutil
 import subprocess
 import urllib.request
 from contextlib import nullcontext
 
+from ..services.requirements import require_executable
 from ..ui.terminal_runtime import current_runtime, terminal_application
 from .android import PLAYERS
 
@@ -19,6 +19,7 @@ def play_local_video(path, player, *, termux, error):
 
     title = os.path.basename(path)
     if termux:
+        require_executable("am", "Android playback")
         chosen = player if player in PLAYERS else "mpv"
         package, activity = PLAYERS.get(chosen, PLAYERS["mpv"])
         file_uri = "file://" + urllib.request.pathname2url(path)
@@ -39,9 +40,7 @@ def play_local_video(path, player, *, termux, error):
         ]
     else:
         chosen = "vlc" if player == "vlc" else "mpv"
-        if not shutil.which(chosen):
-            error(f"{chosen} is not installed.")
-            return False
+        require_executable(chosen, "Local playback")
         command = [chosen, path]
 
     try:

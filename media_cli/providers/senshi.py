@@ -1,24 +1,76 @@
 import json
 import logging
+import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any
 
+from ..services.http import UA as USER_AGENT
+from ..services.network_affinity import ipv4_curl_options
 from .shared.base import Provider
-from .shared.hls import parse_master_playlist_variants
 from .shared.models import normalize_episode_catalog, normalize_episode_sources, normalize_title
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+    "User-Agent": USER_AGENT,
     "Accept": "application/json",
 }
+
+
+def _unsafe_stream_uri(value: str) -> bool:
+    decoded = urllib.parse.unquote(value)
+    return any(ord(char) <= 32 or 127 <= ord(char) <= 159 or char == "\\"
+               for char in value + decoded)
+
+
+def _trusted_stream_url(url: Any, *, subtitle: bool = False) -> bool:
+    if not isinstance(url, str) or not url or _unsafe_stream_uri(url) or "#" in url:
+        return False
+    try:
+        parts = urllib.parse.urlsplit(url)
+        host = parts.hostname or ""
+        if (parts.scheme != "https" or parts.port not in (None, 443)
+                or parts.username is not None or parts.password is not None):
+            return False
+        if len(host) > 253 or not all(
+            re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+            for label in host.split(".")
+        ):
+            return False
+        return (host in {"s.vidcloud.se", "cdn.vidcloud.se"}
+                or host.endswith((".bcdn1.se", ".bcdn2.se", ".bcdn3.se"))
+                or (subtitle and host == "s.anicdn.se"))
+    except ValueError:
+        return False
+
+
+def _trusted_child_url(base: str, uri: Any) -> str | None:
+    if not isinstance(uri, str) or not uri or _unsafe_stream_uri(uri):
+        return None
+    try:
+        url = urllib.parse.urljoin(base, uri)
+    except ValueError:
+        return None
+    return url if _trusted_stream_url(url) else None
+
+
+def _check_playlist_operation(deadline, cancel):
+    from ..extractors.senshi_runtime import SenshiRuntimeError
+
+    if cancel is not None and cancel.is_set():
+        raise SenshiRuntimeError("Senshi extraction cancelled")
+    if time.monotonic() >= deadline:
+        raise SenshiRuntimeError("Senshi extraction timed out")
+
 
 class Senshi(Provider):
     id = "senshi"
 
     def __init__(self, request_json_fn=None, *args, **kwargs):
         self._request_json = request_json_fn
+        self._sources_cache = {}
+        self._remote_sources_cache = {}
         if not hasattr(self, 'metadata'):
             self.metadata = {}
         if not hasattr(self, 'domains'):
@@ -49,7 +101,7 @@ class Senshi(Provider):
             return []
 
     def search(self, query: str, ttype: str = "sub") -> list[dict[str, Any]]:
-        # 1. Try Senshi native filter endpoint
+        # Search only Senshi's catalog; external title IDs do not prove availability.
         try:
             payload = json.dumps({
                 "searchTerm": query,
@@ -104,52 +156,7 @@ class Senshi(Provider):
         except Exception as e:
             logging.debug("Senshi native search error: %s", e)
 
-        # 2. AniList GraphQL fallback to search and retrieve idMal
-        graphql_query = """
-        query($search: String) {
-          Page(page: 1, perPage: 20) {
-            media(search: $search, type: ANIME, sort: SEARCH_MATCH) {
-              id
-              idMal
-              title { romaji english native }
-              format
-              status
-            }
-          }
-        }
-        """
-        from ..core.anilist_fallback import search_anilist_with_fallback
-        data = search_anilist_with_fallback(query, graphql_query, {"search": query})
-
-        media_list = data.get("data", {}).get("Page", {}).get("media", [])
-
-        results = []
-        for media in media_list:
-            mal_id = media.get("idMal")
-            if not mal_id:
-                continue
-
-            title_obj = media.get("title", {})
-            title_str = title_obj.get("romaji") or title_obj.get("english") or title_obj.get("native") or "Unknown"
-
-            results.append(normalize_title(
-                {
-                    "_id": str(mal_id),
-                    "malId": mal_id,
-                    "aniListId": media.get("id"),
-                    "name": title_str,
-                    "romajiName": title_obj.get("romaji"),
-                    "englishName": title_obj.get("english"),
-                    "nativeName": title_obj.get("native"),
-                    "type": "anime",
-                    "format": media.get("format"),
-                    "status": media.get("status")
-                },
-                provider_id=self.id,
-                provider_name=self.name
-            ))
-
-        return results
+        return []
 
     def get_title(self, provider_id: str) -> dict[str, Any]:
         return {
@@ -183,8 +190,10 @@ class Senshi(Provider):
             })
 
         def _parse_ep(val):
-            try: return float(val)
-            except ValueError: return 0.0
+            try:
+                return float(val)
+            except ValueError:
+                return 0.0
 
         eps_formatted.sort(key=lambda x: _parse_ep(x["id"]))
         ids = [ep["id"] for ep in eps_formatted]
@@ -200,201 +209,297 @@ class Senshi(Provider):
             provider_title_id=provider_id,
         )
 
-    _sources_cache: dict[tuple[str, str, str], Any] = {}
+    @staticmethod
+    def _cache_get(cache: dict, key):
+        now = time.monotonic()
+        for expired in [k for k, (expires, _) in cache.items() if expires <= now]:
+            del cache[expired]
+        value = cache.get(key)
+        return value[1] if value else None
+
+    @staticmethod
+    def _cache_put(cache: dict, key, value, ttl: float, limit: int):
+        cache.pop(key, None)
+        cache[key] = (time.monotonic() + ttl, value)
+        while len(cache) > limit:
+            del cache[next(iter(cache))]
+
+    @staticmethod
+    def _source_candidates(entry: dict) -> list[dict]:
+        raw = entry.get("source") or entry.get("file")
+        if not isinstance(raw, list):
+            raw = [raw]
+        candidates = []
+        for item in raw:
+            if isinstance(item, str):
+                item = {"src": item}
+            if isinstance(item, dict):
+                url = item.get("src") or item.get("file") or item.get("url")
+                if _trusted_stream_url(url):
+                    candidates.append({"label": entry.get("label"), **item, "src": url})
+        return candidates
+
+    def _resolve_remote_sources(self, remote_id) -> list[dict]:
+        from ..extractors.senshi_runtime import SenshiRuntimeError, resolve_vidcloud
+        from ..services.browser_access.operation import current_operation
+        from ..services.browser_access.profiles import BrowserAccessCancelled
+
+        cancel = current_operation().cancel
+        if cancel is not None and cancel.is_set():
+            raise BrowserAccessCancelled("Senshi extraction cancelled")
+        key = (self.base_url, str(remote_id))
+        cached = self._cache_get(self._remote_sources_cache, key)
+        if cached is not None:
+            return cached
+        try:
+            # The runtime owns the bounded retry and overall extraction deadline.
+            entries = resolve_vidcloud(remote_id, timeout=30, cancel=cancel)
+        except SenshiRuntimeError as error:
+            if str(error) == "Senshi extraction cancelled" or (cancel is not None and cancel.is_set()):
+                raise
+            logging.debug("Senshi source resolution unavailable: %s", error)
+            return []
+        entries = [entry for entry in entries if isinstance(entry, dict) and self._source_candidates(entry)]
+        if entries:
+            self._cache_put(self._remote_sources_cache, key, entries, 240, 64)
+        return entries
+
+    def _read_playlist(self, url: str) -> tuple[str, str]:
+        from curl_cffi.requests import Session
+
+        from ..extractors.senshi_runtime import SenshiRuntimeError, fetch_bytes
+        from ..services.browser_access.operation import current_operation
+
+        if not _trusted_stream_url(url):
+            raise SenshiRuntimeError("Senshi playlist destination not permitted")
+        deadline = time.monotonic() + 10
+        cancel = current_operation().cancel
+        headers = {**HEADERS, "Referer": f"{self.base_url}/", "Origin": self.base_url}
+        with Session(impersonate="chrome", trust_env=False, curl_options=ipv4_curl_options()) as session:
+            for hop in range(4):
+                _check_playlist_operation(deadline, cancel)
+                response, content = fetch_bytes(
+                    session, "GET", url, headers, None, deadline, cancel,
+                    limit=1048576, allow_redirect_response=True,
+                )
+                _check_playlist_operation(deadline, cancel)
+                final_url = response.url
+                if not _trusted_stream_url(final_url):
+                    raise SenshiRuntimeError("Senshi playlist destination not permitted")
+                if response.status_code in {301, 302, 303, 307, 308}:
+                    location = response.headers.get("Location") or response.headers.get("location")
+                    target = _trusted_child_url(final_url, location)
+                    if target is None or hop == 3:
+                        raise SenshiRuntimeError("Senshi playlist redirect not permitted")
+                    # Each request is credential-free, even after a CDN redirect.
+                    session.cookies.clear()
+                    url = target
+                    continue
+                if not 200 <= response.status_code < 300 or len(content) > 1048576:
+                    raise SenshiRuntimeError("Senshi playlist request failed")
+                text = content.decode("utf-8", errors="replace")
+                break
+        if text.startswith("EM3U8v1:"):
+            from ..media.decryption import decrypt_em3u8
+            text = decrypt_em3u8(text) or ""
+        return final_url, text
+
+    @staticmethod
+    def _subtitles(tracks: list, is_dub: bool) -> list[dict]:
+        usable = []
+        for track in tracks:
+            if not isinstance(track, dict):
+                continue
+            url = track.get("url") or track.get("file") or track.get("vtt_url")
+            label = str(track.get("label") or "English")
+            kind = str(track.get("kind") or "")
+            if not _trusted_stream_url(url, subtitle=True):
+                continue
+            if any(word in (label + " " + kind).lower() for word in ("chapter", "thumb")):
+                continue
+            usable.append({"url": url, "file": url, "label": label, "default": False})
+        matching = [
+            track for track in usable
+            if ("dub" in track["label"].lower() or "ai_dub" in track["url"].lower()) == is_dub
+        ]
+        subtitles = matching or usable
+        subtitles.sort(key=lambda track: "english" not in track["label"].lower())
+        if subtitles:
+            subtitles[0]["default"] = True
+        return subtitles
+
+    def _playlist_variants(self, url: str, quality: str, is_dub: bool) -> list[dict]:
+        import m3u8
+
+        try:
+            if not _trusted_stream_url(url):
+                return []
+            final_url, text = self._read_playlist(url)
+            if not _trusted_stream_url(final_url) or text.splitlines()[:1] != ["#EXTM3U"]:
+                return []
+            # Reject broken URI attributes before the parser can discard them.
+            if (any(line.count('"') % 2 for line in text.splitlines())
+                    or any((ord(char) < 32 and char not in "\r\n") or 127 <= ord(char) <= 159
+                           for char in text)):
+                return []
+            playlist = m3u8.loads(text, uri=final_url)
+        except Exception as error:
+            from ..services.browser_access.operation import current_operation
+            from ..services.browser_access.profiles import BrowserAccessCancelled
+
+            cancel = current_operation().cancel
+            if (isinstance(error, BrowserAccessCancelled) or str(error) == "Senshi extraction cancelled"
+                    or (cancel is not None and cancel.is_set())):
+                raise
+            logging.debug("Senshi playlist unavailable")
+            return []
+        if not playlist.playlists:
+            return [{"url": final_url, "resolution": quality}] if playlist.segments else []
+
+        language = "en" if is_dub else "ja"
+        variants = []
+        for item in playlist.playlists:
+            audio_url = None
+            group = item.stream_info.audio
+            if group:
+                audio = [
+                    media for media in playlist.media
+                    if media.type == "AUDIO" and media.group_id == group
+                ]
+                matching = [
+                    media for media in audio
+                    if str(media.language or "").lower().split("-")[0] == language
+                ]
+                if not matching:
+                    # Never hand a detached video rendition to the player alone.
+                    continue
+                selected = next((media for media in matching if media.default == "YES"), matching[0])
+                if selected.uri:
+                    audio_url = _trusted_child_url(final_url, selected.uri)
+                    if audio_url is None:
+                        continue
+            video_url = _trusted_child_url(final_url, item.uri)
+            if video_url is None:
+                continue
+            resolution = item.stream_info.resolution
+            variant = {
+                "url": video_url,
+                "resolution": f"{resolution[1]}p" if resolution else quality,
+            }
+            if audio_url:
+                variant["audio_url"] = audio_url
+            variants.append(variant)
+        return variants
 
     def _extract_embed_sources(self, matching_embeds: list, is_dub: bool) -> list[dict]:
+        from ..core.api import ProviderDependencyError
+
         all_sources = []
+        dependency_error = None
+        wanted = "dub" if is_dub else "sub"
+        status_label = "Dub" if is_dub else "HardSub"
+        headers = {
+            "Referer": f"{self.base_url}/", "Origin": self.base_url,
+            "User-Agent": HEADERS["User-Agent"],
+        }
         for emb in matching_embeds:
-            status = emb.get("status") or ("Dub" if is_dub else "Sub")
-            status_label = "Dub" if str(status).lower() == "dub" else "HardSub"
             remote_id = emb.get("remote_source_id") or emb.get("remoteSourceId")
-
-            # 1. Direct Vidcloud source via remote_source_id
             if remote_id:
+                from ..services.requirements import require_provider_operation
+
                 try:
-                    vheaders = {
-                        "User-Agent": HEADERS["User-Agent"],
-                        "Referer": f"{self.base_url}/",
-                        "Origin": self.base_url,
-                        "Accept": "application/json",
-                    }
-                    vreq = urllib.request.Request(
-                        f"https://s.vidcloud.se/_v1/sources?id={remote_id}",
-                        headers=vheaders,
+                    require_provider_operation(self.id, "remote_sources")
+                    remote_entries = self._resolve_remote_sources(remote_id)
+                except ProviderDependencyError as exc:
+                    dependency_error = exc
+                    remote_entries = []
+                for entry in remote_entries:
+                    candidates = self._source_candidates(entry)
+                    source = next(
+                        (src for src in candidates if str(src.get("label") or "").lower() == wanted),
+                        None,
                     )
-                    with urllib.request.urlopen(vreq, timeout=7) as vresp:
-                        entries = json.loads(vresp.read().decode("utf-8"))
-                        for entry in entries:
-                            src_info = entry.get("source") or {}
-                            src_url = src_info.get("src")
-                            if src_url:
-                                tracks = entry.get("tracks") or []
-                                subtitles = [
-                                    {
-                                        "url": t.get("vtt_url") or t.get("url"),
-                                        "file": t.get("vtt_url") or t.get("url"),
-                                        "label": t.get("label") or "English",
-                                        "default": t.get("default", False),
-                                    }
-                                    for t in tracks
-                                    if t.get("url") or t.get("vtt_url")
-                                ]
-                                quality = src_info.get("quality") or "1080p"
+                    if source is None:
+                        source = next(
+                            (src for src in candidates if str(src.get("label") or "").lower() in {"", "both"}),
+                            None,
+                        )
+                    if source is None:
+                        continue
+                    subtitles = self._subtitles(entry.get("tracks") or [], is_dub)
+                    variants = self._playlist_variants(source["src"], source.get("quality") or "auto", is_dub)
+                    seen = set()
+                    for variant in variants:
+                        identity = (variant["url"], variant.get("audio_url"))
+                        if identity in seen:
+                            continue
+                        seen.add(identity)
+                        res = variant["resolution"]
+                        row = {
+                            "sourceName": f"[{status_label}] {res}",
+                            "link": variant["url"], "sourceUrl": variant["url"],
+                            "streamUrl": variant["url"],
+                            "resolution": res, "type": "hls",
+                            "priority": 1 if res == "1080p" else 2,
+                            "referer": f"{self.base_url}/", "headers": headers,
+                            "requires_proxy": True, "subtitles": subtitles, "ip_version": 4,
+                        }
+                        if variant.get("audio_url"):
+                            row["audio_url"] = variant["audio_url"]
+                        all_sources.append(row)
+            else:
+                direct_url = emb.get("url") or emb.get("embed_url") or emb.get("embedUrl")
+                if direct_url:
+                    all_sources.append({
+                        "sourceName": f"[{status_label}] auto",
+                        "link": direct_url, "streamUrl": direct_url, "sourceUrl": direct_url,
+                        "resolution": "auto",
+                        "type": "hls" if ".m3u8" in str(direct_url) else "mp4",
+                        "priority": 2, "referer": f"{self.base_url}/",
+                        "headers": headers, "requires_proxy": True,
+                    })
 
-                                variants = []
-                                try:
-                                    mreq = urllib.request.Request(src_url, headers=vheaders)
-                                    with urllib.request.urlopen(mreq, timeout=5) as mresp:
-                                        m_body = mresp.read().decode("utf-8", errors="replace")
-                                        if m_body.startswith("EM3U8v1:"):
-                                            from ..media.decryption import decrypt_em3u8
-                                            dec = decrypt_em3u8(m_body)
-                                            if dec:
-                                                m_body = dec
-                                        variants = parse_master_playlist_variants(src_url, m_body)
-                                except Exception:
-                                    pass
+            for field, name, priority in (("server2", "StreamNin", 3), ("serverFM", "FileMoon", 4)):
+                if emb.get(field):
+                    all_sources.append({
+                        "sourceName": f"{name} ({status_label})", "link": emb[field],
+                        "resolution": "auto", "type": "embed", "priority": priority,
+                        "headers": {"Referer": f"{self.base_url}/"},
+                    })
+        if not all_sources and dependency_error is not None:
+            raise dependency_error
+        if dependency_error is not None:
+            from ..services.requirements import add_dependency_hints, dependency_failure_hint
 
-                                if not variants:
-                                    variants = [{"url": src_url, "resolution": quality}]
-
-                                seen_variant_urls = set()
-                                for variant in variants:
-                                    variant_url = variant.get("url") or src_url
-                                    if variant_url in seen_variant_urls:
-                                        continue
-                                    seen_variant_urls.add(variant_url)
-                                    res = variant.get("resolution") or quality
-                                    all_sources.append({
-                                        "sourceName": f"[{status_label}] {res}",
-                                        "link": variant_url,
-                                        "sourceUrl": variant_url,
-                                        "resolution": res,
-                                        "type": "hls",
-                                        "priority": 1 if res == "1080p" else 2,
-                                        "referer": f"{self.base_url}/",
-                                        "headers": {
-                                            "Referer": f"{self.base_url}/",
-                                            "Origin": self.base_url,
-                                            "User-Agent": HEADERS["User-Agent"],
-                                        },
-                                        "requires_proxy": True,
-                                        "subtitles": subtitles,
-                                    })
-                except Exception as exc:
-                    logging.debug("Senshi vidcloud fetch error: %s", exc)
-
-            direct_url = emb.get("url") or emb.get("embed_url") or emb.get("embedUrl")
-            if direct_url and not any(
-                direct_url in {src.get("streamUrl"), src.get("link"), src.get("sourceUrl")}
-                for src in all_sources
-            ):
-                all_sources.append({
-                    "sourceName": f"[{status_label}] auto",
-                    "link": direct_url,
-                    "streamUrl": direct_url,
-                    "sourceUrl": direct_url,
-                    "resolution": "auto",
-                    "type": "hls" if ".m3u8" in str(direct_url) else "mp4",
-                    "priority": 2,
-                    "referer": f"{self.base_url}/",
-                    "headers": {
-                        "Referer": f"{self.base_url}/",
-                        "Origin": self.base_url,
-                        "User-Agent": HEADERS["User-Agent"],
-                    },
-                    "requires_proxy": True,
-                })
-
-            # 2. Server 2 (StreamNin)
-            server2 = emb.get("server2")
-            if server2:
-                all_sources.append({
-                    "sourceName": f"StreamNin ({status_label})",
-                    "link": server2,
-                    "resolution": "auto",
-                    "type": "embed",
-                    "priority": 3,
-                    "headers": {"Referer": f"{self.base_url}/"},
-                })
-
-            # 3. Server FM (FileMoon)
-            serverFM = emb.get("serverFM")
-            if serverFM:
-                all_sources.append({
-                    "sourceName": f"FileMoon ({status_label})",
-                    "link": serverFM,
-                    "resolution": "auto",
-                    "type": "embed",
-                    "priority": 4,
-                    "headers": {"Referer": f"{self.base_url}/"},
-                })
+            all_sources = [add_dependency_hints(source, [dependency_failure_hint(dependency_error)]) for source in all_sources]
         return all_sources
 
     def episode_sources(self, provider_id: str, episode: str, ttype: str = "sub") -> dict[str, Any] | None:
-        cache_key = (str(provider_id), str(episode), str(ttype).lower())
-        if cache_key in self._sources_cache:
-            return self._sources_cache[cache_key]
-
+        language = str(ttype).lower()
+        cache_key = (self.base_url, str(provider_id), str(episode), language)
+        cached = self._cache_get(self._sources_cache, cache_key)
+        if cached is not None:
+            return cached
         embeds = self._fetch_json(f"{self.base_url}/episode-embeds/{provider_id}/{episode}")
-        if not embeds or not isinstance(embeds, list):
-            self._sources_cache[cache_key] = None
+        if not isinstance(embeds, list):
             return None
-
-        want_dub = (str(ttype).lower() == "dub")
-        sub_embeds = [
-            emb for emb in embeds
-            if str(emb.get("status") or "").lower() != "dub"
+        want_dub = language == "dub"
+        target_embeds = [
+            emb for emb in embeds if isinstance(emb, dict)
+            and (str(emb.get("status") or "").lower() == "dub") == want_dub
         ]
-        dub_embeds = [
-            emb for emb in embeds
-            if str(emb.get("status") or "").lower() == "dub"
-        ]
+        sources = self._extract_embed_sources(target_embeds, is_dub=want_dub)
+        if not sources:
+            return None
+        result = normalize_episode_sources(
+            {"episode": {"sourceUrls": sources}},
+            provider_id=self.id, provider_title_id=provider_id, episode=episode,
+        )
+        from ..services.requirements import add_dependency_hints, dependency_hint_messages
 
-        if not dub_embeds:
-            self._sources_cache[(str(provider_id), str(episode), "dub")] = None
-        if not sub_embeds:
-            self._sources_cache[(str(provider_id), str(episode), "sub")] = None
-
-        target_embeds = dub_embeds if want_dub else sub_embeds
-        other_embeds = sub_embeds if want_dub else dub_embeds
-        other_ttype = "sub" if want_dub else "dub"
-        other_key = (str(provider_id), str(episode), other_ttype)
-
-        if other_embeds and other_key not in self._sources_cache:
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-                fut_target = executor.submit(self._extract_embed_sources, target_embeds, want_dub) if target_embeds else None
-                fut_other = executor.submit(self._extract_embed_sources, other_embeds, not want_dub)
-
-                if fut_target:
-                    sources = fut_target.result()
-                    res_target = normalize_episode_sources({
-                        "episode": {"sourceUrls": sources}
-                    }, provider_id=self.id, provider_title_id=provider_id, episode=episode) if sources else None
-                else:
-                    res_target = None
-                self._sources_cache[cache_key] = res_target
-
-                try:
-                    oth_sources = fut_other.result()
-                    self._sources_cache[other_key] = normalize_episode_sources({
-                        "episode": {"sourceUrls": oth_sources}
-                    }, provider_id=self.id, provider_title_id=provider_id, episode=episode) if oth_sources else None
-                except Exception:
-                    pass
-        else:
-            if not target_embeds:
-                self._sources_cache[cache_key] = None
-                res_target = None
-            else:
-                sources = self._extract_embed_sources(target_embeds, is_dub=want_dub)
-                res_target = normalize_episode_sources({
-                    "episode": {"sourceUrls": sources}
-                }, provider_id=self.id, provider_title_id=provider_id, episode=episode) if sources else None
-                self._sources_cache[cache_key] = res_target
-
-        return res_target
+        result = add_dependency_hints(result, [hint for source in sources for hint in dependency_hint_messages(source)])
+        self._cache_put(self._sources_cache, cache_key, result, 120, 32)
+        return result
 
     def browser_url(self, *, provider_id: str = "", episode: str = "") -> str:
         if provider_id and episode:

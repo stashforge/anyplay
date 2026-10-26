@@ -9,6 +9,8 @@ from media_cli.playback import android, engine
 from media_cli.ui import player_screen
 from media_cli.ui.transition import PreparationCancelled
 
+pytestmark = pytest.mark.usefixtures("installed_android_launcher")
+
 
 @pytest.mark.parametrize("enabled", [False, True])
 def test_android_unknown_duration_writes_real_chapters_or_clears_disabled_marks(monkeypatch, tmp_path, enabled):

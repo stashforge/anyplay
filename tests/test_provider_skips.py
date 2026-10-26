@@ -43,17 +43,23 @@ class Executor:
         pass
 
 
-def test_provider_op_wins_and_missing_ed_is_filled_by_aniskip(monkeypatch):
+@pytest.mark.parametrize("kind", ["op", "ed"])
+def test_partial_native_data_is_exclusive_and_does_not_request_aniskip(monkeypatch, kind):
     executor = Executor()
     monkeypatch.setattr("media_cli.playback.skip_lookup.DaemonExecutor", lambda **kw: executor)
     lookup = SkipLookup()
-    lookup.reset(20, 1, [native()])
-    assert lookup.poll(1400) == (native(),)
-    assert len(executor.calls) == 1
+    lookup.reset(20, 1, [native(kind)])
+    assert lookup.poll(1400) == (native(kind),)
+    assert not executor.calls
+    lookup.close()
+
+
+def test_cached_aniskip_cannot_add_missing_types_to_native_data():
     remote_op = {"type": "op", "start": 0, "end": 85, "episode_length": 1400}
     remote_ed = {"type": "ed", "start": 1310, "end": 1390, "episode_length": 1400}
-    executor.calls[0][2].set_result([remote_op, remote_ed])
-    assert lookup.poll(1400) == (native(), remote_ed)
+    lookup = SkipLookup()
+    lookup.reset(20, 1, [native("ed", 1327, 1395), remote_op, remote_ed])
+    assert lookup.poll(1400) == (native("ed", 1327, 1395),)
     lookup.close()
 
 
@@ -128,7 +134,7 @@ def test_desktop_wires_native_candidates_but_custom_and_disabled_keep_priority(m
 
 
 @pytest.mark.parametrize("complete", [False, True])
-def test_android_exports_native_and_only_fetches_missing_types(monkeypatch, complete):
+def test_android_exports_native_exclusively_without_filling_missing_types(monkeypatch, complete):
     from media_cli.media import aniskip
     from media_cli.playback import android
 
@@ -144,8 +150,27 @@ def test_android_exports_native_and_only_fetches_missing_types(monkeypatch, comp
     monkeypatch.setattr(android.subprocess, "run", lambda *a, **kw: None)
     android.play_android("Title", 1, {"link": "https://example.org/video.mp4", "skip_intervals": rows},
                          None, player="vlc", mal_id=20, fetch_skip_times_fn=fetch)
-    assert written == [rows if complete else [native(), remote_ed]]
-    assert calls == ([] if complete else [{"episode_length": 0.0}])
+    assert written == [rows]
+    assert calls == []
+
+
+def test_valid_native_type_does_not_mix_with_fallback_for_invalid_native_type():
+    remote_op = {"type": "op", "start": 0, "end": 85, "episode_length": 1400}
+    assert playback_skip_intervals([native("op", 1500, 1590), native("ed", 1310, 1390), remote_op], 1400) == [native("ed", 1310, 1390)]
+
+
+def test_inflight_aniskip_result_does_not_replace_native_when_duration_changes(monkeypatch):
+    executor = Executor()
+    monkeypatch.setattr("media_cli.playback.skip_lookup.DaemonExecutor", lambda **kw: executor)
+    lookup = SkipLookup()
+    rows = [native("ed", 1400, 1490)]
+    lookup.reset(20, 1, rows)
+    assert lookup.poll(1300) == ()
+    assert len(executor.calls) == 1
+    executor.calls[0][2].set_result([{"type": "op", "start": 10, "end": 90, "episode_length": 1500}])
+    assert lookup.poll(1500) == tuple(rows)
+    assert len(executor.calls) == 1
+    lookup.close()
 
 
 def test_android_native_skips_obey_disable_and_work_without_mal(monkeypatch):

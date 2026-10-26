@@ -124,7 +124,8 @@ def _clear_poster_downloads():
 
 
 def clear_terminal_images():
-    sys.stdout.write(terminal_images.clear_now())
+    from .terminal_output import write_terminal
+    write_terminal(terminal_images.clear_now())
     sys.stdout.flush()
 
 
@@ -178,15 +179,26 @@ def is_alt_screen_active():
     return bool(_alt_screen_active)
 
 
-@terminal_application
 def enter_alt_screen():
+    # This screen outlives the entry helper. A temporary application scope
+    # would restore stderr as soon as this function returned.
+    from .transition import call_on_ui_thread, in_preparation
+    if in_preparation():
+        return call_on_ui_thread(enter_alt_screen)
+    import threading
+    if threading.current_thread() is not threading.main_thread():
+        raise RuntimeError("Alternate-screen entry requires the UI thread")
     from ..context import FLAGS
     if getattr(FLAGS, "plain_mode", False) or not sys.stdin.isatty() or not sys.stdout.isatty():
         return
     global _alt_screen_active
     if not _alt_screen_active:
+        from .stderr_capture import begin_stderr_capture
+
+        begin_stderr_capture()
         pending_image_clear = terminal_images.clear_if_active()
-        sys.stdout.write(pending_image_clear + "\033[?1049h\033[2J\033[?25l")
+        from .terminal_output import write_terminal
+        write_terminal(pending_image_clear + "\033[?1049h\033[2J\033[?25l")
         sys.stdout.flush()
         _alt_screen_active = True
         logging.getLogger(__name__).debug("Alternate screen entered: cleared=True")
@@ -212,7 +224,8 @@ def exit_alt_screen():
             invalidate_screen_buffer()
         except Exception:
             pass
-        sys.stdout.write("\033[?1049l\033[?25h")
+        from .terminal_output import write_terminal
+        write_terminal("\033[?1049l\033[?25h")
         sys.stdout.flush()
         _alt_screen_active = False
         logging.getLogger(__name__).debug("Alternate screen exited")
@@ -229,6 +242,9 @@ def restore_terminal():
         exit_alt_screen()
     except Exception:
         pass
+    from .stderr_capture import end_stderr_capture
+
+    end_stderr_capture()
     # Force exit alt-screen sequence unconditionally to ensure normal buffer is restored
     reset_seq = "\033[?1049l\033[?25h\033[0m"
     for stream in (sys.__stdout__, sys.stdout, sys.__stderr__, sys.stderr):
@@ -439,7 +455,8 @@ def render_anilist_menu_loading(status, loading_text=""):
         columns, rows = size.columns, size.lines
     except OSError:
         columns, rows = 80, 24
-    sys.stdout.write(
+    from .terminal_output import write_terminal
+    write_terminal(
         "\033[?25l" + _anilist_menu_loading_frame(
             status, rows, columns, loading_text
         )

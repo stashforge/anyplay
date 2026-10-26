@@ -56,6 +56,8 @@ from .loading_model import LoadingInteraction, LoadingOwner, LoadingPlacement, L
 from .poster import PosterManager
 from .spinner import spinner_frame
 from .transition import LoadingInput
+from .terminal_output import write_terminal
+from ..core.terminal import sanitize_terminal_text
 
 _logger = logging.getLogger(__name__)
 T = TypeVar("T")
@@ -72,9 +74,7 @@ RESET = "\033[0m"
 def _safe_stdout_write(text: str, *, flush: bool = True) -> bool:
     """Best-effort terminal write for redraws; skip frames on EAGAIN."""
     try:
-        sys.stdout.write(text)
-        if flush:
-            sys.stdout.flush()
+        write_terminal(text, flush=flush)
         return True
     except BlockingIOError:
         _logger.debug("Dropped player-screen redraw because stdout would block")
@@ -352,8 +352,7 @@ def run_loading_work(
         )
 
     def report(message: str, color: str) -> None:
-        state["status_lines"].append(f"{color}{message}\033[0m")
-        del state["status_lines"][:-8]
+        _store_status(state, message, color)
 
     spec = task if task is not None else LoadingTaskSpec(
         "episode-data", LoadingOwner("player", 0), _loading_message(state),
@@ -397,39 +396,39 @@ def deactivate(close_alt: bool = False) -> None:
     except Exception:
         pass
     from ..context import FLAGS
+    if close_alt:
+        from .display import restore_terminal
+        if clear_images:
+            _safe_stdout_write(clear_images)
+        restore_terminal()
+        _player_ui_state["active"] = False
+        return
     if getattr(FLAGS, "plain_mode", False) or not sys.stdin.isatty():
         _player_ui_state["active"] = False
         return
-    if close_alt:
-        # Exit alt screen
-        _safe_stdout_write(clear_images + "\033[?1049l\033[?25h")
-    else:
-        _safe_stdout_write(clear_images + "\033[2J\033[H\033[?25l")
+    _safe_stdout_write(clear_images + "\033[2J\033[H\033[?25l")
     _player_ui_state["active"] = False
 
 
 def add_status_line(message: str, color: str = "\033[94m") -> bool:
-    """Append a status line to the loading overlay and trigger a redraw.
-
-    Returns ``True`` if the player screen is currently active (and the
-    message was appended), ``False`` otherwise.
-    """
+    """Retain intentional player progress; only the UI owner may redraw."""
     s = _player_ui_state
     if not s["active"]:
         return False
     from ..context import FLAGS
-    if getattr(FLAGS, "plain_mode", False) or not sys.stdin.isatty():
-        if sys.stdout.isatty():
-            _safe_stdout_write(f"{color}{message}\033[0m\n")
-        else:
-            from .plain_picker import strip_ansi
-            _safe_stdout_write(f"{strip_ansi(message)}\n")
-        return True
-    s["status_lines"].append(f"{color}{message}\033[0m")
-    if len(s["status_lines"]) > 8:
-        s["status_lines"].pop(0)
-    render()
+    if getattr(FLAGS, "plain_mode", False):
+        return False
+    _store_status(s, message, color)
+    if threading.current_thread() is threading.main_thread():
+        render()
     return True
+
+
+def _store_status(state: dict, message: str, color: str) -> None:
+    clean = sanitize_terminal_text(message).strip()
+    if clean:
+        state["status_lines"].append(f"{color}{clean}\033[0m")
+        del state["status_lines"][:-8]
 
 
 def get_player_poster(show: dict | None, ui: UiState | None = None) -> str:

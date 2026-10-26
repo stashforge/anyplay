@@ -47,6 +47,28 @@ def test_selection_uses_visible_action_id_not_changed_source_order():
     assert control.session.result == DetailsMenuResult("selected", "PLAY_CURRENT")
 
 
+def test_ready_catalog_exits_menu_without_waiting_for_user_input():
+    control, _, ui = make_control()
+    ready = [False]
+    control = DetailsMenuController(ui=ui, read_view=control._read, switch_translation=lambda: None,
+        information=lambda: None, ready=lambda: ready[0])
+    assert control.updates(force=True) == ()
+    ready[0] = True
+    publish(control)
+    assert control.session.result == DetailsMenuResult('selected', 'CATALOG_READY')
+
+
+def test_episode_action_is_focusable_but_can_be_blocked_until_catalog_ready():
+    control, _, ui = make_control()
+    control = DetailsMenuController(ui=ui, read_view=control._read, switch_translation=lambda: None,
+        information=lambda: None, can_activate=lambda action: action != 'PLAY_CURRENT')
+    assert control.session.item('action:PLAY_CURRENT').selectable
+    send(control, 'select', 'action:PLAY_CURRENT')
+    assert not control.session.exited
+    send(control, 'select', 'action:PROGRESS')
+    assert control.session.result == DetailsMenuResult('selected', 'PROGRESS')
+
+
 def test_live_relabel_keeps_selection_filter_and_scroll():
     control, source, _ = make_control()
     control.session.position.selected_id = "action:PROGRESS"

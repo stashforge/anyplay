@@ -9,13 +9,8 @@ from typing import Any
 
 from ..media.sources import format_source_label, quality_from_dimensions
 from ..services.http import SSL_CTX, UA
-
-try:
-    from curl_cffi import requests as cffi_requests
-    CURL_CFFI_AVAILABLE = True
-except ImportError:
-    cffi_requests = None
-    CURL_CFFI_AVAILABLE = False
+from ..services.requirements import optional_curl_requests
+from .routing import matches_url
 
 
 def _quality_from_height(height: int) -> tuple[str, int]:
@@ -31,17 +26,7 @@ class BaseExtractor:
 
     def can_handle(self, url: str) -> bool:
         """Return True if this extractor can handle the given URL."""
-        if not url:
-            return False
-        parsed = urllib.parse.urlparse(url)
-        host = (parsed.netloc or "").casefold()
-        for domain in self.domains:
-            if domain in host:
-                return True
-        for pattern in self.patterns:
-            if pattern.search(url):
-                return True
-        return False
+        return matches_url(url, self.domains, self.patterns)
 
     def fetch_page(
         self,
@@ -63,7 +48,8 @@ class BaseExtractor:
         if headers:
             req_headers.update(headers)
 
-        if CURL_CFFI_AVAILABLE and cffi_requests is not None:
+        cffi_requests = optional_curl_requests()
+        if cffi_requests is not None:
             try:
                 imp = "firefox147" if "Firefox" in req_headers.get("User-Agent", "") else "chrome"
                 resp = cffi_requests.get(

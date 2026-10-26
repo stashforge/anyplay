@@ -49,22 +49,25 @@ def test_skip_loading_runs_wait_or_fetch_on_worker(monkeypatch, source):
     )
 
 
-@pytest.mark.parametrize("custom", [False, True])
-def test_skip_cancel_returns_to_details_and_custom_skips_bypass_wait(monkeypatch, custom):
+@pytest.mark.parametrize("mode", ["fallback", "custom", "native"])
+def test_skip_cancel_returns_to_details_and_preferred_sources_bypass_wait(monkeypatch, mode):
     from media_cli.context import CliFlags, MachineState, UiState
     from media_cli.core import workers
 
     core = playback_player.app_core
+    custom, native = mode == "custom", mode == "native"
     data = {"episode": {"sourceUrls": []}}
     show = {"_id": "one", "_provider": "torrent", "name": "Example"}
     ui = UiState(ui_show_ctx=show)
     ms = MachineState(current_ep="1", selected_stream={"link": "file", "source_name": "Local File"},
                       ep_cache_key=("one", "1", "sub", "torrent"), ep_cache_data=data)
+    if native:
+        ms.selected_stream["skip_intervals"] = [{"type": "ed", "start": 1327, "end": 1415, "source": "provider"}]
     calls = []
 
     class Pool:
         def __init__(self, **kw):
-            pass
+            pytest.fail("AniSkip prefetch started before inspecting selected source")
 
         def submit(self, *a):
             return Future()
@@ -74,7 +77,7 @@ def test_skip_cancel_returns_to_details_and_custom_skips_bypass_wait(monkeypatch
             calls.append("shutdown")
 
     def wait(*args, **kwargs):
-        assert not custom, "Custom skips must bypass remote data waiting"
+        assert not custom and not native, "Preferred skips must bypass remote data waiting"
         calls.append("wait")
         raise PreparationCancelled
 
@@ -94,7 +97,7 @@ def test_skip_cancel_returns_to_details_and_custom_skips_bypass_wait(monkeypatch
     monkeypatch.setattr(core, "set_action_feedback", lambda *a: calls.append("feedback"))
     monkeypatch.setattr(core, "is_termux", lambda: False)
     def play(*args, **kwargs):
-        assert custom, "Cancelled preparation started playback"
+        assert custom or native, "Cancelled preparation started playback"
         return ("CANCELLED", 0, 0, 0, 0)
 
     monkeypatch.setattr(core, "play_desktop", play)
@@ -105,7 +108,10 @@ def test_skip_cancel_returns_to_details_and_custom_skips_bypass_wait(monkeypatch
     assert playback_player.handle_play_state(
         CliFlags(), ui, ms, {}, args, "sub", "best", lambda *a: False,
     ) == "DETAILS"
-    if not custom:
-        assert calls == ["wait", "exit", "feedback", "shutdown"]
-    else:
+    if mode == "fallback":
+        assert calls == ["wait", "exit", "feedback"]
+    elif custom:
         assert any("Custom Skips" in line for line in player_screen._player_ui_state["status_lines"])
+    else:
+        assert any("Provider skips" in line for line in player_screen._player_ui_state["status_lines"])
+        assert not any("AniSkip:" in line for line in player_screen._player_ui_state["status_lines"])

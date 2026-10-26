@@ -11,6 +11,7 @@ from typing import Any
 
 from bs4 import BeautifulSoup
 
+from media_cli.media.provider_skips import normalize_provider_skips
 from media_cli.services import anilist
 from media_cli.services import normalize as anilist_normalize
 
@@ -40,6 +41,11 @@ _KEY_2 = "fOyt97QWFB3"
 _EXCHANGE_KEY_2 = ["1majSlPQd2M5", "da1l2jSmP5QM"]
 _EXCHANGE_KEY_3 = ["CPYvHj09Au3", "0jHA9CPYu3v"]
 _KEY_3 = "736y1uTJpBLUX"
+
+
+def _native_skips(payload: dict, decoded=None) -> list[dict]:
+    data = {**payload, **decoded} if isinstance(decoded, dict) else payload
+    return normalize_provider_skips({"op": data.get("intro"), "ed": data.get("outro")})
 
 
 def _slug_title_from_watch_href(href: str) -> str:
@@ -772,6 +778,7 @@ class AnikotoProvider:
 
             stream_url = None
             tracks = []
+            skip_intervals = []
             embed_referer = f"https://{host}/"
 
             if "vidtube" in host:
@@ -783,6 +790,7 @@ class AnikotoProvider:
                     "X-Requested-With": "XMLHttpRequest"
                 })
                 src_res = json.loads(urllib.request.urlopen(req_src, timeout=5).read().decode('utf-8'))
+                skip_intervals = _native_skips(src_res)
                 sources = src_res.get("sources", {})
                 stream_url = sources.get("file") if isinstance(sources, dict) else (sources[0].get("file") if sources else None)
                 tracks = src_res.get("tracks", [])
@@ -834,10 +842,12 @@ class AnikotoProvider:
                     return []
 
                 stream_url = None
+                skip_intervals = _native_skips(src_res)
                 if src_res.get("enc"):
                     dec = _decrypt_megaplay_enc(src_res["enc"])
                     if dec and isinstance(dec, dict):
                         stream_url = dec.get("file") or dec.get("url")
+                        skip_intervals = _native_skips(src_res, dec)
 
                 if not stream_url:
                     sources = src_res.get("sources", [])
@@ -857,6 +867,7 @@ class AnikotoProvider:
                             dec_tcdn = _decrypt_megaplay_enc(src_res_tcdn["enc"])
                             if dec_tcdn and isinstance(dec_tcdn, dict) and dec_tcdn.get("file"):
                                 stream_url = dec_tcdn["file"]
+                                skip_intervals = _native_skips(src_res_tcdn, dec_tcdn)
                                 if not tracks:
                                     tracks = src_res_tcdn.get("tracks", [])
                     except Exception:
@@ -948,6 +959,8 @@ class AnikotoProvider:
                                             v_entry["subtitles"] = subtitles
                                         if default_sub:
                                             v_entry["subtitle_url"] = default_sub
+                                        if skip_intervals:
+                                            v_entry["skip_intervals"] = skip_intervals
                                         variants.append(v_entry)
                         if variants:
                             variants.sort(key=lambda x: x["sort_key"], reverse=True)
@@ -977,6 +990,8 @@ class AnikotoProvider:
                 auto_entry["subtitles"] = subtitles
             if default_sub:
                 auto_entry["subtitle_url"] = default_sub
+            if skip_intervals:
+                auto_entry["skip_intervals"] = skip_intervals
             results.append(auto_entry)
         except Exception as s_err:
             _logger.debug("Anikoto server %s extraction error: %s", s_name, s_err)
@@ -1126,10 +1141,12 @@ class AnikotoProvider:
                     )
                     res_api = urllib.request.urlopen(req_api, timeout=7).read().decode('utf-8')
                     sources_data = json.loads(res_api)
+                    skip_intervals = _native_skips(sources_data)
                     enc_payload = sources_data.get("enc")
                     if enc_payload:
                         dec = _decrypt_megaplay_enc(enc_payload)
                         if isinstance(dec, dict):
+                            skip_intervals = _native_skips(sources_data, dec)
                             if "tracks" in sources_data and "tracks" not in dec:
                                 dec["tracks"] = sources_data["tracks"]
                             sources_data = dec
@@ -1150,6 +1167,8 @@ class AnikotoProvider:
                         default_sub = next((s["url"] for s in subtitles if "eng" in s.get("label", "").lower()), None)
 
                     raw_sources = sources_data.get("sources", [])
+                    if not raw_sources and (sources_data.get("file") or sources_data.get("url")):
+                        raw_sources = [sources_data]
                     if isinstance(raw_sources, dict):
                         raw_sources = [raw_sources]
                     for source in raw_sources:
@@ -1176,6 +1195,8 @@ class AnikotoProvider:
                             fb_entry["subtitles"] = subtitles
                         if default_sub:
                             fb_entry["subtitle_url"] = default_sub
+                        if skip_intervals:
+                            fb_entry["skip_intervals"] = skip_intervals
                         source_urls.append(fb_entry)
             except Exception as fb_err:
                 _logger.debug("Anikoto legacy fallback error: %s", fb_err)

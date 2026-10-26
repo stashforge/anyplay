@@ -28,7 +28,9 @@ from ..media.sources import (
     quality_preference_key,
     source_priority,
 )
+from ..services.requirements import add_dependency_hints, dependency_failure_hint, dependency_hint_messages
 from . import reporting
+from .api import ProviderDependencyError
 from .storage import get_preferred_mirror
 
 YELLOW = "\033[1;33m"
@@ -418,13 +420,15 @@ def _set_cached_ep_data(ep_data: dict, key=None, show_id=None, ep=None, ttype="s
             _streams_cache[k]["ep_data"] = ep_data
             _streams_cache[k]["ep_data_version"] = ep_data_version
             if ep_data_version != old_version and (ep_data_version or old_version):
+                _streams_cache[k].pop("dependency_error", None)
+                _streams_cache[k].pop("dependency_hints", None)
                 _streams_cache[k]["streams"] = []
                 _streams_cache[k]["state"] = unresolved_state
             elif source_urls and not _streams_cache[k].get("streams"):
                 _streams_cache[k]["state"] = "STALE"
 
 
-def _publish_stream(stream, generation, key=None):
+def _publish_stream(stream, generation, key=None, *, expected_version=None):
     """Publish a resolved stream only while its episode generation is current."""
     now = time.time()
     stream.setdefault("created_at", now)
@@ -437,6 +441,10 @@ def _publish_stream(stream, generation, key=None):
     with _streams_lock:
         if generation != _streams_generation:
             return False
+        if expected_version is not None:
+            entry = _streams_cache.get(key)
+            if entry is None or entry.get("ep_data_version") != expected_version:
+                return False
 
         # Fresh Stream Replacement / Upsert in all_streams
         found_idx = next(
@@ -484,6 +492,27 @@ def _update_bg_stats(generation, *, current=None, resolved=0, failed=0, status_m
             _bg_stats["status_msg"] = status_msg
         _bg_stats["resolved"] += resolved
         _bg_stats["failed"] += failed
+        return True
+
+
+def resolution_feedback(key):
+    """Read source feedback on the owner; never raise from a worker snapshot."""
+    with _streams_lock:
+        entry = _streams_cache.get(key, {})
+        return dependency_hint_messages(entry), entry.get("dependency_error")
+
+
+def _record_dependency_feedback(key, generation, error=None, hints=()):
+    with _streams_lock:
+        entry = _streams_cache.get(key)
+        if (generation != _streams_generation or entry is None
+                or entry.get("resolution_generation") != generation
+                or entry.get("resolution_version") != entry.get("ep_data_version")):
+            return False
+        if error is not None:
+            entry.setdefault("dependency_error", error)
+            hints = (*hints, dependency_failure_hint(error))
+        entry["dependency_hints"] = list(dependency_hint_messages(add_dependency_hints(entry, hints)))
         return True
 
 
@@ -587,6 +616,11 @@ def start_bg_resolve(
                 if ep_data:
                     _streams_cache[stream_key]["ep_data"] = ep_data
                     _streams_cache[stream_key]["ep_data_version"] = ep_data_version
+            entry = _streams_cache[stream_key]
+            entry.pop("dependency_error", None)
+            entry.pop("dependency_hints", None)
+            entry["resolution_generation"] = generation
+            entry["resolution_version"] = entry.get("ep_data_version")
 
     with _bg_lock:
         _bg_stats = {
@@ -599,6 +633,7 @@ def start_bg_resolve(
 
     def worker():
         nonlocal sources
+        resolution_version = ep_data_version
         if stream_key is not None:
             existing_valid = _stream_snapshot(
                 show_id, ep, ttype, provider_id, quality,
@@ -608,6 +643,8 @@ def start_bg_resolve(
             existing_valid = []
         with _streams_lock:
             if generation != _streams_generation:
+                return
+            if stream_key is not None and _streams_cache.get(stream_key, {}).get("ep_data_version") != resolution_version:
                 return
             # Publish only accepted health checks; never expose unchecked cache.
             all_streams.extend(existing_valid)
@@ -619,12 +656,21 @@ def start_bg_resolve(
                     return
                 if fetched_ep_data:
                     _set_cached_ep_data(fetched_ep_data, key=stream_key)
+                    resolution_version = _compute_ep_data_version(fetched_ep_data)
+                    with _streams_lock:
+                        if generation != _streams_generation:
+                            return
+                        if stream_key in _streams_cache:
+                            entry = _streams_cache[stream_key]
+                            entry["resolution_version"] = entry.get("ep_data_version")
                     raw_sources = fetched_ep_data.get("episode", {}).get("sourceUrls", [])
                     sources = expand_direct_sources(raw_sources)
                     sources = sorted(sources, key=_bg_sort_key)
                     with _bg_lock:
                         if _bg_generation == generation:
                             _bg_stats["total"] = len(sources)
+            except ProviderDependencyError as exc:
+                _record_dependency_feedback(stream_key, generation, exc)
             except Exception:
                 pass
 
@@ -632,6 +678,9 @@ def start_bg_resolve(
         for src, failed_queue, is_retry, is_final_pass in generate_source_passes(sources, max_passes=3):
             if not _generation_is_current(generation):
                 return
+            with _streams_lock:
+                if stream_key is not None and _streams_cache.get(stream_key, {}).get("ep_data_version") != resolution_version:
+                    return
             sname = src.get("sourceName", "")
             if _is_excluded_source(src):
                 continue
@@ -644,8 +693,11 @@ def start_bg_resolve(
                 for stream in resolve_source(src, silent=True):
                     if not _generation_is_current(generation):
                         return
+                    _record_dependency_feedback(stream_key, generation, hints=dependency_hint_messages(stream))
                     s_key = (stream.get("source_name"), stream.get("resolution"))
-                    if s_key not in seen_keys and _publish_stream(stream, generation, key=stream_key):
+                    if s_key not in seen_keys:
+                        if not _publish_stream(stream, generation, key=stream_key, expected_version=resolution_version if stream_key is not None else None):
+                            return
                         seen_keys.add(s_key)
                         found = True
 
@@ -665,6 +717,10 @@ def start_bg_resolve(
                         status_msg=status_msg,
                     ):
                         return
+            except ProviderDependencyError as exc:
+                _record_dependency_feedback(stream_key, generation, exc)
+                if not _update_bg_stats(generation, failed=1, status_msg=f"{display_name} unavailable"):
+                    return
             except Exception:
                 if not is_final_pass:
                     failed_queue.append(src)
@@ -675,6 +731,8 @@ def start_bg_resolve(
         with _streams_lock:
             if generation == _streams_generation and stream_key in _streams_cache:
                 entry = _streams_cache[stream_key]
+                if entry.get("ep_data_version") != resolution_version:
+                    return
                 if entry.get("streams"):
                     entry["state"] = "READY"
                 else:
@@ -766,6 +824,7 @@ def fetch_episode_stream(show_id, ep_number, ttype="sub", quality="best", provid
     reporting.info(f"Found {total_mirrors} mirror(s): {', '.join(mirror_names[:4])}{'...' if total_mirrors > 4 else ''}")
 
     retry_announced = False
+    dependency_errors = []
     for attempt_idx, (src, failed, is_retry, is_final_pass) in enumerate(generate_source_passes(sorted_sources, max_passes=2), 1):
         if cancel_check and cancel_check():
             return None
@@ -776,10 +835,16 @@ def fetch_episode_stream(show_id, ep_number, ttype="sub", quality="best", provid
         prefix = "Retry " if is_retry else ""
         mirror_num = min(attempt_idx if not is_retry else len(failed) + 1, total_mirrors)
         reporting.info(f"[{prefix}{mirror_num}/{total_mirrors}] Testing mirror: {src_name} ...")
-        streams = resolve_source(src)
+        try:
+            streams = resolve_source(src)
+        except ProviderDependencyError as exc:
+            dependency_errors.append(exc)
+            continue
         if cancel_check and cancel_check():
             return None
         if streams:
+            hints = [dependency_failure_hint(error) for error in dependency_errors]
+            streams = [add_dependency_hints(stream, hints) for stream in streams]
             selected_stream = streams[0]
             found_pref = False
             if pref_name:
@@ -801,6 +866,8 @@ def fetch_episode_stream(show_id, ep_number, ttype="sub", quality="best", provid
             failed.append(src)
             reporting.warn(f"[{prefix}{mirror_num}/{total_mirrors}] {src_name} unavailable. Trying next...")
 
+    if dependency_errors:
+        raise dependency_errors[0]
     reporting.warn("All mirrors were tested and failed.")
     return None
 

@@ -5,14 +5,16 @@ from __future__ import annotations
 import os
 import sys
 import threading
+from typing import Any, cast
 
 from ..core.anilist import search_anilist
-from ..core.api import SearchFailure, search_failure_message
+from ..core.api import ProviderDependencyError, SearchFailure, search_failure_message
 from ..core.reporting import debug_warn
 from ..core.storage import load_config, write_exception_log
 from ..domain.titles import get_show_display_title
 from ..providers import provider_display_name, provider_key
 from ..services.catalog import search_anime
+from ..services.requirements import require_provider_operation
 from ..ui import display
 from ..ui.footer import Footer, render_footer
 from ..ui.spinner import spinner_from_config
@@ -56,6 +58,7 @@ def make_provider_oneshot_search(
     loading = True
     results = []
     error = ""
+    dependency_error = None
     cfg = load_config()
     spinner_style = spinner_from_config(cfg)
     token = cfg.get("anilist_token")
@@ -91,12 +94,24 @@ def make_provider_oneshot_search(
 
         return live_fn, get_results, get_loading, get_error
 
+    require_provider_operation(provider_id, "search")
     search_status = _make_background_status(f"provider-search:{provider_id}", spinner_style)
     enrichment_status = _make_background_status(
         f"provider-search:{provider_id}", spinner_style,
         task_id="enrichment", message="Enriching metadata…",
     )
     enriching = False
+    search_cancel = threading.Event()
+    publication_lock = threading.Lock()
+    search_message = "Searching…"
+
+    def cancel_search():
+        with publication_lock:
+            search_cancel.set()
+
+    def browser_status(message):
+        nonlocal search_message
+        search_message = message
 
     def _fetch():
         nonlocal loading, enriching, results, error
@@ -105,14 +120,17 @@ def make_provider_oneshot_search(
             al_shows = None
 
             def _fetch_aa():
-                nonlocal shows, error
+                nonlocal shows, error, dependency_error
                 try:
-                    shows = search_anime(
-                        query,
-                        ttype,
-                        raise_errors=True,
-                        provider_id=provider_id,
-                    )
+                    from ..services.browser_access.operation import browser_operation
+                    with browser_operation(cancel=search_cancel, status=browser_status,
+                                           incognito=runtime_flags.incognito_mode):
+                        shows = search_anime(query, ttype, raise_errors=True, provider_id=provider_id)
+                except ProviderDependencyError as exc:
+                    with publication_lock:
+                        if not search_cancel.is_set():
+                            dependency_error = exc
+                    shows = []
                 except Exception as exc:
                     error = str(exc)
                     shows = []
@@ -134,6 +152,8 @@ def make_provider_oneshot_search(
             for t in threads:
                 t.join()
 
+            if search_cancel.is_set():
+                return
             if shows:
                 from ..core.enrichment import (
                     enrich_provider_results_background,
@@ -145,28 +165,39 @@ def make_provider_oneshot_search(
                 import media_cli.app_core as app_core
 
                 app_core.batch_prepare_shows_display_state(prepared, ttype)
-                results.extend(prepared)
-                _provider_search_cache[cache_key] = list(results)
+                with publication_lock:
+                    if search_cancel.is_set():
+                        return
+                    results.extend(prepared)
+                    _provider_search_cache[cache_key] = list(results)
 
-                if unmatched and not is_plain:
+                if unmatched and not is_plain and not search_cancel.is_set():
                     enriching = True
                     from ..ui import picker as _picker_mod
 
                     def _bg_worker():
                         nonlocal enriching
                         try:
+                            if search_cancel.is_set():
+                                return
 
                             def _on_bg_updated():
-                                _picker_mod._needs_redraw = True
+                                if not search_cancel.is_set():
+                                    _picker_mod._needs_redraw = True
 
                             enrich_provider_results_background(
                                 unmatched, token, _on_bg_updated
                             )
                         finally:
                             enriching = False
-                            _picker_mod._needs_redraw = True
+                            if not search_cancel.is_set():
+                                _picker_mod._needs_redraw = True
 
-                    threading.Thread(target=_bg_worker, daemon=True).start()
+                    with publication_lock:
+                        if not search_cancel.is_set():
+                            threading.Thread(target=_bg_worker, daemon=True).start()
+                        else:
+                            enriching = False
 
         except Exception as e:
             if not error:
@@ -181,14 +212,18 @@ def make_provider_oneshot_search(
     threading.Thread(target=_fetch, daemon=True).start()
 
     def get_results():
+        if dependency_error is not None and not search_cancel.is_set():
+            raise dependency_error
         return results
 
     def get_loading():
-        searching = search_status.read(loading)
+        searching = search_status.read(loading, message=search_message) if search_message != "Searching…" else search_status.read(loading)
         enrichment = enrichment_status.read(enriching and not loading)
         return searching or enrichment or ""
 
     def get_error():
+        if dependency_error is not None and not search_cancel.is_set():
+            raise dependency_error
         return error
 
     last_res_state = None
@@ -196,6 +231,7 @@ def make_provider_oneshot_search(
 
     def live_fn(q=""):
         nonlocal last_res_state, cached_opts
+        get_error()  # Legacy live pickers also need owner-thread dependency failures.
         current_state = (len(results), enriching)
         if current_state != last_res_state:
             last_res_state = current_state
@@ -206,6 +242,7 @@ def make_provider_oneshot_search(
         is_done = (not loading) if is_plain else (not loading and not enriching)
         return cached_opts, _loading_header(get_loading()), is_done
 
+    cast(Any, live_fn).cancel = cancel_search
     return live_fn, get_results, get_loading, get_error
 
 

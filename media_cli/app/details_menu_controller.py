@@ -43,6 +43,8 @@ class DetailsMenuController:
         information: Callable[[], object],
         activate: Callable[[str, int | None], object] | None = None,
         action_handlers: Mapping[str, Callable[[str | None], object]] | None = None,
+        ready: Callable[[], bool] | None = None,
+        can_activate: Callable[[str], bool] | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._ui = ui
@@ -50,6 +52,8 @@ class DetailsMenuController:
         self._switch = switch_translation
         self._information = information
         self._activate = activate
+        self._ready = ready
+        self._can_activate = can_activate
         self._action_handlers = dict(action_handlers or {})
         for action, handler in self._action_handlers.items():
             if not isinstance(action, str) or not action.strip() or not callable(handler):
@@ -77,6 +81,8 @@ class DetailsMenuController:
         if not force and now < self._next_poll:
             return ()
         self._next_poll = now + 0.1
+        if self._ready is not None and self._ready():
+            return (ExitSession(DetailsMenuResult('selected', 'CATALOG_READY')),)
         view = self._read()
         self._validate_handlers(view)
         if view == self._published:
@@ -129,6 +135,8 @@ class DetailsMenuController:
             self._retain_cover()
             if not isinstance(item.reference, str):
                 raise TypeError("Details menu selection requires an action ID")
+            if self._can_activate is not None and not self._can_activate(item.reference):
+                return self.updates(force=True)
             if self._activate is not None:
                 direction = None if event.kind == "select" else (1 if event.value == "increase" else -1)
                 try:
@@ -157,10 +165,13 @@ def run_details_menu(
     activate: Callable[[str, int | None], object] | None = None,
     action_handlers: Mapping[str, Callable[[str | None], object]] | None = None,
     initial_selected_id: str | None = None,
+    ready: Callable[[], bool] | None = None,
+    can_activate: Callable[[str], bool] | None = None,
 ) -> DetailsMenuResult:
     controller = DetailsMenuController(
         ui=ui, read_view=read_view, switch_translation=switch_translation, information=information,
         activate=activate, action_handlers=action_handlers,
+        ready=ready, can_activate=can_activate,
     )
     if initial_selected_id is not None:
         item = controller.session.item(initial_selected_id)

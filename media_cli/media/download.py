@@ -4,6 +4,10 @@ import os
 import shutil
 import subprocess
 
+from ..core.processes import diagnostic_subprocess_output
+from ..core.reporting import console_status
+from ..services.network_affinity import bound_proxy_options
+from .download_requirements import plan_download
 from .languages import filter_tracks_by_language, normalize_lang_code
 from .subtitles import download_sidecar_subtitles, remux_subtitles_into_mkv
 from .urls import validate_optional_referer, validate_stream_url
@@ -16,7 +20,7 @@ RESET = "\033[0m"
 
 
 def _error(message):
-    print(f"{RED}[ERR]{RESET} {message}")
+    console_status(message, kind='error')
 
 
 def _partial_output_path(final_path: str) -> str:
@@ -88,7 +92,6 @@ def download_episode(
         download_sub_langs = cfg.get("download_sub_langs", "multi")
     if download_audio_langs is None:
         download_audio_langs = cfg.get("download_audio_langs", "multi")
-    subtitle_mode = "embed"
 
     raw_url = stream.get("link") or stream.get("streamUrl") or stream.get("sourceUrl") or ""
     if not raw_url:
@@ -109,31 +112,20 @@ def download_episode(
     subtitles = list(stream.get("subtitles") or [])
     if not subtitles and stream.get("subtitle"):
         subtitles = [{"url": stream.get("subtitle"), "label": "Default", "language": "en", "default": True}]
+    subtitles = filter_tracks_by_language(subtitles, download_sub_langs, is_audio=False)
 
-    has_multi_audio = len(audio_tracks) > 1 or (audio_url and audio_url != raw_url)
+    has_multi_audio = any(track.get("url") and track["url"] != raw_url for track in audio_tracks) or bool(audio_url and audio_url != raw_url)
     embed_subs = bool(subtitles) and (download_sub_langs not in ("none", "no", False))
 
-    if downloader == "auto":
-        if has_multi_audio:
-            downloader = "ffmpeg" if shutil.which("ffmpeg") else ("yt-dlp" if shutil.which("yt-dlp") else "ffmpeg")
+    plan = plan_download(downloader, raw_url, external_audio=has_multi_audio, embed_subtitles=embed_subs)
+    downloader = plan.engine
+    for hint in plan.hints:
+        if quiet:
+            from ..core import reporting
+
+            reporting.warn(hint)
         else:
-            downloader = "yt-dlp" if shutil.which("yt-dlp") else "ffmpeg"
-
-    if downloader == "yt-dlp":
-        if embed_subs and not shutil.which("ffmpeg"):
-            if not quiet:
-                _error("ffmpeg is required to embed subtitles into the final MKV.")
-            return False
-        if has_multi_audio and not quiet:
-            print(f"{YELLOW}ℹ yt-dlp uses --audio-multistreams for multi-audio (ffmpeg is recommended for separate stream inputs).{RESET}")
-
-    if not shutil.which(downloader):
-        if not quiet:
-            if downloader == "ffmpeg":
-                _error("ffmpeg is not installed or not in PATH.")
-            else:
-                _error("yt-dlp is not installed or not in PATH.")
-        return False
+            console_status(hint, kind='warning')
 
     try:
         url = validate_stream_url(raw_url)
@@ -166,7 +158,7 @@ def download_episode(
     ffmpeg_partial_filename = _partial_output_path(final_filename) if downloader == "ffmpeg" else ""
 
     if not quiet:
-        print(f"\n{CYAN}[Download]{RESET} {final_filename}")
+        console_status(f"Downloading {final_filename}")
 
     # Extract all headers
     headers = stream.get("headers", {})
@@ -177,6 +169,7 @@ def download_episode(
     proxy_server = None
     if (
         stream.get("requires_proxy")
+        or stream.get("ip_version") == 4
         or "uwucdn.top" in url
         or "owocdn.top" in url
         or "kwik." in referer
@@ -194,9 +187,15 @@ def download_episode(
                 title=safe_title,
                 flixcloud_w_payload=stream.get("flixcloud_w_payload"),
                 flixcloud_xor_mask=stream.get("flixcloud_xor_mask"),
+                **bound_proxy_options({**stream, "audio_url": audio_url, "audio_tracks": audio_tracks}),
             )
+            if stream.get("ip_version") == 4:
+                audio_url, audio_tracks = "", []
         except Exception:
             proxy_server = None
+            if stream.get("ip_version") == 4:
+                _error("Could not prepare the stream network proxy.")
+                return False
 
     # Subtitles download: sidecars, or fetched locally for embedding into mkv
     downloaded_sidecars: list[str] = []
@@ -212,7 +211,7 @@ def download_episode(
             )
         except Exception as sub_exc:
             if not quiet:
-                print(f"{RED}⚠ Could not download subtitles: {sub_exc}{RESET}")
+                console_status(f"Could not download subtitles: {sub_exc}", kind='warning')
 
     if downloader == "ffmpeg":
         command = [
@@ -318,7 +317,7 @@ def download_episode(
     try:
         from media_cli.core.processes import register_subprocess, unregister_subprocess
 
-        popen_kwargs = {}
+        popen_kwargs = diagnostic_subprocess_output()
         if quiet:
             popen_kwargs["stdout"] = subprocess.DEVNULL
             popen_kwargs["stderr"] = subprocess.DEVNULL
@@ -355,7 +354,7 @@ def download_episode(
 
             if downloaded_sidecars and os.path.exists(actual_download_path):
                 if not quiet:
-                    print(f"{CYAN}[Remux]{RESET} Embedding {len(downloaded_sidecars)} subtitle track(s) into {os.path.basename(final_filename)}...")
+                    console_status(f"Embedding {len(downloaded_sidecars)} subtitle track(s) into {os.path.basename(final_filename)}...")
                 remux_ok = remux_subtitles_into_mkv(
                     actual_download_path,
                     downloaded_sidecars,
@@ -401,13 +400,13 @@ def download_episode(
                     pass
 
         if not quiet:
-            print(f"\n{GREEN}[Success]{RESET} Download complete.")
+            console_status("Download complete.", kind='success')
         return True
     except Exception as exc:
         if downloader == "ffmpeg":
             _discard_partial_output(ffmpeg_partial_filename)
         if not quiet:
-            print(f"\n{RED}[Error]{RESET} Download failed: {exc}")
+            console_status(f"Download failed: {exc}", kind='error')
         return False
     finally:
         if proxy_server is not None:

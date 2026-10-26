@@ -3,6 +3,7 @@
 import difflib
 import re
 import unicodedata
+from functools import lru_cache
 
 _title_cache = {}
 
@@ -86,6 +87,12 @@ def explicit_season_number(titles):
 
 
 def title_match_score(left_titles, right_titles):
+    return _cached_title_match_score(tuple(left_titles), tuple(right_titles))
+
+
+@lru_cache(maxsize=512)
+def _cached_title_match_score(left_titles, right_titles):
+    """Cache only immutable text inputs; metadata decisions remain uncached."""
     best = 0
     exact = False
     for left in left_titles:

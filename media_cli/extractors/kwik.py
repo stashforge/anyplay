@@ -6,7 +6,9 @@ import re
 
 from bs4 import BeautifulSoup
 
-from .base import CURL_CFFI_AVAILABLE, BaseExtractor, cffi_requests
+from ..services.requirements import optional_curl_requests
+from .base import BaseExtractor
+from .routing import ROUTES
 from .unpack import JsUnpacker
 
 
@@ -14,10 +16,8 @@ class KwikExtractor(BaseExtractor):
     """Extractor for Kwik (used by AnimePahe)."""
 
     name = "Kwik"
-    domains = [
-        "kwik.cx",
-        "kwik.si",
-    ]
+    domains = ROUTES['kwik'].domains
+    patterns = ROUTES['kwik'].patterns
 
     def extract(
         self,
@@ -30,13 +30,21 @@ class KwikExtractor(BaseExtractor):
         referer: str | None = None,
         **kwargs,
     ) -> list[dict]:
-        try:
-            from ..providers.animepahe import _detect_firefox_user_agent, _find_browser_cookies
-            default_ua = _detect_firefox_user_agent()
-            browser_cookies = _find_browser_cookies(url)
-        except Exception:
-            default_ua = "Mozilla/5.0 (X11; Linux x86_64; rv:155.0) Gecko/20100101 Firefox/155.0"
+        from ..services.browser_access.integration import fetch_text, is_termux, linux_desktop
+        desktop = linux_desktop()
+        termux = is_termux()
+        if desktop or termux:
+            from ..services.http import UA
+            default_ua = UA
             browser_cookies = {}
+        else:
+            try:
+                from ..providers.animepahe import _detect_firefox_user_agent, _find_browser_cookies
+                default_ua = _detect_firefox_user_agent()
+                browser_cookies = _find_browser_cookies(url)
+            except Exception:
+                default_ua = "Mozilla/5.0 (X11; Linux x86_64; rv:155.0) Gecko/20100101 Firefox/155.0"
+                browser_cookies = {}
 
         req_headers = {
             "Referer": referer or "https://animepahe.pw/",
@@ -45,12 +53,13 @@ class KwikExtractor(BaseExtractor):
         if headers:
             req_headers.update(headers)
 
-        html = self.fetch_page(
-            url,
-            headers=req_headers,
-            referer=req_headers.get("Referer"),
-            cookies=browser_cookies,
-        )
+        if desktop or termux:
+            html = fetch_text("animepahe", ["https://kwik.cx", "https://kwik.si"], url, headers=req_headers)
+            if termux:
+                from ..services.android_webview.site_access import site_user_agent
+                req_headers["User-Agent"] = site_user_agent(url, req_headers["User-Agent"])
+        else:
+            html = self.fetch_page(url, headers=req_headers, referer=req_headers.get("Referer"), cookies=browser_cookies)
         if not html:
             return []
 
@@ -105,7 +114,8 @@ class KwikExtractor(BaseExtractor):
         action_match = re.search(r'action=["\']([^"\']+)["\']', clean_code)
         token_match = re.search(r'value=["\']([^"\']+)["\']', clean_code)
 
-        if action_match and token_match and CURL_CFFI_AVAILABLE and cffi_requests is not None:
+        cffi_requests = optional_curl_requests() if action_match and token_match else None
+        if cffi_requests is not None:
             action_url = action_match.group(1)
             token = token_match.group(1)
             try:

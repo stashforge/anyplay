@@ -12,6 +12,7 @@ from typing import Any
 
 from ..media.sources import parse_resolution_height
 from ..services.http import SSL_CTX, UA
+from ..services.requirements import optional_curl_requests
 from .shared.base import Provider
 from .shared.hls import parse_master_playlist_variants
 from .shared.models import (
@@ -21,14 +22,6 @@ from .shared.models import (
 )
 
 _logger = logging.getLogger(__name__)
-
-try:
-    from curl_cffi import requests as cffi_requests
-    CURL_CFFI_AVAILABLE = True
-except ImportError:
-    cffi_requests = None
-    CURL_CFFI_AVAILABLE = False
-
 
 def _reanime_src_sort_key(s: dict, ttype: str = "sub") -> tuple:
     """Sort Re:ANIME sources: matching audio mode first, then highest resolution, then direct MKV first."""
@@ -93,7 +86,8 @@ class ReAnimeProvider(Provider):
         return self.metadata.get("name", "Re:ANIME")
 
     def _get_session(self):
-        if self._session is None and CURL_CFFI_AVAILABLE and cffi_requests is not None:
+        cffi_requests = optional_curl_requests() if self._session is None else None
+        if cffi_requests is not None:
             self._session = cffi_requests.Session(impersonate="chrome")
         return self._session
 

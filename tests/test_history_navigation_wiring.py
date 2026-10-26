@@ -53,6 +53,97 @@ def navigation(monkeypatch):
     return state
 
 
+def test_history_reuses_rows_while_footer_changes_and_invalidates_after_info_and_tab(monkeypatch, navigation):
+    from media_cli.app.history_menu_controller import HistoryMenuResult
+    from media_cli.ui.footer import FooterStatus, StatusKind
+
+    builds = []
+    original = search.build_history_view
+
+    def build(*args, **kwargs):
+        builds.append(True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(search, 'build_history_view', build)
+    monkeypatch.setattr(search.sys.stdin, 'isatty', lambda: True)
+    footer = [None]
+    monkeypatch.setattr(search.BackgroundLoadingStatus, 'read', lambda *a, **kw: footer[0])
+
+    def information(shows, ui):
+        return lambda index: shows()[index].update(name='Updated title')
+
+    monkeypatch.setattr(search.app_core, 'make_info_fn', information)
+
+    def menu(**hooks):
+        read = hooks['read_view']
+        first = read()
+        assert read().items is first.items
+        footer[0] = FooterStatus('Refreshing this title...', StatusKind.LOADING, '~')
+        loading = read()
+        assert loading.items[0] is first.items[0]
+        assert loading.footer_statuses == (footer[0],)
+        footer[0] = None
+        assert not read().footer_statuses
+        assert len(builds) == 1, 'Idle/status reads rebuilt all History rows'
+
+        hooks['information'](first.items[0].reference)
+        updated = read()
+        assert updated.items[0].label_text == 'Updated title'
+        assert len(builds) == 2
+        hooks['switch_mode']('Active')
+        assert read().active_tab_id == 'Active'
+        assert len(builds) == 3
+        return HistoryMenuResult('back')
+
+    monkeypatch.setattr(history_menu_controller, 'run_history_menu', lambda flags, ui, **hooks: menu(**hooks))
+    assert navigation.enter() == 'SEARCH'
+
+
+def test_history_cache_accepts_refresh_results_and_deletion(monkeypatch, navigation):
+    import time
+
+    from media_cli.app.history_menu_controller import HistoryMenuResult
+
+    monkeypatch.setattr(search.sys.stdin, 'isatty', lambda: True)
+    monkeypatch.setattr(search.history_domain, 'history_entry_should_auto_refresh', lambda *a, **kw: False)
+    monkeypatch.setattr(search.app_core, 'get_show_anilist_id', lambda show: None)
+    monkeypatch.setattr(search.app_core, 'refresh_history_anilist_airing_batch', lambda *a, **kw: False)
+
+    def refresh(entry):
+        entry['show']['name'] = 'Refreshed title'
+        return True
+
+    def delete(*args, **kwargs):
+        navigation.entries.pop(0)
+        return True
+
+    monkeypatch.setattr(search.app_core, 'refresh_history_entry_provider_catalog', refresh)
+    monkeypatch.setattr(search.app_core, 'delete_history_entry', delete)
+
+    def menu(**hooks):
+        first = hooks['read_view']()
+        reference = first.items[0].reference
+        hooks['refresh_title'](reference)
+        for _ in range(200):
+            hooks['poll']()
+            current = hooks['read_view']()
+            if current.items[0].label_text == 'Refreshed title':
+                break
+            time.sleep(0.005)
+        assert current.items[0].label_text == 'Refreshed title'
+        assert hooks['read_view']().items is current.items
+        hooks['delete'](reference)
+        remaining = hooks['read_view']()
+        assert len(remaining.items) == remaining.total_count == 1
+        assert remaining.items[0].reference.provider_id == 'second'
+        return HistoryMenuResult('back')
+
+    monkeypatch.setattr(history_menu_controller, 'run_history_menu', lambda flags, ui, **hooks: menu(**hooks))
+    assert search.handle_history_state(
+        CliFlags(), navigation.ui, navigation.machine, {}, SimpleNamespace(), 'sub', None,
+    ) == 'SEARCH'
+
+
 @pytest.mark.parametrize("through_preparation", [False, True])
 @pytest.mark.parametrize("outcome,expected,event", [(-2, "QUIT", "quit"), (-3, "SEARCH", "back"), (1, "DETAILS", "select")])
 def test_live_history_basic_events_use_shared_controller(monkeypatch, navigation, through_preparation, outcome, expected, event):
@@ -317,7 +408,7 @@ def test_live_tabs_use_shared_controller_and_keep_filter(monkeypatch, navigation
                                                (b"title\x10", "QUIT", "tab_previous"),
                                                (b"Second\x0f", "QUIT", "information"),
                                                (b"Second?", "QUIT", "help"),
-                                               (b"Second\r", "QUIT", "cancel_select")])
+                                               (b"Second\r", "DETAILS", "select_without_episode_wait")])
 def test_real_terminal_history_shared_renderer(tmp_path, key, expected, event):
     source = """
 from copy import deepcopy
@@ -389,13 +480,15 @@ finish(dict(state=first_result, events=events, actions=actions, deleted=deleted,
 """
     if event.startswith("delete"):
         source = source.replace("CliFlags(incognito_mode=True,", "CliFlags(incognito_mode=False,")
-    if event == "cancel_select":
-        source = source.replace("search.app_core.with_loading = lambda message, work: work()", "")
+    if event == "select_without_episode_wait":
         source = source.replace("search.app_core.ensure_episode_ids = lambda *a: ['1', '2', '3']",
-                                "search.app_core.ensure_episode_ids = lambda *a: (time.sleep(2), ['1', '2', '3'])[1]")
+                                "def unexpected_episode_fetch(*args, **kwargs):\n"
+                                "    raise AssertionError('History must defer episode fetching to Details')\n"
+                                "search.app_core.ensure_episode_ids = unexpected_episode_fetch")
+    selection = event in ("select", "select_without_episode_wait")
     with Terminal(tmp_path, source, columns=140) as terminal:
         terminal.send_after(b"Watch History", key)
-        if event == "select":
+        if selection:
             terminal.until(b"REOPEN_BEGIN")
             terminal.send_after(b"Watch History", b"\x1b")
         if event.startswith("refresh_"):
@@ -409,9 +502,6 @@ finish(dict(state=first_result, events=events, actions=actions, deleted=deleted,
         if event in ("information", "help"):
             terminal.send_after(b"Information for second" if event == "information" else b"Title information", b"q")
             terminal.send_after(b"Watch History", b"\x1b")
-        if event == "cancel_select":
-            terminal.send_after(b"Checking episode list", b"\x1b[D")
-            terminal.send_after(b"Watch History", b"\x1b")
         result = terminal.result()
         assert result["state"] == expected
         expected_events = ["action", "quit"] if event.startswith("refresh_") else [event]
@@ -421,9 +511,7 @@ finish(dict(state=first_result, events=events, actions=actions, deleted=deleted,
             expected_events = ["tab", "quit"]
         if event in ("information", "help"):
             expected_events = ["action", "quit"] if event == "information" else ["quit"]
-        if event == "cancel_select":
-            expected_events = ["select", "quit"]
-        assert result["events"] == (["select", "quit"] if event == "select" else expected_events)
+        assert result["events"] == (["select", "quit"] if selection else expected_events)
         if event.startswith("refresh_"):
             assert result["actions"] == [event]
         if event.startswith("delete"):
@@ -436,9 +524,9 @@ finish(dict(state=first_result, events=events, actions=actions, deleted=deleted,
         if event in ("information", "help"):
             assert result["query"] == "Second"
             assert result["actions"] == (["information"] if event == "information" else [])
-        if event == "cancel_select":
-            assert result["query"] == "Second" and result["provider"] is None
-        if event == "select":
+        if event == "select_without_episode_wait":
+            assert b"Checking episode list" not in terminal.output
+        if selection:
             assert result["provider"] == "second"
             assert result["reopened"] == "QUIT"
             assert result["restored"] == {"query": "Second", "index": 0}

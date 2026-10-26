@@ -23,6 +23,7 @@ def get_log_paths() -> dict[str, str]:
     return {
         "anyplay": os.path.join(paths.LOG_DIR, "anyplay.log"),
         "crash": os.path.join(paths.LOG_DIR, "crash.log"),
+        "native": os.path.join(paths.LOG_DIR, "native.log"),
     }
 
 
@@ -138,6 +139,7 @@ def format_log_summary(log_paths: dict[str, str] | None = None) -> str:
     ordered: Iterable[tuple[str, str]] = (
         ("anyplay", paths_map.get("anyplay", "")),
         ("crash", paths_map.get("crash", "")),
+        ("native", paths_map.get("native", "")),
     )
     rows = ["Anyplay logs:"]
     for name, path in ordered:

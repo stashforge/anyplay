@@ -7,6 +7,7 @@ import re
 from bs4 import BeautifulSoup
 
 from .base import BaseExtractor
+from .routing import ROUTES
 from .unpack import JsUnpacker
 
 
@@ -14,9 +15,8 @@ class Mp4UploadExtractor(BaseExtractor):
     """Extractor for Mp4Upload."""
 
     name = "Mp4Upload"
-    domains = [
-        "mp4upload.com",
-    ]
+    domains = ROUTES['mp4upload'].domains
+    patterns = ROUTES['mp4upload'].patterns
 
     REFERER = "https://mp4upload.com/"
 

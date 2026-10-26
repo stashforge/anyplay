@@ -200,7 +200,7 @@ def test_dependency_error_propagates_without_terminal_exit(monkeypatch, operatio
         pytest.fail("Catalog preparation must not exit or restore the terminal")
 
     install_provider(monkeypatch, fetch)
-    monkeypatch.setattr(catalog, "fatal_terminal_exit", forbidden_exit)
+    monkeypatch.setattr("media_cli.ui.display.fatal_terminal_exit", forbidden_exit)
     show = make_show()
     with pytest.raises(ProviderDependencyError, match="Missing provider dependency"):
         getattr(catalog, operation)(show, "sub")
@@ -210,17 +210,13 @@ def test_noninteractive_dependency_error_is_handled_by_caller(monkeypatch):
     def fetch(*args):
         raise ProviderDependencyError("Missing dependency")
 
-    handled_on = []
-
     def terminal_exit(message):
-        handled_on.append(current_thread())
-        raise SystemExit(1)
+        pytest.fail("The CLI owner must handle the dependency error after cleanup")
 
     install_provider(monkeypatch, fetch)
-    monkeypatch.setattr(catalog, "fatal_terminal_exit", terminal_exit)
-    with pytest.raises(SystemExit):
+    monkeypatch.setattr("media_cli.ui.display.fatal_terminal_exit", terminal_exit)
+    with pytest.raises(ProviderDependencyError, match="Missing dependency"):
         catalog.ensure_episode_ids(make_show(), "sub")
-    assert handled_on == [current_thread()]
 
 
 @pytest.mark.parametrize(

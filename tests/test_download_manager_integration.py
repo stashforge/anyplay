@@ -22,7 +22,7 @@ from media_cli.ui.download_manager import prompt_download_exit_cli
 
 
 def test_cli_keyboard_interrupt_is_clean_interactive_exit(monkeypatch):
-    from media_cli.cli import main as cli_main
+    from media_cli.cli import application as cli_main
     from media_cli.services import catalog
 
     monkeypatch.setenv("ALLMANGA_NO_OS_EXIT", "1")
@@ -143,6 +143,24 @@ def test_has_active_downloads_counts_paused_as_unfinished():
         assert queued == 0
         gw.cancel_item(item.id)
         stop_global_worker()
+
+
+@pytest.mark.parametrize('status', [DownloadStatus.RESOLVING, DownloadStatus.DOWNLOADING,
+                                   DownloadStatus.QUEUED, DownloadStatus.PAUSED])
+def test_stopped_worker_does_not_prompt_again_for_stale_download_rows(monkeypatch, tmp_path, status):
+    from media_cli.app import orchestrator
+    from media_cli.media import download_worker
+
+    worker = DownloadWorker(download_dir=str(tmp_path))
+    worker.stop()
+    # A stopped resolver/process may leave its last row status until it retires.
+    worker.items.append(DownloadItem(id='stopping', title='Example', episode='1',
+                                    destination_path=str(tmp_path / 'one.mkv'), status=status))
+    monkeypatch.setattr(download_worker, '_GLOBAL_DOWNLOAD_WORKER', worker)
+    monkeypatch.setattr('media_cli.ui.download_manager.prompt_download_exit_cli',
+                        lambda *a: pytest.fail('Quit choice was already handled in downloader'))
+    assert orchestrator._resolve_quit_with_active_downloads() == 'QUIT'
+    assert has_active_downloads() == (0, 0)
 
 
 def test_has_tracked_downloads_detects_existing_items():

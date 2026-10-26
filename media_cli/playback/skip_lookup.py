@@ -51,6 +51,7 @@ class SkipLookup:
             duration = 0.0
         valid_duration = math.isfinite(duration) and duration > 0
         request_duration = float(round(duration)) if valid_duration else 0.0
+        native_active = playback_skip_intervals(self._provider_candidates, duration)
         if self._future is not None and self._future.done():
             future, request = self._future, self._request
             self._future = self._request = None
@@ -75,6 +76,7 @@ class SkipLookup:
             self._duration = duration
         if (
             valid_duration
+            and not native_active
             and (not self._active or len(validated_skip_intervals(self._candidates, duration)) < len(self._candidates)
                  or (self._provider_candidates and needs_skip_fallback(self._active)))
             and self._mal_id

@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "requests",
-    "curl-cffi",
+    "curl-cffi>=0.7.4",
     "beautifulsoup4",
     "m3u8>=6.0,<7",
     "pycryptodome>=3.19.0",
@@ -17,12 +17,22 @@ anyplay = "media_cli.cli.main:run"
 
 [project.optional-dependencies]
 dev = [
+    "setuptools>=61.0",
+    "wheel",
     "mypy==1.19.1",
     "ruff==0.16.8",
     "pytest>=7",
     "cryptography>=41.0.0",
     "tomli>=1; python_version < '3.11'",
 ]
+# Optional backends; normal playback/provider dependencies stay in the base install.
+native-crypto = [
+    "cryptography>=41.0.0",
+]
+legacy-browser = [
+    "playwright>=1.48.0",
+]
+# Compatibility extra names retained for existing installation commands.
 allanime = [
     "cryptography>=41.0.0",
 ]
@@ -48,6 +58,8 @@ include = ["media_cli*"]
 
 [tool.setuptools.package-data]
 "*" = ["*.json"]
+"media_cli.services.browser_access" = ["assets/*.js"]
+"media_cli.extractors" = ["*.cjs"]
 
 [tool.ruff]
 target-version = "py310"

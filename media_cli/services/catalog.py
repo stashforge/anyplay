@@ -23,7 +23,6 @@ from ..domain.episodes import (
 from ..domain.episodes import (
     normalize_episode_ids as _normalize_episode_ids,
 )
-from ..providers import allanime as allanime_service
 from ..providers import (
     get_provider,
     provider_display_name,
@@ -34,7 +33,8 @@ from ..providers.shared.models import (
     title_provider_key,
 )
 from ..services.http import request_json as _req
-from ..ui.display import fatal_terminal_exit, with_loading
+from .requirements import require_provider_operation
+from ..ui.display import with_loading
 
 _logger = logging.getLogger(__name__)
 
@@ -53,8 +53,11 @@ def _provider_for_title(show: dict):
 def search_anime(query: str, ttype: str = "sub", raise_errors: bool = False, provider_id: str | None = None) -> list[dict]:
     provider_id = provider_key(provider_id)
     provider_name = provider_display_name(provider_id)
+    require_provider_operation(provider_id, "search")
     try:
         return get_provider(provider_id, _req).search(query, ttype)
+    except ProviderDependencyError:
+        raise
     except SearchFailure as e:
         if not raise_errors:
             debug_warn(f"{provider_name} search failed", e)
@@ -72,8 +75,11 @@ def search_anime(query: str, ttype: str = "sub", raise_errors: bool = False, pro
 
 def get_show_by_id(show_id: str, provider_id: str | None = None) -> dict | None:
     provider_id = provider_key(provider_id)
+    require_provider_operation(provider_id, "title")
     try:
         return get_provider(provider_id, _req).get_title(show_id)
+    except ProviderDependencyError:
+        raise
     except Exception as e:
         debug_warn(f"{provider_id} show fetch failed", e)
         return None
@@ -84,6 +90,7 @@ def get_allanime_show(show_id: str) -> dict | None:
 
 
 def fetch_episode_catalog(show_id: str, ttype: str = "sub", provider_id: str | None = None) -> dict:
+    require_provider_operation(provider_key(provider_id), "episodes")
     return get_provider(provider_id, _req).episode_catalog(show_id, ttype)
 
 
@@ -254,18 +261,8 @@ class PreparedEpisodeSelection:
 
 def _apply_snapshot_delta(show: dict, before: dict, after: dict) -> None:
     """Merge changed leaves so unrelated concurrent metadata survives."""
-    for key in before.keys() - after.keys():
-        show.pop(key, None)
-    for key, value in after.items():
-        if key in before and before[key] == value:
-            continue
-        if isinstance(value, dict):
-            if not isinstance(show.get(key), dict):
-                show[key] = {}
-            previous = before.get(key)
-            _apply_snapshot_delta(show[key], previous if isinstance(previous, dict) else {}, value)
-        else:
-            show[key] = deepcopy(value)
+    from ..core.snapshots import apply_snapshot_delta
+    apply_snapshot_delta(show, before, after)
 
 
 def commit_episode_selection(show: dict, result: PreparedEpisodeSelection) -> None:
@@ -322,6 +319,7 @@ def _perform_catalog_fetch(show: dict, ttype: str, status_cb: Callable[[str], No
             enrich_show_if_missing(show)
         if callable(status_cb):
             status_cb(status_msg or f"Loading {ttype.upper()} episodes…")
+        require_provider_operation(title_provider_key(show), "episodes")
         catalog = _provider_for_title(show).episode_catalog(show_id, ttype)
     else:
         catalog = {
@@ -370,15 +368,8 @@ def _forget_catalog_task(task_key: tuple[str, str], future: concurrent.futures.F
 
 
 def ensure_episode_ids(show: dict, ttype: str, status_cb: Callable[[str], None] | None = None, status_msg: str | None = None) -> list[str]:
-    """Fetch and apply on this caller, retaining noninteractive terminal errors."""
-    try:
-        return _ensure_episode_ids(show, ttype, status_cb, status_msg)
-    except ProviderDependencyError as exc:
-        from ..ui.transition import in_preparation
-        if in_preparation():
-            raise
-        fatal_terminal_exit(str(exc))
-        raise
+    """Fetch/apply on this caller; dependency failures belong to the CLI owner."""
+    return _ensure_episode_ids(show, ttype, status_cb, status_msg)
 
 
 def _ensure_episode_ids(show: dict, ttype: str, status_cb: Callable[[str], None] | None = None, status_msg: str | None = None) -> list[str]:
@@ -418,7 +409,9 @@ def _ensure_episode_ids(show: dict, ttype: str, status_cb: Callable[[str], None]
         return _normalize_episode_ids(eps)
 
     p_key = title_provider_key(show)
-    task_key = (f"{p_key}:{show_id}" if show_id else str(id(show)), ttype)
+    from .browser_access.integration import browser_task_options
+    wait_timeout, operation_key = browser_task_options(p_key)
+    task_key = ((f"{p_key}:{show_id}" if show_id else str(id(show))) + operation_key, ttype)
 
     created = False
     with _catalog_task_lock:
@@ -433,7 +426,7 @@ def _ensure_episode_ids(show: dict, ttype: str, status_cb: Callable[[str], None]
         fut.add_done_callback(lambda completed: _forget_catalog_task(task_key, completed))
 
     try:
-        result = fut.result(timeout=30)
+        result = fut.result(timeout=wait_timeout)
     except concurrent.futures.TimeoutError as exc:
         debug_warn(f"Catalog fetch timed out for {task_key}", exc)
         show["_episode_catalog_state"] = "unavailable"
@@ -494,10 +487,11 @@ def episode_catalog_error(show: dict) -> str:
 
 def get_episode_data(show_id: str, ep: str, ttype: str = "sub", provider_id: str | None = None) -> dict | None:
     provider_id = provider_key(provider_id)
+    require_provider_operation(provider_id, "sources")
     try:
         return get_provider(provider_id, _req).episode_sources(show_id, ep, ttype)
-    except ProviderDependencyError as exc:
-        fatal_terminal_exit(str(exc))
+    except ProviderDependencyError:
+        raise
     except Exception as e:
         _logger.debug(
             "Episode fetch failed for %s ep %s (%s)",
@@ -512,6 +506,8 @@ def get_episode_data(show_id: str, ep: str, ttype: str = "sub", provider_id: str
 
 def get_clock_links(path: str) -> list[str]:
     try:
+        from ..providers import allanime as allanime_service
+
         return allanime_service.get_clock_links(_req, path)
     except Exception:
         return []

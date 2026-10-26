@@ -6,6 +6,15 @@ from media_cli.state import paths
 from media_cli.core import storage
 
 
+@pytest.fixture
+def installed_android_launcher(monkeypatch):
+    """Android playback simulations already fake dispatch; also fake its tool."""
+    import shutil
+
+    original = shutil.which
+    monkeypatch.setattr(shutil, "which", lambda program: "/test/am" if program == "am" else original(program))
+
+
 @pytest.fixture(autouse=True)
 def isolate_test_state_and_config(monkeypatch):
     """Isolate all tests from the user's real ~/.config and ~/.local/state filesystem."""

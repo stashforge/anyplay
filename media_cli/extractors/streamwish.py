@@ -9,6 +9,7 @@ import urllib.parse
 from bs4 import BeautifulSoup
 
 from .base import BaseExtractor
+from .routing import ROUTES
 from .unpack import JsUnpacker
 
 
@@ -16,40 +17,8 @@ class StreamWishExtractor(BaseExtractor):
     """Extractor for StreamWish, VidHide, Fastream, and affiliated video hosts."""
 
     name = "StreamWish"
-    domains = [
-        "streamwish.to",
-        "streamwish.com",
-        "awish.pro",
-        "fastream.to",
-        "streamhide.to",
-        "seekplayer.com",
-        "flaswish.com",
-        "wishfast.top",
-        "hlswish.com",
-        "swhoi.com",
-        "swdyu.com",
-        "dwish.pro",
-        "embedwish.com",
-        "mwish.pro",
-        "asnwish.com",
-        "strwish.com",
-        "sfastwish.com",
-        "wishonly.com",
-        "ajmidm.com",
-        "vidhide.com",
-        "vidhidepro.com",
-        "vidhidepre.com",
-        "filelions.to",
-        "filelions.site",
-        "filelions.online",
-        "seekplayer.vip",
-        "seekplayer.to",
-        "playwish.com",
-        "dwish.net",
-    ]
-    patterns = [
-        re.compile(r"(?:wish|vidhide|filelions)", re.IGNORECASE),
-    ]
+    domains = ROUTES['streamwish'].domains
+    patterns = ROUTES['streamwish'].patterns
 
     def extract(
         self,

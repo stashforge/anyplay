@@ -121,6 +121,11 @@ def test_missing_checker_fails_with_install_instruction(typing_project):
 
 @pytest.fixture
 def shared_typing_project(tmp_path):
+    shutil.copytree(
+        ROOT / "media_cli/services/browser_access",
+        tmp_path / "media_cli/services/browser_access",
+        ignore=shutil.ignore_patterns("__pycache__"),
+    )
     for name in (
         "pyproject.toml",
         "tools/check_types.py",
@@ -151,7 +156,7 @@ def shared_typing_project(tmp_path):
         destination = tmp_path / name
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / name, destination)
-    for package in ("media_cli", "media_cli/core", "media_cli/ui"):
+    for package in ("media_cli", "media_cli/core", "media_cli/ui", "media_cli/services"):
         (tmp_path / package / "__init__.py").write_text("", encoding="utf-8")
     return tmp_path
 

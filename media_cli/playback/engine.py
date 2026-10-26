@@ -37,7 +37,8 @@ def _exit_player_screen(close_alt: bool = False) -> None:
     if close_alt:
         exit_alt_screen()
     else:
-        sys.stdout.write("\033[2J\033[H\033[?25l")
+        from ..ui.terminal_output import write_terminal
+        write_terminal("\033[2J\033[H\033[?25l")
         sys.stdout.flush()
     _player_ui_state["active"] = False
 
@@ -184,6 +185,7 @@ def _prepare_proxy_for_playback(url, referer, headers=None, **kwargs):
 def _launch_android_player(command):
     from threading import Event
 
+    from ..services.requirements import require_executable
     from ..ui.actions import ActionAvailability, ActionBindings, ResolvedAction
     from ..ui.loading_model import LoadingInteraction, LoadingOwner, LoadingPlacement, LoadingTaskSpec
     from ..ui.player_screen import check_loading_handoff_input, playback_input_scope, run_loading_work
@@ -191,6 +193,7 @@ def _launch_android_player(command):
     from ..ui.view_model import ViewAction
     from .android import AndroidPreparationCancelled
 
+    require_executable(command[0], "Android player launch")
     task = LoadingTaskSpec(
         "player-launch", LoadingOwner("player", 0), "Opening player...",
         LoadingInteraction.BLOCKING, LoadingPlacement.PLAYER_STATUS,
@@ -287,6 +290,25 @@ def _prepare_subtitles_for_playback(subtitles: list[dict], *, headers=None, refe
         raise desktop_playback.PlaybackPreparationCancelled from exc
     finally:
         retired.set()
+
+
+def _prepare_mpv_subtitle_files(subtitles, *, headers=None, referer=None, cancel_check=None):
+    from copy import deepcopy
+
+    from ..media.mpv_subtitle_files import SubtitleFilesCancelled, prepare_subtitle_files
+    from ..ui.transition import PreparationCancelled
+
+    items, request_headers = deepcopy(subtitles), deepcopy(headers)
+    try:
+        return _prepare_owned_playback_resource(
+            lambda retired: prepare_subtitle_files(
+                items, headers=request_headers, referer=referer,
+                cancel_check=lambda: retired() or bool(cancel_check and cancel_check()),
+            ),
+            lambda resource: resource.close(),
+        )
+    except (PreparationCancelled, SubtitleFilesCancelled) as exc:
+        raise desktop_playback.PlaybackPreparationCancelled from exc
 
 
 def _prepare_android_subtitles(subtitles: list[dict], *, headers=None, referer=None, video_duration_s=0.0):
@@ -388,6 +410,7 @@ def play_desktop(
         cancel_check=cancel_check,
         prepare_torrent_fn=_prepare_torrent_for_playback,
         prepare_subtitles_fn=_prepare_subtitles_for_playback,
+        prepare_subtitle_files_fn=_prepare_mpv_subtitle_files,
         prepare_proxy_fn=_prepare_proxy_for_playback,
         start_player_fn=_start_player_for_playback,
         playback_input_scope=_playback_input_scope,

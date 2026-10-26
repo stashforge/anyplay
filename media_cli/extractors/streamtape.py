@@ -5,21 +5,15 @@ from __future__ import annotations
 import re
 
 from .base import BaseExtractor
+from .routing import ROUTES
 
 
 class StreamTapeExtractor(BaseExtractor):
     """Extractor for StreamTape and mirrors."""
 
     name = "StreamTape"
-    domains = [
-        "streamtape.com",
-        "streamtape.net",
-        "streamtape.xyz",
-        "streamtape.to",
-        "streamta.pe",
-        "strcloud.link",
-        "streamadblocker.xyz",
-    ]
+    domains = ROUTES['streamtape'].domains
+    patterns = ROUTES['streamtape'].patterns
 
     def extract(
         self,

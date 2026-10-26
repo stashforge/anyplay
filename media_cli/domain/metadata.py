@@ -566,7 +566,8 @@ def _apply_local_watch_state(show, hist_progress, hist_label, *, prefer_watched_
     show["_local_episode_label"] = hist_label
 
 
-def prepare_show_display_state(show, ttype="sub", sync_enabled=None, prefer_watched_episodes=False):
+def prepare_show_display_state(show, ttype="sub", sync_enabled=None, prefer_watched_episodes=False,
+                               *, history_entries=None):
     if not show:
         return show
     from media_cli.context import FLAGS as runtime_flags
@@ -578,8 +579,12 @@ def prepare_show_display_state(show, ttype="sub", sync_enabled=None, prefer_watc
         show.pop("_anilist_list", None)
         show.pop("watched_episodes", None)
         show["_progress_authority"] = "LOCAL"
-        show["_local_progress"] = get_local_progress(show, ttype)
-        show["_local_episode_label"] = get_local_episode_label(show, ttype)
+        if history_entries is None:
+            show["_local_progress"] = get_local_progress(show, ttype)
+            show["_local_episode_label"] = get_local_episode_label(show, ttype)
+        else:
+            show["_local_progress"] = get_local_progress(show, ttype, history_entries=history_entries)
+            show["_local_episode_label"] = get_local_episode_label(show, ttype, history_entries=history_entries)
         return show
     raw_anilist_show = bool(
         show.get("_anilist_list")
@@ -643,9 +648,10 @@ def batch_prepare_shows_display_state(shows, ttype="sub"):
     from media_cli.state import preferences as preference_state
 
     if runtime_flags.incognito_mode:
+        history_list = load_history()
         for s in shows:
             if isinstance(s, dict):
-                prepare_show_display_state(s, ttype)
+                prepare_show_display_state(s, ttype, history_entries=history_list)
         return shows
 
     try:

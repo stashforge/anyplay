@@ -65,6 +65,7 @@ def test_non_master_playlist_retains_one_adaptive_source(text):
                              fetch_playlist=lambda *a, **kw: text)
     assert len(result["episode"]["sourceUrls"]) == 1
     assert result["episode"]["sourceUrls"][0]["resolution"] == "auto"
+    assert not result.get("dependency_hints")
 
 
 def test_failed_channel_does_not_remove_good_channels():

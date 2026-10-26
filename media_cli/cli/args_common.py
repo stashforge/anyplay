@@ -1,7 +1,6 @@
 """Common argument parsing helpers, formatters, and reusable option groups."""
 
 import argparse
-import importlib.metadata
 import os
 import re
 import sys
@@ -12,28 +11,30 @@ try:
     from .. import __version__
 except Exception:
     try:
+        import importlib.metadata
+
         __version__ = importlib.metadata.version(APP_NAME)
     except Exception:
         __version__ = "0.9.2"
 
-from ..providers import available_providers
+from ..provider_manifest import available_provider_metadata
 
 _ANSI_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
 COMMAND_NAMES = {
     "search", "download", "downloads", "anilist", "history", "continue",
-    "auth", "providers", "completion", "config",
+    "auth", "companion", "providers", "completion", "config",
 }
 
 COMPLETION_SHELLS = ("bash", "zsh", "fish")
 
 
 def _provider_help():
-    providers = ", ".join(sorted(available_providers()))
+    providers = ", ".join(sorted(available_provider_metadata()))
     return f"Streaming provider: {providers}" if providers else "Streaming provider"
 
 def _provider_command_names():
-    return set(available_providers())
+    return set(available_provider_metadata())
 
 def _help_color_enabled():
     return (
@@ -405,7 +406,7 @@ def _add_anilist_options(parser, *, search=False):
     provider_group = parser.add_argument_group("Provider options")
     provider_group.add_argument(
         "-P", "--provider",
-        choices=sorted(available_providers()),
+        choices=sorted(available_provider_metadata()),
         metavar="PROVIDER",
         help=_provider_help(),
     )

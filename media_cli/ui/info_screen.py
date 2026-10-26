@@ -347,7 +347,8 @@ def _show_info_screen(
 
             clear_sig = terminal_images.replace_for_frame(has_image=bool(native))
             overlay   = f"\033[1;1H{native}" if native else ""
-            sys.stdout.write(
+            from .terminal_output import write_terminal
+            write_terminal(
                 clear_sig + ("\033[2J" if first_frame_pending else "")
                 + "\033[H" + "\r\n".join(out)
                 + overlay + "\033[?25l"
@@ -379,5 +380,8 @@ def _show_info_screen(
             pass
         # Clear any native-protocol image we drew before returning to the picker,
         # so the picker can render its own image on the next redraw.
-        sys.stdout.write(terminal_images.clear_now() + "\033[?25h")
+        from .terminal_output import write_terminal
+        from .display import is_alt_screen_active
+        cursor = "\033[?25l" if is_alt_screen_active() else "\033[?25h"
+        write_terminal(terminal_images.clear_now() + cursor)
         sys.stdout.flush()

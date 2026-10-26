@@ -4,24 +4,19 @@ from __future__ import annotations
 
 import re
 import urllib.parse
+import urllib.request
 from typing import Any
 
 from .base import BaseExtractor
+from .routing import ROUTES
 
 
 class VidnestExtractor(BaseExtractor):
     """Extractor for Vidnest and related hosts."""
 
     name = "Vidnest"
-    domains = [
-        "vidnest.io",
-        "vidnest.net",
-        "vidnest.fun",
-        "vidnest.com",
-    ]
-    patterns = [
-        re.compile(r"vidnest\.", re.IGNORECASE),
-    ]
+    domains = ROUTES['vidnest'].domains
+    patterns = ROUTES['vidnest'].patterns
 
     def extract(
         self,
@@ -58,7 +53,6 @@ class VidnestExtractor(BaseExtractor):
             post_headers.update(headers)
 
         import ssl
-        import urllib.request
 
         ctx = ssl.create_default_context()
         ctx.check_hostname = False

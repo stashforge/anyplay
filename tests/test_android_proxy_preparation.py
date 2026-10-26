@@ -10,8 +10,10 @@ from media_cli.playback import android, engine
 from media_cli.ui import player_screen
 from media_cli.ui.transition import PreparationCancelled
 
+pytestmark = pytest.mark.usefixtures("installed_android_launcher")
 
-@pytest.fixture(params=("standard", "dash", "split", "dailymotion"))
+
+@pytest.fixture(params=("standard", "dash", "split", "external_audio", "bound_audio", "bound_single", "dailymotion"))
 def proxy_case(request, monkeypatch):
     stream = {"link": "https://example.org/video.mp4", "headers": {"User-Agent": "original"}}
     factory = "start_local_proxy"
@@ -21,6 +23,14 @@ def proxy_case(request, monkeypatch):
     elif request.param == "split":
         stream.update(type="hls", split_video_url=stream["link"], split_audio_url="https://example.org/audio.m3u8")
         factory = "start_local_dual_proxy"
+    elif request.param in ("external_audio", "bound_audio"):
+        stream.update(type="hls", audio_url="https://example.org/audio.m3u8")
+        factory = "start_local_dual_proxy"
+        monkeypatch.setattr(android, "start_local_proxy", lambda *a, **kw: pytest.fail("Detached audio used video-only proxy"))
+        if request.param == "bound_audio":
+            stream['ip_version'] = 4
+    elif request.param == "bound_single":
+        stream.update(type="hls", ip_version=4)
     elif request.param == "dailymotion":
         stream.update(dailymotion_video=stream["link"], dailymotion_audio="https://example.org/audio.m3u8")
         factory = "start_local_dual_proxy"
@@ -48,6 +58,10 @@ def test_android_proxy_is_prepared_off_owner_and_activated_only_after_acceptance
             assert kwargs["target_player"] == "vlc"
             assert kwargs["title"] == "Title - EP 1"
             assert callable(kwargs["on_progress"])
+            if variant in ('bound_audio', 'bound_single'):
+                assert kwargs['ip_version'] == 4
+            if variant in ("external_audio", "bound_audio"):
+                assert args[:2] == (stream["link"], stream["audio_url"])
             args[-1]["User-Agent"] = "changed"
         else:
             assert args[1:] == ("stream.mpd", "application/dash+xml")

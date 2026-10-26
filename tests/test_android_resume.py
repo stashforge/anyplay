@@ -4,10 +4,13 @@ import unittest
 import urllib.error
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from media_cli.media.local_proxy import _build_proxy_server
 from media_cli.playback.android import play_android
 
 
+@pytest.mark.usefixtures("installed_android_launcher")
 class TestAndroidResume(unittest.TestCase):
     def test_hls_playlist_rewrite_calculates_time_offsets(self):
         """Verify rewrite_playlist accurately accumulates #EXTINF durations into time_offset."""
@@ -138,8 +141,7 @@ class TestAndroidResume(unittest.TestCase):
                     patch.object(mock_inst, "send_header", side_effect=capture_header), \
                     patch.object(mock_inst, "end_headers"), \
                     patch.object(local_proxy.urllib.request, "urlopen", side_effect=fake_urlopen), \
-                    patch.object(local_proxy, "CURL_CFFI_AVAILABLE", True), \
-                    patch.object(local_proxy, "cffi_requests", FakeCffiRequests):
+                    patch.object(local_proxy, "optional_curl_requests", return_value=FakeCffiRequests):
                 mock_inst._proxy("GET")
 
             send_response.assert_called_once_with(200)

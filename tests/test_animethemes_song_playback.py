@@ -24,6 +24,21 @@ def test_default_uses_earliest_available_version_not_best_quality_across_version
     assert flow.default_variant(song, "1080p")["stream"]["link"].endswith("opv2.webm")
 
 
+@pytest.mark.parametrize("tool", ["mpv", "am"])
+def test_missing_player_requirement_reaches_cli_owner(monkeypatch, tool):
+    from types import SimpleNamespace
+
+    from media_cli.services.requirements import MissingExecutable
+
+    failure = MissingExecutable(tool, "Song playback")
+    monkeypatch.setattr(flow, "play_variant", lambda *a, **kw: (_ for _ in ()).throw(failure))
+    monkeypatch.setattr(flow, "run_view_session", lambda *a, **kw: pytest.fail("Missing player must not open another menu"))
+    with pytest.raises(MissingExecutable) as caught:
+        flow.run_song_collection(SimpleNamespace(), None, {}, SimpleNamespace(quality=None),
+                                 anime_song_rows(anime_fixture()), 0)
+    assert caught.value is failure
+
+
 def test_native_next_previous_switch_songs_and_stay_in_details(monkeypatch):
     from types import SimpleNamespace
 

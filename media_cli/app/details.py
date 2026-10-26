@@ -68,6 +68,33 @@ def handle_details_state(
     has_token = bool(cfg.get("anilist_token")) and not flags.incognito_mode
     sync_enabled = bool((getattr(args, "sync", False) or cfg.get("sync") or cfg.get("auto_track")) and not getattr(args, "no_sync", False) and not flags.incognito_mode)
 
+    from .details_catalog import accept_catalog_status, catalog_jobs, interactive_catalog, ready_episode_ids
+    from ..ui.transition import call_on_ui_thread
+    managed_catalog = bool(has_provider_link and not _is_dl and interactive_catalog(flags, args))
+    known_ids = None
+    if managed_catalog:
+        import uuid
+        if not getattr(ms, '_details_catalog_session', None):
+            ms._details_catalog_session = uuid.uuid4().hex
+        session = ms._details_catalog_session
+        known_ids = ready_episode_ids(s, ttype_local)
+        if not known_ids:
+            status = call_on_ui_thread(lambda: catalog_jobs.read(session, s, ttype_local))
+            if status.state == 'loading':
+                target = (s.get('_provider'), s.get('_id') or s.get('id'), ttype_local)
+                if getattr(ms, '_details_catalog_loading_target', None) != target:
+                    ms._details_catalog_loading_target = target
+                    app_core.set_action_feedback(s, '')
+                ui.action_prev_state = ui.search_prev_state or 'SEARCH'
+                from .playback_menu import handle_action_menu_state
+                return handle_action_menu_state(
+                    flags, ui, ms, cfg, args, ttype_local, resolve_tracking_fn,
+                    ready_ids=(), catalog_loading=True,
+                    catalog_ready=lambda: catalog_jobs.read(session, s, ttype_local).state != 'loading',
+                )
+            call_on_ui_thread(lambda: accept_catalog_status(s, ttype_local, status))
+            known_ids = ready_episode_ids(s, ttype_local)
+
     # Workers only receive snapshots; abandoned jobs must not touch live contexts.
     original = deepcopy(s)
     worker_flags = deepcopy(flags)
@@ -109,7 +136,7 @@ def handle_details_state(
     def prepare_details(status_cb=None):
         show = deepcopy(original)
         translation_type = ttype_local
-        if _just_entered and has_provider_link:
+        if _just_entered and has_provider_link and not managed_catalog:
             if show.get("_id") and previous_state in (
                 "HISTORY", "SEARCH", "ANILIST_SEARCH", "ANILIST_BROWSE", "ANILIST_AIRING"
             ) and show.get("_episode_catalog_state") not in ("loaded", "unavailable", "error"):
@@ -125,10 +152,10 @@ def handle_details_state(
         if has_provider_link or _is_dl:
             if status_cb:
                 status_cb("Loading episodes…")
-            ids = app_core.ensure_episode_ids(show, translation_type)
+            ids = list(known_ids) if known_ids is not None else app_core.ensure_episode_ids(show, translation_type)
             if not ids and _is_dl:
                 ids = show.get("_episode_ids") or show.get("_downloaded_episodes") or []
-            if not ids and translation_type in ("dub", "sub") and not _is_dl:
+            if not ids and translation_type in ("dub", "sub") and not _is_dl and not managed_catalog:
                 alt_type = "sub" if translation_type == "dub" else "dub"
                 if status_cb:
                     status_cb(f"Checking {alt_type.upper()} episodes…")
@@ -305,6 +332,9 @@ def handle_details_state(
                     ms.current_ep = episode_id_at(episode_ids, found_dl)
 
     from .playback_menu import handle_action_menu_state
+    if managed_catalog:
+        return handle_action_menu_state(flags, ui, ms, cfg, args, ttype_local, resolve_tracking_fn,
+                                        ready_ids=tuple(episode_ids))
     return handle_action_menu_state(flags, ui, ms, cfg, args, ttype_local, resolve_tracking_fn)
 
 

@@ -9,6 +9,7 @@ import urllib.parse
 from bs4 import BeautifulSoup
 
 from .base import BaseExtractor
+from .routing import ROUTES
 from .unpack import JsUnpacker
 
 
@@ -16,22 +17,8 @@ class FilemoonExtractor(BaseExtractor):
     """Extractor for Filemoon and MoonPlayer hosts."""
 
     name = "Filemoon"
-    domains = [
-        "filemoon.sx",
-        "filemoon.to",
-        "filemoon.in",
-        "filemoon.top",
-        "filemoon.lat",
-        "filemoon.art",
-        "bysekoze.com",
-        "fastmoon",
-        "moonplayer",
-        "moonplayer.xyz",
-        "mooncloud.top",
-    ]
-    patterns = [
-        re.compile(r"(?:filemoon|bysekoze|fastmoon|moonplayer)", re.IGNORECASE),
-    ]
+    domains = ROUTES['filemoon'].domains
+    patterns = ROUTES['filemoon'].patterns
 
     def extract(
         self,

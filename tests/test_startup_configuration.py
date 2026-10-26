@@ -28,9 +28,9 @@ def test_startup_loads_configuration_once_and_keeps_resolved_directory(monkeypat
     monkeypatch.setattr(orchestrator, "setup_download_directory", lambda *a: resolved)
     monkeypatch.setattr(orchestrator, "configure_file_logging", lambda **kw: None)
     monkeypatch.setattr(orchestrator, "set_incognito_history_allowed", lambda *a: None)
-    monkeypatch.setattr(orchestrator, "get_provider", lambda *a: SimpleNamespace())
+    monkeypatch.setattr(orchestrator, "get_provider", Mock(side_effect=AssertionError("Unused default provider initialized")))
     monkeypatch.setattr(orchestrator, "_resolve_quit_with_active_downloads", lambda: "QUIT")
-    monkeypatch.setattr(app_core, "check_deps", lambda: None)
+    monkeypatch.setattr("shutil.which", lambda _: None)
     monkeypatch.setattr(app_core, "_ipc_player", SimpleNamespace(quit=lambda: None))
 
     def screen(handler, flags, ui, ms, cfg, *extra, **kw):
@@ -72,3 +72,13 @@ def test_search_input_uses_configured_provider_without_legacy_default(monkeypatc
         SimpleNamespace(provider=explicit), "sub", None,
     )
     assert result == "QUIT" and shown == [expected]
+
+
+def test_preparsed_media_arguments_reach_orchestrator_without_reparsing(monkeypatch):
+    parsed = parse_cli_args(["config", "get", "provider"])
+    handler = Mock()
+    monkeypatch.setattr(orchestrator, "parse_cli_args", Mock(side_effect=AssertionError("Already parsed")))
+    monkeypatch.setattr(orchestrator, "configure_file_logging", lambda **kwargs: None)
+    monkeypatch.setattr(orchestrator, "handle_config_command", handler)
+    app_core.app_main(parsed)
+    handler.assert_called_once_with(parsed[0])

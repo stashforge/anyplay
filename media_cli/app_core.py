@@ -5,7 +5,7 @@ import atexit
 
 from media_cli.core import anilist, processes, reporting, storage, streams
 from media_cli.core.api import ProviderDependencyError
-from media_cli.core.processes import check_deps, is_termux, kill_active_subprocesses
+from media_cli.core.processes import is_termux, kill_active_subprocesses
 from media_cli.core.storage import find_offline_file_for_episode
 from media_cli.services.catalog import load_episode_ids_for_selection
 from media_cli.domain.history import playback_ep_from_history_entry
@@ -49,7 +49,6 @@ from media_cli.providers import (
     _DEFAULT_PROVIDER_ID,
     PROVIDER_REGISTRY,
     PROVIDERS,
-    ALLANIME,
     available_providers,
     get_provider_registry,
     is_provider_active,
@@ -116,10 +115,17 @@ play_desktop = playback_engine.play_desktop
 atexit.register(storage.cleanup_incognito_cache)
 
 
-def app_main():
+def app_main(parsed=None):
     from media_cli.app.orchestrator import main
 
-    return main()
+    return main() if parsed is None else main(parsed)
+
+
+def __getattr__(name):
+    if name == "ALLANIME":
+        from media_cli.providers import ALLANIME
+        return ALLANIME
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 # ── ANSI ──────────────────────────────────────────────────────────────────────
 GREEN = "\033[1;32m"

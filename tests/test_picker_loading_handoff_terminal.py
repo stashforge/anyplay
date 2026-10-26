@@ -13,14 +13,14 @@ acks = 0
 def acknowledge():
     global acks
     acks += 1
-    print('ACKNOWLEDGED', flush=True)
+    terminal_marker('ACKNOWLEDGED')
 @terminal_application
 def application():
     # Queue ordinary input in raw mode before entering the picker.
     from media_cli.ui.terminal_runtime import borrow_terminal
     with borrow_terminal() as runtime:
         runtime.ensure_raw()
-    print('QUEUE INPUT', flush=True)
+    terminal_marker('QUEUE INPUT')
     time.sleep(0.15)
     return picker_module.terminal_pick(flags, ui, 'Content', ['Visible item'],
         frame_ready_fn=acknowledge, return_on_quit=True)
@@ -41,7 +41,7 @@ acks = 0
 def acknowledge():
     global acks
     acks += 1
-    print('ACKNOWLEDGED', flush=True)
+    terminal_marker('ACKNOWLEDGED')
 value = picker_module.tui_pick(flags, ui, 'Content', ['Visible item'],
     frame_ready_fn=acknowledge, help_dict={'?': 'Help'}, return_on_quit=True)
 finish([value, acks])
@@ -66,7 +66,7 @@ def key(key, index):
     events.append(key)
     if key == 'TAB':
         pending = True
-        print('BLOCKED', flush=True)
+        terminal_marker('BLOCKED')
     return KeyResult.CONSUMED
 def live(query):
     if pending and 'UP' in events and 'ENTER' in events:
@@ -105,12 +105,12 @@ def acknowledge():
     global pending
     events.append('ACK')
     pending = False
-    print('ACKNOWLEDGED', flush=True)
+    terminal_marker('ACKNOWLEDGED')
 @terminal_application
 def application():
     with borrow_terminal() as runtime:
         runtime.ensure_raw()
-    print('QUEUE INPUT', flush=True)
+    terminal_marker('QUEUE INPUT')
     time.sleep(0.15)
     return picker_module.terminal_pick(flags, ui, 'Destination', ['Destination item'],
         input_pending_fn=lambda: pending, frame_ready_fn=acknowledge,
@@ -138,7 +138,7 @@ def key(key, index):
     events.append(key)
     if key == 'TAB':
         pending = True
-        print('BLOCKED', flush=True)
+        terminal_marker('BLOCKED')
     return KeyResult.CONSUMED
 def live(query):
     if Path({str(gate)!r}).exists():
@@ -148,7 +148,7 @@ def tick():
     global ticks
     ticks += 1
     if ticks % 4 == 0:
-        print('TICK', flush=True)
+        terminal_marker('TICK')
     return True
 value = picker_module.tui_pick(flags, ui, 'Source', ['Source item'],
     live_fn=live, key_fn=key, exit_fn=lambda: 'LIVE' in events,
@@ -156,7 +156,7 @@ value = picker_module.tui_pick(flags, ui, 'Source', ['Source item'],
     tick_fn=tick, structured=True, return_on_quit=True)
 source = list(events)
 value2 = picker_module.tui_pick(flags, ui, 'Destination', ['Destination item'],
-    return_on_quit=True, frame_ready_fn=lambda: print('DESTINATION ACK', flush=True))
+    return_on_quit=True, frame_ready_fn=lambda: terminal_marker('DESTINATION ACK'))
 finish([value, source, value2, ui.active_picker_query])
 """
     with Terminal(tmp_path, script) as terminal:
@@ -188,18 +188,18 @@ def acknowledge():
     global pending
     events.append('ACK')
     pending = False
-    print('ACKNOWLEDGED', flush=True)
+    terminal_marker('ACKNOWLEDGED')
 def tick():
     global ticks
     ticks += 1
     if ticks % 4 == 0:
-        print('TICK', flush=True)
+        terminal_marker('TICK')
     return True
 @terminal_application
 def application():
     with borrow_terminal() as runtime:
         runtime.ensure_raw()
-    print('QUEUE INPUT', flush=True)
+    terminal_marker('QUEUE INPUT')
     time.sleep(0.15)
     return picker_module.terminal_pick(flags, ui, 'Destination', ['Destination item'],
         input_pending_fn=lambda: pending, frame_ready_fn=acknowledge,

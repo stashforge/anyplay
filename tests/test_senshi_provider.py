@@ -1,7 +1,10 @@
 import json
 from unittest.mock import MagicMock, patch
-from media_cli.providers.senshi import Senshi
+
+import pytest
+
 from media_cli.media.decryption import decrypt_em3u8
+from media_cli.providers.senshi import Senshi
 
 
 def test_decrypt_em3u8_invalid_inputs():
@@ -62,12 +65,39 @@ def test_senshi_episode_catalog():
         assert "1" in catalog["labels"]
 
 
-def test_senshi_uses_direct_embed_url_when_vidcloud_resolution_is_unavailable():
+@pytest.mark.parametrize("payload", [
+    {"data": [], "total": 0},
+    {"data": [{"title": "Missing provider ID"}]},
+    {},
+])
+def test_senshi_search_never_adds_anilist_only_titles(payload):
+    response = MagicMock()
+    response.read.return_value = json.dumps(payload).encode()
+    response.__enter__.return_value = response
+    foreign_result = {"data": {"Page": {"media": [
+        {"idMal": 123, "title": {"romaji": "Not in Senshi"}},
+    ]}}}
+    with patch("urllib.request.urlopen", return_value=response) as fetch, \
+            patch("media_cli.core.anilist_fallback.search_anilist_with_fallback", return_value=foreign_result) as fallback:
+        assert Senshi().search("missing title") == []
+    fallback.assert_not_called()
+    assert fetch.call_count == 1
+    assert fetch.call_args.args[0].full_url == "https://senshi.to/anime/filter"
+
+
+@pytest.mark.parametrize("error", [TimeoutError("timeout"), ValueError("invalid response")])
+def test_senshi_search_failure_does_not_search_anilist(error):
+    with patch("urllib.request.urlopen", side_effect=error), \
+            patch("media_cli.core.anilist_fallback.search_anilist_with_fallback", return_value={}) as fallback:
+        assert Senshi().search("missing title") == []
+    fallback.assert_not_called()
+
+
+def test_senshi_uses_direct_embed_url_without_remote_source_id():
     p = Senshi()
     p._sources_cache.clear()
     embeds = [
         {
-            "remote_source_id": 3731,
             "url": "https://cdn1.anidap.biz/stream/token/playlist.m3u8",
             "status": "HardSub",
         },
@@ -93,34 +123,24 @@ def test_senshi_expands_vidcloud_master_playlist_variants():
     ]
     vidcloud_payload = [
         {
-            "source": {"src": "https://cdn.example/path/master.m3u8", "quality": "auto"},
-            "tracks": [{"url": "https://cdn.example/en.vtt", "label": "English", "default": True}],
+            "source": {"src": "https://s-90.bcdn1.se/path/master.m3u8", "quality": "auto"},
+            "tracks": [{"url": "https://s-90.bcdn1.se/en.vtt", "label": "English", "default": True}],
         }
     ]
     master = """#EXTM3U
 #EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1920x1080
 1080/index.m3u8
 #EXT-X-STREAM-INF:BANDWIDTH=900000,RESOLUTION=854x480
-https://cdn.example/480/index.m3u8
+https://s-90.bcdn1.se/480/index.m3u8
 """
 
-    def fake_urlopen(req, timeout=7, **kwargs):
-        url = req.full_url if hasattr(req, "full_url") else str(req)
-        resp = MagicMock()
-        if "_v1/sources" in url:
-            resp.read.return_value = json.dumps(vidcloud_payload).encode("utf-8")
-        elif url == "https://cdn.example/path/master.m3u8":
-            resp.read.return_value = master.encode("utf-8")
-        else:
-            raise AssertionError(url)
-        resp.__enter__.return_value = resp
-        return resp
-
-    with patch.object(p, "_fetch_json", return_value=embeds), patch("urllib.request.urlopen", side_effect=fake_urlopen):
+    with patch.object(p, "_fetch_json", return_value=embeds), \
+            patch.object(p, "_resolve_remote_sources", return_value=vidcloud_payload), \
+            patch.object(p, "_read_playlist", return_value=("https://s-90.bcdn1.se/path/master.m3u8", master)):
         sources = p.episode_sources("52991", "1", "sub")
 
     urls = sources["episode"]["sourceUrls"]
     assert [src["sourceName"] for src in urls] == ["[HardSub] 1080p", "[HardSub] 480p"]
-    assert urls[0]["link"] == "https://cdn.example/path/1080/index.m3u8"
-    assert urls[1]["link"] == "https://cdn.example/480/index.m3u8"
-    assert urls[0]["subtitles"][0]["url"] == "https://cdn.example/en.vtt"
+    assert urls[0]["link"] == "https://s-90.bcdn1.se/path/1080/index.m3u8"
+    assert urls[1]["link"] == "https://s-90.bcdn1.se/480/index.m3u8"
+    assert urls[0]["subtitles"][0]["url"] == "https://s-90.bcdn1.se/en.vtt"

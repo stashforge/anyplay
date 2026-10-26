@@ -44,18 +44,16 @@ def playback_skip_intervals(intervals, duration: float) -> list[dict]:
         return []
     native = normalize_provider_skips([row for row in intervals if row.get("source") == "provider"])
     native = [row for row in native if row["end"] <= duration]
+    if native:
+        return native
     remote = validated_skip_intervals([row for row in intervals if row.get("source") != "provider"], duration)
     return merge_skip_intervals(native, remote)
 
 
-def skip_kind(interval: dict) -> str:
-    return {"mixed-op": "op", "mixed-ed": "ed"}.get(interval.get("type"), interval.get("type", ""))
-
-
 def merge_skip_intervals(preferred, fallback) -> list[dict]:
-    kinds = {skip_kind(row) for row in preferred}
-    return list(preferred) + [row for row in fallback if skip_kind(row) not in kinds]
+    """Choose one source's ranges; an absent type is not a request to fill it."""
+    return list(preferred) or list(fallback)
 
 
 def needs_skip_fallback(intervals) -> bool:
-    return not {"op", "ed"}.issubset({skip_kind(row) for row in intervals})
+    return not bool(intervals)

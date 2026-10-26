@@ -138,10 +138,15 @@ class SearchResultsController:
 
 
 def run_search_results(flags, ui, *, restore_position=True, **options) -> SearchResultsResult:
-    controller = SearchResultsController(ui=ui, **options)
-    result = run_view_session(flags, ui, controller.session, theme=APPLICATION_THEME, updates_fn=controller.updates,
-                              position_key=(controller.session.current.id, options["query"], options["ttype"]),
-                              restore_position=restore_position)
-    if not isinstance(result, SearchResultsResult):
-        raise TypeError("Search session must return a typed search outcome")
-    return result
+    try:
+        controller = SearchResultsController(ui=ui, **options)
+        result = run_view_session(flags, ui, controller.session, theme=APPLICATION_THEME, updates_fn=controller.updates,
+                                  position_key=(controller.session.current.id, options["query"], options["ttype"]),
+                                  restore_position=restore_position)
+        if not isinstance(result, SearchResultsResult):
+            raise TypeError("Search session must return a typed search outcome")
+        return result
+    finally:
+        cancel = getattr(options.get("live_fn"), "cancel", None)
+        if callable(cancel):
+            cancel()

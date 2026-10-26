@@ -27,6 +27,8 @@ import urllib.parse
 import urllib.request
 
 from media_cli.core.storage import is_valid_download_video
+from media_cli.core.api import ProviderDependencyError
+from media_cli.media.download_requirements import plan_download
 from media_cli.media.languages import filter_tracks_by_language, normalize_lang_code
 from media_cli.media.subtitles import download_sidecar_subtitles
 from media_cli.media.download import anyplay_metadata_args
@@ -196,6 +198,28 @@ class DownloadItem:
     subtitle_mode: str | None = None
     output_files: list[str] = field(default_factory=list)
     automatic: bool = False
+    ip_version: int | None = None
+    _network_source: dict = field(default_factory=dict, repr=False)
+
+
+def _prepare_bound_network(item: DownloadItem) -> None:
+    if item.ip_version != 4:
+        return
+    if item.proxy_server is not None and item._network_source:
+        return
+    from .local_proxy import start_local_proxy
+
+    if not item._network_source:
+        item._network_source = {"url": item.url, "audio_url": item.audio_url,
+                                "audio_tracks": list(item.audio_tracks)}
+    source = item._network_source
+    url, server = start_local_proxy(
+        source["url"], item.headers.get("Referer", ""), item.headers,
+        stream_type="hls", ip_version=4, audio_url=source["audio_url"],
+        audio_tracks=source["audio_tracks"],
+    )
+    item.url, item.proxy_server = url, server
+    item.audio_url, item.audio_tracks = "", []
 
 
 def _set_item_output_files(item: DownloadItem, files: list[str] | tuple[str, ...]) -> None:
@@ -288,20 +312,10 @@ def _mark_current_mirror_failed(item: "DownloadItem") -> bool:
 def _select_download_engine(preferred: str, url: str = "") -> str:
     """Choose the download engine for worker auto mode.
 
-    yt-dlp is the default workhorse for ordinary direct media URLs. Direct
-    HLS playlists go through ffmpeg because yt-dlp can save the playlist text
-    itself for some provider CDN URLs.
+    Prefer ffmpeg when available, with installed stream/file alternatives.
+    HLS must never fall through to a raw aria2c playlist-text download.
     """
-    engine = str(preferred or "auto").strip() or "auto"
-    if engine != "auto":
-        return engine
-    if _is_hls_url(url) and shutil.which("ffmpeg"):
-        return "ffmpeg"
-    if shutil.which("yt-dlp"):
-        return "yt-dlp"
-    if shutil.which("aria2c"):
-        return "aria2c"
-    return "ffmpeg"
+    return plan_download(preferred, url, worker=True).engine
 
 
 def _item_download_preferences(item: DownloadItem) -> tuple[str, str, str]:
@@ -313,6 +327,25 @@ def _item_download_preferences(item: DownloadItem) -> tuple[str, str, str]:
     sub_langs = item.download_sub_langs if item.download_sub_langs is not None else cfg.get("download_sub_langs", "multi")
     audio_langs = item.download_audio_langs if item.download_audio_langs is not None else cfg.get("download_audio_langs", "multi")
     return str(sub_langs or "multi"), str(audio_langs or "multi"), "embed"
+
+
+def _selected_subtitles(item: DownloadItem, languages: str) -> list[dict]:
+    if languages in ("none", "no", "false", "0"):
+        return []
+    tracks = item.subtitles or ([{"url": item.subtitle_url, "language": "und", "default": True}] if item.subtitle_url else [])
+    return filter_tracks_by_language(tracks, languages, is_audio=False)
+
+
+def _reject_playlist_output(item: DownloadItem, engine: str) -> bool:
+    """Reject raw playlist text before publishing completion; caller holds worker lock."""
+    if not _output_is_hls_playlist(item.destination_path):
+        return False
+    _discard_partial_output(item.destination_path)
+    item.status = DownloadStatus.FAILED
+    item.error = f"{engine} saved an HLS playlist instead of a video file"
+    item.logs.append("✖ Download produced playlist text, not video data.")
+    item.completed_at = time.time()
+    return True
 
 
 def _base_output_path(path: str) -> str:
@@ -618,6 +651,7 @@ class DownloadWorker:
                     item.status = DownloadStatus.RESOLVING
                     item.logs.append("⚡ Resolving stream URL on the fly…")
                 try:
+                    item._network_source = {}
                     url, headers, proxy_srv = item.resolve_fn(item)
                     with self.lock:
                         # Guard: Check if status was changed to PAUSED, QUEUED, or CANCELLED while resolving
@@ -648,6 +682,8 @@ class DownloadWorker:
                         item.proxy_server = proxy_srv
                         item.status = DownloadStatus.DOWNLOADING
                         item.logs.append(f"✔ Stream resolved ({url[:45]}…)")
+                except ProviderDependencyError:
+                    raise
                 except Exception as exc:
                     _logger.warning(
                         "Stream resolution failed for download item %s (%s): %s",
@@ -675,15 +711,21 @@ class DownloadWorker:
                 item.status = DownloadStatus.DOWNLOADING
 
             # 3. Determine engine
-            engine = _select_download_engine(item.engine, item.url)
             sub_langs, _, _ = _item_download_preferences(item)
-            has_separate_audio = bool(item.audio_tracks) or bool(item.audio_url and item.audio_url != item.url)
-            wants_subs = bool(item.subtitles) and sub_langs not in ("none", "no", "false", "0")
-            if item.engine == "auto" and shutil.which("ffmpeg"):
-                engine = "ffmpeg"
-            if engine != "ffmpeg" and (has_separate_audio or wants_subs):
-                raise RuntimeError("ffmpeg is required to create a single MKV with audio/subtitles")
+            has_separate_audio = (
+                bool(item.audio_tracks) or bool(item.audio_url and item.audio_url != item.url)
+                or bool(item._network_source.get("audio_url") or item._network_source.get("audio_tracks"))
+            )
+            wants_subs = bool(_selected_subtitles(item, sub_langs))
+            plan = plan_download(item.engine, item.url, external_audio=has_separate_audio,
+                                 embed_subtitles=wants_subs, worker=True)
+            engine = plan.engine
+            _prepare_bound_network(item)
             with self.lock:
+                if item.status in (DownloadStatus.PAUSED, DownloadStatus.QUEUED, DownloadStatus.CANCELLED):
+                    return
+            with self.lock:
+                item.logs.extend(hint for hint in plan.hints if hint not in item.logs)
                 item.logs.append(f"Using {engine} download engine.")
 
             if engine == "yt-dlp":
@@ -698,6 +740,15 @@ class DownloadWorker:
             if item.status == DownloadStatus.FAILED:
                 raise _DownloadAttemptFailed(item.error or f"{engine} download failed")
 
+        except ProviderDependencyError as exc:
+            _logger.warning("Download requirements unavailable for item %s: %s", item.id, exc)
+            with self.lock:
+                if item.status not in (DownloadStatus.CANCELLED, DownloadStatus.PAUSED, DownloadStatus.QUEUED):
+                    item.status = DownloadStatus.FAILED
+                    item.error = str(exc)
+                    item.completed_at = time.time()
+                    item.speed_str = item.eta_str = ""
+                    item.logs.append(f"✖ {exc}")
         except Exception as e:
             if isinstance(e, _DownloadAttemptFailed):
                 _logger.warning(
@@ -759,7 +810,7 @@ class DownloadWorker:
         cmd.append(item.url)
 
         sub_langs, _, _ = _item_download_preferences(item)
-        if item.subtitles and sub_langs not in ("none", "no", "false", "0"):
+        if _selected_subtitles(item, sub_langs):
             with self.lock:
                 item.status = DownloadStatus.FAILED
                 item.error = "ffmpeg is required to embed subtitles into the final MKV"
@@ -798,12 +849,8 @@ class DownloadWorker:
             proc.wait()
             with self.lock:
                 if item.status != DownloadStatus.CANCELLED:
-                    if proc.returncode == 0 and _output_is_hls_playlist(item.destination_path):
-                        _discard_partial_output(item.destination_path)
-                        item.status = DownloadStatus.FAILED
-                        item.error = "yt-dlp saved an HLS playlist instead of a video file"
-                        item.logs.append("✖ Download produced playlist text, not video data.")
-                        item.completed_at = time.time()
+                    if proc.returncode == 0 and _reject_playlist_output(item, "yt-dlp"):
+                        pass
                     elif proc.returncode == 0:
                         item.status = DownloadStatus.COMPLETED
                         item.progress = 100.0
@@ -869,7 +916,9 @@ class DownloadWorker:
             proc.wait()
             with self.lock:
                 if item.status != DownloadStatus.CANCELLED:
-                    if proc.returncode == 0:
+                    if proc.returncode == 0 and _reject_playlist_output(item, "aria2c"):
+                        pass
+                    elif proc.returncode == 0:
                         item.status = DownloadStatus.COMPLETED
                         item.progress = 100.0
                         item.speed_str = ""
@@ -887,6 +936,13 @@ class DownloadWorker:
                 proc.kill()
 
     def _download_ffmpeg(self, item: DownloadItem):
+        initial_status = item.status
+
+        def subtitles_cancelled():
+            return self._stop_event.is_set() or item.status in (DownloadStatus.CANCELLED, DownloadStatus.PAUSED) or (
+                item.status == DownloadStatus.QUEUED and initial_status != DownloadStatus.QUEUED
+            )
+
         partial_path = _partial_output_path(item.destination_path)
         os.makedirs(os.path.dirname(partial_path), exist_ok=True)
         sub_langs, audio_langs, _ = _item_download_preferences(item)
@@ -896,9 +952,7 @@ class DownloadWorker:
         if audio_tracks:
             audio_tracks = filter_tracks_by_language(audio_tracks, audio_langs, is_audio=True)
 
-        subtitles = list(item.subtitles or [])
-        if not subtitles and item.subtitle_url:
-            subtitles = [{"url": item.subtitle_url, "label": "Subtitles", "language": "und", "default": True}]
+        subtitles = _selected_subtitles(item, sub_langs)
         embed_subs = bool(subtitles) and sub_langs not in ("none", "no", "false", "0")
         downloaded_sidecars: list[str] = []
         if subtitles and sub_langs not in ("none", "no", "false", "0"):
@@ -909,12 +963,22 @@ class DownloadWorker:
                     headers=item.headers,
                     requested_langs=sub_langs,
                     quiet=True,
+                    cancel_check=subtitles_cancelled,
+                    on_hint=item.logs.append,
                 )
                 if downloaded_sidecars and not embed_subs:
                     item.logs.append(f"Saved {len(downloaded_sidecars)} subtitle sidecar(s).")
             except Exception as exc:
                 item.logs.append(f"⚠ Could not download subtitles: {exc}")
                 embed_subs = False
+
+        if subtitles_cancelled():
+            for sub_path in downloaded_sidecars:
+                try:
+                    os.remove(sub_path)
+                except OSError:
+                    pass
+            return
 
         cmd = [
             "ffmpeg",
@@ -1190,17 +1254,19 @@ def has_tracked_downloads() -> bool:
 
 
 def has_active_downloads() -> tuple[int, int]:
-    """Returns (active_count, queued_count) of currently tracked downloads."""
-    global _GLOBAL_DOWNLOAD_WORKER
-    if _GLOBAL_DOWNLOAD_WORKER is None:
+    """Count unfinished work, excluding a worker already stopped by the user."""
+    worker = get_global_worker_if_started()
+    if worker is None:
         return 0, 0
-    with _GLOBAL_DOWNLOAD_WORKER.lock:
+    with worker.lock:
+        if worker._stop_event.is_set():
+            return 0, 0
         active = sum(
-            1 for it in _GLOBAL_DOWNLOAD_WORKER.items
+            1 for it in worker.items
             if it.status in (DownloadStatus.DOWNLOADING, DownloadStatus.RESOLVING, DownloadStatus.PAUSED)
         )
         queued = sum(
-            1 for it in _GLOBAL_DOWNLOAD_WORKER.items
+            1 for it in worker.items
             if it.status == DownloadStatus.QUEUED
         )
         return active, queued

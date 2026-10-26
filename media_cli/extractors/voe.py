@@ -10,20 +10,15 @@ import urllib.parse
 from bs4 import BeautifulSoup
 
 from .base import BaseExtractor
+from .routing import ROUTES
 
 
 class VoeExtractor(BaseExtractor):
     """Extractor for VOE video host."""
 
     name = "VOE"
-    domains = [
-        "voe.sx",
-        "voe-network.net",
-        "audaciousdefaulthouse.com",
-        "metaphoricallyclattering.com",
-        "tastelessparliament.com",
-        "fraudulentmoulding.com",
-    ]
+    domains = ROUTES['voe'].domains
+    patterns = ROUTES['voe'].patterns
 
     def extract(
         self,

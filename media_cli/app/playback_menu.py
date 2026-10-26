@@ -32,7 +32,7 @@ from ..ui.help import picker_help
 from ..ui.loading_model import LoadingInteraction, LoadingOwner, LoadingPlacement, LoadingProgress, LoadingTaskSpec
 from ..ui.picker import tui_pick
 from ..ui.picker_state import PickerState
-from ..ui.spinner import spinner_from_config
+from ..ui.spinner import spinner_frame, spinner_from_config
 from . import playback as playback_mod
 from .details_menu_controller import run_details_menu
 from .details_menu_view import DetailsMenuOption, build_details_menu_view
@@ -107,18 +107,19 @@ def handle_action_menu_state(
     args: Any,
     ttype: str,
     resolve_tracking_fn,
+    *, ready_ids=None, catalog_loading=False, catalog_ready=None,
 ) -> str:
     opts, acts = [], []
     action_show = ui.ui_show_ctx
     resolve_tracking_fn(ui.search_prev_state, args, cfg, action_show)
 
-    episode_ids = (
+    episode_ids = list(ready_ids) if ready_ids is not None else (
         [] if action_show.get("_episode_catalog_state") in {"unavailable", "error"}
         and not (action_show.get("_episode_ids") and action_show.get("_episode_ids_ttype") == ttype)
         else app_core.ensure_episode_ids(action_show, ttype)
     )
 
-    if not episode_ids:
+    if not episode_ids and not catalog_loading:
         err_msg = app_core.episode_catalog_error(action_show)
         app_core.set_action_feedback(action_show, err_msg)
 
@@ -580,10 +581,10 @@ def handle_action_menu_state(
         opts.append("Playback")
         acts.append("PLAYBACK_SETTINGS")
         action_hints["Playback"] = "session playback options"
-        if not episode_ids:
-            opts.append("Retry Provider")
+        if not episode_ids and not catalog_loading:
+            opts.append("Retry Episodes")
             acts.append("RETRY_CATALOG")
-            action_hints["Retry Provider"] = "try loading episodes again"
+            action_hints["Retry Episodes"] = "try loading episodes again"
 
     action_hints = {}
     _build_menu()
@@ -647,6 +648,12 @@ def handle_action_menu_state(
         if not allowed:
             if reason:
                 app_core.set_action_feedback(action_show, reason)
+            return
+
+        if ready_ids is not None:
+            ui.ui_ttype_ctx = target_ttype
+            ms.selected_stream = None
+            app_core.set_action_feedback(action_show, f"Switched to {target_ttype.title()}.")
             return
 
         from copy import deepcopy
@@ -779,8 +786,9 @@ def handle_action_menu_state(
         choices = tuple(
             DetailsMenuOption(
                 action, label,
-                _action_hints_fn(index) if episode_ids or action in catalog_independent else "episodes unavailable",
-                opens_menu=action in submenu_actions, enabled=bool(episode_ids) or action in catalog_independent,
+                _action_hints_fn(index) if episode_ids or action in catalog_independent else (
+                    "episodes are still loading" if catalog_loading else "load episodes with Retry Episodes"),
+                opens_menu=action in submenu_actions,
             )
             for index, (label, action) in enumerate(zip(opts, acts, strict=True))
         )
@@ -807,6 +815,8 @@ def handle_action_menu_state(
                 and (action_show.get("_provider") or action_show.get("provider"))
                 and action_show.get("_has_provider_link") is not False
             ),
+            loading_message=f"Loading {ttype.upper()} episodes…" if catalog_loading else '',
+            loading_indicator=spinner_frame(spinner_from_config(cfg)) if catalog_loading else '',
         )
 
     def _playback_settings_menu():
@@ -1030,13 +1040,25 @@ def handle_action_menu_state(
         prefer_watched_episodes=getattr(ms, "_is_downloads", False),
     )
     information = app_core.make_single_show_info_fn(action_show, ui)
+    def _catalog_action_allowed(action):
+        if episode_ids or action in catalog_independent:
+            return True
+        app_core.set_action_feedback(action_show, 'Episodes are still loading.' if catalog_loading
+                                     else 'Episodes unavailable. Use Retry Episodes.')
+        return False
+
     outcome = run_details_menu(
         flags, ui, read_view=_action_view, switch_translation=_action_tab_fn,
         information=lambda: information(0),
+        ready=(lambda: ui.ui_ttype_ctx != ttype or (catalog_ready is not None and catalog_ready()))
+              if ready_ids is not None else None,
+        can_activate=lambda action: _catalog_action_allowed(action),
     )
 
     if outcome.kind == "quit":
         return "QUIT"
+    if outcome.action_id == 'CATALOG_READY':
+        return 'DETAILS'
     if outcome.kind == "back":
         previous = ui.action_prev_state or "DETAILS"
         if should_clear_query_on_child_left(previous, len(ms.shows) <= 1):
@@ -1188,6 +1210,9 @@ def handle_action_menu_state(
 
         def accept_refresh():
             commit_details_transition(action_show, prepared)
+            if ready_ids is not None:
+                from .details_catalog import catalog_jobs
+                catalog_jobs.publish(ms._details_catalog_session, action_show, ttype, prepared)
             if not flags.incognito_mode:
                 app_core.patch_history_entry_state({"show": action_show, "translation_type": ttype})
             error = action_show.get("_provider_catalog_refresh_error")
@@ -1198,6 +1223,9 @@ def handle_action_menu_state(
         call_on_ui_thread(accept_refresh)
         return "DETAILS"
     if a == "RETRY_CATALOG":
+        if ready_ids is not None:
+            from .details_catalog import catalog_jobs
+            catalog_jobs.retry(ms._details_catalog_session, action_show, ttype)
         action_show.pop("_episode_catalog_state", None)
         action_show.pop("_episode_catalog_error", None)
         app_core.set_action_feedback(action_show, "")
@@ -1986,9 +2014,8 @@ def handle_mirrors_state(
 
         return playback_mod.format_mirror_label(s, prefix=prefix, safe_tag=tag)
 
-    def _dedup():
+    def _dedup(live_ep_data):
         seen, out = set(), []
-        live_ep_data = app_core._get_cached_ep_data(cur_key) or cached_ep_data
         active_list = app_core._stream_snapshot(
             ms.show_id, mirror_ep, ttype, target_pid, quality, live_ep_data
         )
@@ -2064,7 +2091,8 @@ def handle_mirrors_state(
 
     def _mirror_refresh(q=""):
         nonlocal _live_deduped
-        _live_deduped = _dedup()
+        live_ep_data = app_core._get_cached_ep_data(cur_key) or cached_ep_data
+        _live_deduped = _dedup(live_ep_data)
         mopts = [_mlabel(s) for s in _live_deduped]
 
         _bg_lock = streams._bg_lock
@@ -2083,6 +2111,13 @@ def handle_mirrors_state(
             status_msg = _bg_stats.get("status_msg", "")
             if torrent_alive and not resolver_alive:
                 status_msg = "searching torrent mirrors..."
+
+        from ..services.requirements import add_dependency_hints
+
+        dependency_hints, dependency_error = streams.resolution_feedback(cur_key)
+        live_ep_data = add_dependency_hints(live_ep_data or {}, dependency_hints)
+        if not alive and not mopts and dependency_error is not None:
+            raise dependency_error
 
         initial_status = initial_source_loading.read(
             alive and not torrent_alive and tot == 0 and (r + f) >= tot
@@ -2166,7 +2201,10 @@ def handle_mirrors_state(
         if toast and time.time() - toast_time < 3:
             parts.append(f"\033[38;5;222m* {footer(toast)}\033[0m")
         else:
-            parts.append(f"{C_D}{footer(plain_status)}{R}")
+            from ..ui.dependency_hints import render_dependency_hint_footer
+
+            hint_footer = render_dependency_hint_footer(live_ep_data, w) if not alive else ""
+            parts.append(hint_footer or f"{C_D}{footer(plain_status)}{R}")
 
         hdr = "\n".join(parts)
         return mopts, hdr, not alive

@@ -45,11 +45,8 @@ def prepare_details_transition(show: dict, ttype: str, status_cb=None) -> Prepar
 
 def commit_details_transition(show: dict, prepared: PreparedDetails) -> None:
     # Preserve concurrent cover/metadata updates untouched by preparation.
-    for key, value in prepared.show.items():
-        if key not in prepared.original or value != prepared.original[key]:
-            show[key] = value
-    for key in prepared.original.keys() - prepared.show.keys():
-        show.pop(key, None)
+    from ..core.snapshots import apply_snapshot_delta
+    apply_snapshot_delta(show, prepared.original, prepared.show)
 
 
 def prepare_title_refresh(show: dict, ttype: str) -> PreparedDetails:

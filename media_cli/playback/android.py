@@ -1,6 +1,7 @@
 import logging
 import subprocess
 
+from ..core.api import ProviderDependencyError
 from ..media.dash import generate_dash_mpd
 from ..media.local_proxy import (
     cleanup_active_local_proxy,
@@ -93,6 +94,11 @@ def play_android(
     except ValueError:
         _error("Player rejected an unsafe stream URL.")
         return False
+
+    if launch_command_fn is None:
+        from ..services.requirements import require_executable
+
+        require_executable("am", "Android playback")
 
     start_time = 0
     if show_id and player != "vlc":
@@ -274,6 +280,12 @@ def play_android(
             return prepare_proxy_fn(start, *args, **kwargs)
         return start(*args, **kwargs)
 
+    hls_video_url = url
+    hls_audio_url = stream.get("audio_url")
+    if stream.get("split_video_url") and stream.get("split_audio_url"):
+        hls_video_url = stream["split_video_url"]
+        hls_audio_url = stream["split_audio_url"]
+
     cleanup_active_local_proxy()
     if stream.get("dash_video") and stream.get("dash_audio"):
         _info(f"{player}: preparing DASH video and audio...")
@@ -296,10 +308,7 @@ def play_android(
         except Exception as exc:
             _error(f"Could not prepare DASH stream: {exc}")
             return False
-    elif (
-            stream.get("split_video_url")
-            and stream.get("split_audio_url")
-            and stream.get("type") == "hls"):
+    elif hls_audio_url and stream.get("type") == "hls":
         _info(f"{player}: preparing video and audio...")
         try:
             bw = float(stream.get("split_bandwidth") or 2400)
@@ -307,8 +316,8 @@ def play_android(
                 bw *= 1000
             url, proxy_server = prepare_proxy(
                 start_local_dual_proxy,
-                stream["split_video_url"],
-                stream["split_audio_url"],
+                hls_video_url,
+                hls_audio_url,
                 referer,
                 headers,
                 width=stream.get("split_width") or 1280,
@@ -324,6 +333,7 @@ def play_android(
                 on_progress=handle_progress,
                 flixcloud_w_payload=stream.get("flixcloud_w_payload"),
                 flixcloud_xor_mask=stream.get("flixcloud_xor_mask"),
+                **({"ip_version": 4} if stream.get("ip_version") == 4 else {}),
             )
             replace_active_local_proxy(proxy_server)
             intent_type = "video/*"
@@ -355,6 +365,7 @@ def play_android(
                 episode=episode,
                 duration=duration_val,
                 on_progress=handle_progress,
+                **({"ip_version": 4} if stream.get("ip_version") == 4 else {}),
             )
             replace_active_local_proxy(proxy_server)
             intent_type = "video/*"
@@ -365,7 +376,7 @@ def play_android(
             return False
     elif not (
             stream.get("dash_video")
-            or (stream.get("split_video_url") and stream.get("split_audio_url"))
+            or (hls_audio_url and stream.get("type") == "hls")
             or (stream.get("dailymotion_video") and stream.get("dailymotion_audio"))):
         _info(f"{player}: starting local HTTP proxy...")
         try:
@@ -382,6 +393,7 @@ def play_android(
                 episode=episode,
                 duration=duration_val,
                 on_progress=handle_progress,
+                **({"ip_version": 4} if stream.get("ip_version") == 4 else {}),
             )
             replace_active_local_proxy(proxy_server)
             intent_type = "video/*"
@@ -487,6 +499,8 @@ def play_android(
             _error(f"Could not open {player}.")
     except AndroidPreparationCancelled:
         return False
+    except ProviderDependencyError:
+        raise
     except Exception as exc:
         _error(f"Could not open {player}: {exc}")
     finally:

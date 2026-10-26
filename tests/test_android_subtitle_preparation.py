@@ -9,6 +9,8 @@ from media_cli.playback import android, engine
 from media_cli.ui import player_screen
 from media_cli.ui.transition import PreparationCancelled
 
+pytestmark = pytest.mark.usefixtures("installed_android_launcher")
+
 
 @pytest.fixture
 def launch(monkeypatch):

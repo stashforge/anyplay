@@ -51,6 +51,16 @@ def build(source=None, options=None, **kwargs):
     )
 
 
+def test_catalog_loading_footer_preserves_changing_spinner_frames():
+    from media_cli.ui.footer import render_footer
+
+    first = build(loading_message='Loading SUB episodes…', loading_indicator='⣾')
+    second = build(loading_message='Loading SUB episodes…', loading_indicator='⣽')
+    assert strip_ansi(render_footer(first.footer, 80)).startswith('⣾ Loading SUB episodes…')
+    assert strip_ansi(render_footer(second.footer, 80)).startswith('⣽ Loading SUB episodes…')
+    assert first != second
+
+
 def test_rows_inherit_one_common_show_panel_and_image():
     source = show()
     result = build(source)

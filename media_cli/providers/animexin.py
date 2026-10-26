@@ -7,6 +7,7 @@ import re
 import urllib.parse
 import urllib.request
 
+from ..services.browser_access.profiles import BrowserAccessCancelled
 from ..services.http import UA
 from .shared.models import normalize_episode_catalog, normalize_episode_sources, normalize_titles
 from .shared.schema import build_title
@@ -28,8 +29,14 @@ class AnimeXinProvider(WordPressAnimeProvider):
 
     def __init__(self, request_json_fn=None, fetch=None, ajax_fetch=None):
         del request_json_fn
-        super().__init__(fetch=fetch or fetch_html)
+        super().__init__(fetch=fetch or self._fetch_html)
         self._ajax_fetch = ajax_fetch or self._fetch_ajax
+
+    def _fetch_html(self, url: str) -> str:
+        from ..services.browser_access.integration import fetch_text, linux_desktop
+        if linux_desktop():
+            return fetch_text(self.id, list(getattr(self, "domains", None) or [self.base_url]), url, timeout=8)
+        return fetch_html(url)
 
     def search(self, query: str, ttype: str = "sub") -> list[dict]:
         del ttype
@@ -82,6 +89,8 @@ class AnimeXinProvider(WordPressAnimeProvider):
             return []
         try:
             payload = self._ajax_fetch(query)
+        except BrowserAccessCancelled:
+            raise
         except Exception:
             return []
         rows = []

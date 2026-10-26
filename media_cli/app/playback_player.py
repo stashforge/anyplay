@@ -13,6 +13,7 @@ from typing import Any, Callable
 from .. import app_core
 from ..context import CliFlags, MachineState, UiState
 from ..core import streams as streams_mod
+from ..core.reporting import console_status
 from ..domain.episodes import (
     clean_episode_identifier,
     episode_id_at,
@@ -297,6 +298,7 @@ def trigger_background_auto_download(show_ctx, current_ep_index, episode_ids, tt
             headers["Referer"] = referer
         item.audio_tracks = list(selected_stream.get("audio_tracks") or [])
         item.audio_url = selected_stream.get("audio_url", "")
+        item.ip_version = selected_stream.get("ip_version")
         item.subtitles = list(selected_stream.get("subtitles") or selected_stream.get("vtt") or [])
         item.subtitle_url = selected_stream.get("subtitle_url", "")
         return raw_url, headers, None
@@ -816,25 +818,25 @@ def _wait_for_android_start(stream_name: str, res_str: str, *, poster_manager=No
 
 def _android_skip_hint_choice(flags: CliFlags) -> str:
     from ..ui.player_screen import prompt_input_scope
+    from ..ui.terminal_output import write_terminal
 
     with prompt_input_scope():
         interactive = not getattr(flags, "plain_mode", False) and sys.stdin.isatty()
         if interactive:
-            sys.stdout.write("\033[?1049h\033[2J\033[H\033[?25h")
-            sys.stdout.flush()
+            write_terminal("\033[?1049h\033[2J\033[H\033[?25h")
         try:
-            print("\033[1;36mAniSkip on Android (MPV)\033[0m\n")
-            print("  \033[38;5;250m• Auto-skip is not supported via Android intents.\033[0m")
-            print("  \033[38;5;250m• To view chapter marks on the seekbar, add this line to /storage/emulated/0/Mpv/mpv.conf:\033[0m")
-            print("    \033[1;33mchapters-file=/storage/emulated/0/Mpv/chapters.txt\033[0m\n")
+            write_terminal("\033[1;36mAniSkip on Android (MPV)\033[0m\n\n"
+                           "  • Auto-skip is not supported via Android intents.\n"
+                           "  • To view chapter marks on the seekbar, add this line to /storage/emulated/0/Mpv/mpv.conf:\n"
+                           "    chapters-file=/storage/emulated/0/Mpv/chapters.txt\n\n")
             try:
-                return input("\033[1;97m[y = Don't show again, n = Disable AniSkip, s = Skip for now] (s): \033[0m").strip().lower()
+                write_terminal("\033[1;97m[y = Don't show again, n = Disable AniSkip, s = Skip for now] (s): \033[0m")
+                return input().strip().lower()
             except EOFError:
                 return "s"
         finally:
             if interactive:
-                sys.stdout.write("\033[2J\033[H\033[?25l")
-                sys.stdout.flush()
+                write_terminal("\033[2J\033[H\033[?25l")
 
 
 def _pending_skip_validation_status(*, android: bool) -> str:
@@ -859,6 +861,16 @@ def handle_play_state(
     from ..ui.transition import PreparationCancelled
     from .details_preparation import PreparedDetails, commit_details_transition
 
+    is_download_mode = bool(getattr(args, 'download', False))
+    interactive_download = (
+        is_download_mode and not getattr(args, "no_tui", False)
+        and not getattr(flags, "plain_mode", False)
+        and sys.stdin.isatty() and sys.stdout.isatty()
+    )
+    if interactive_download:
+        # Consume this attempt so cancellation cannot turn a later Play into Download.
+        args.download = False
+
     original = deepcopy(s_ctx)
     def prepare_entry():
         show = deepcopy(original)
@@ -867,7 +879,7 @@ def handle_play_state(
         return PreparedDetails(show, tuple(str(ep) for ep in ids), original)
 
     try:
-        prepared = app_core.with_loading("Preparing playback…", prepare_entry)
+        prepared = app_core.with_loading("Preparing download…" if interactive_download else "Preparing playback…", prepare_entry)
     except PreparationCancelled:
         return "DETAILS"
     commit_details_transition(s_ctx, prepared)
@@ -894,7 +906,129 @@ def handle_play_state(
     ms.current_ep = episode_id_at(episode_ids, ms.current_ep_index)
     current_ep_label = playback_mod._display_episode_label(s_ctx, ms.current_ep, ttype)
 
-    is_download_mode = bool(getattr(args, 'download', False))
+    if interactive_download and not getattr(args, "print_url", False) and not getattr(args, "sources", False):
+        provider_id = title_provider_key(s_ctx)
+        downloader_choice = getattr(args, "downloader", cfg.get("downloader", "auto"))
+        download_dir = cfg.get("download_dir", "")
+        from media_cli.media.download_worker import DownloadItem, get_global_worker
+        from media_cli.ui.download_manager import run_download_manager
+        from media_cli.media.download import sanitize_filename
+
+        safe_title = sanitize_filename(ms.show_title) or ms.show_title
+        target_dir = os.path.join(download_dir, safe_title)
+        try:
+            os.makedirs(target_dir, exist_ok=True)
+        except Exception:
+            pass
+
+        worker = get_global_worker(download_dir)
+
+        target_eps = []
+        if ms.download_batch_end is not None:
+            for idx in range(ms.current_ep_index, ms.total_eps):
+                epid = episode_id_at(episode_ids, idx)
+                eplbl = playback_mod._display_episode_label(s_ctx, epid, ttype)
+                target_eps.append((epid, eplbl))
+                try:
+                    if int(float(str(eplbl))) >= int(float(str(ms.download_batch_end))):
+                        break
+                except ValueError:
+                    if idx >= ms.total_eps - 1:
+                        break
+        else:
+            target_eps.append((ms.current_ep, current_ep_label))
+
+        def _make_resolver(show_id, ep_id, ttype, provider_id, quality):
+            def _res(item):
+                stream_res = app_core.fetch_episode_stream(
+                    show_id,
+                    ep_id,
+                    ttype,
+                    quality,
+                    provider_id=provider_id,
+                    exclude_sources=getattr(item, "failed_mirrors", set()),
+                )
+                if not stream_res or not stream_res[0]:
+                    raise RuntimeError(f"No stream found for episode {ep_id}")
+                stream, first_source_name = stream_res[0], stream_res[1]
+                raw_url = stream.get("link") or stream.get("streamUrl") or stream.get("sourceUrl") or ""
+                if not raw_url:
+                    raise RuntimeError("No stream URL in resolved stream")
+                item.current_mirror_name = first_source_name or stream.get("source_name") or stream.get("source_parent_name") or "selected mirror"
+                item.current_mirror_url = raw_url
+                item.logs.append(f"▶ Testing mirror: {item.current_mirror_name}")
+                headers = dict(stream.get("headers") or {})
+                referer = stream.get("referer", "")
+                if referer and "Referer" not in headers:
+                    headers["Referer"] = referer
+                proxy_srv = None
+                if stream.get("ip_version") != 4 and (
+                    stream.get("requires_proxy")
+                    or "uwucdn.top" in raw_url
+                    or "owocdn.top" in raw_url
+                    or "kwik." in referer
+                    or "megap." in raw_url
+                    or "akirax.buzz" in raw_url
+                ):
+                    try:
+                        from media_cli.media.local_proxy import start_local_proxy
+                        raw_url, proxy_srv = start_local_proxy(raw_url, headers=headers, referer=referer)
+                    except Exception:
+                        pass
+                item.audio_tracks = list(stream.get("audio_tracks") or [])
+                item.audio_url = stream.get("audio_url", "")
+                item.ip_version = stream.get("ip_version")
+                item.subtitles = list(stream.get("subtitles") or stream.get("vtt") or [])
+                item.subtitle_url = stream.get("subtitle_url", "")
+                return raw_url, headers, proxy_srv
+            return _res
+
+        def _on_complete(item):
+            try:
+                from media_cli.core.storage import collect_downloaded_episode_files, register_downloaded_episode_files
+                f_key = sanitize_filename(item.title) or item.title
+                ep_str = str(getattr(item, "ep_id", item.episode))
+                files = list(getattr(item, "output_files", []) or collect_downloaded_episode_files(item.destination_path))
+                register_downloaded_episode_files(
+                    f_key,
+                    ep_str,
+                    files,
+                    metadata=getattr(item, "show_metadata", None),
+                )
+            except Exception:
+                pass
+
+        quality = cfg.get("quality", "best")
+        ext = ".mkv"
+
+        for epid, eplbl in target_eps:
+            item_id = f"{ms.show_id or safe_title}:{epid}"
+            dest_path = os.path.join(target_dir, f"{safe_title} - Episode {eplbl}{ext}")
+            item = DownloadItem(
+                id=item_id,
+                title=ms.show_title,
+                episode=f"Episode {eplbl}",
+                destination_path=dest_path,
+                engine=downloader_choice if downloader_choice in ("yt-dlp", "aria2c", "ffmpeg") else "auto",
+                resolve_fn=_make_resolver(ms.show_id, epid, ttype, provider_id, quality),
+                on_complete=_on_complete,
+                ep_id=epid,
+                show_metadata=s_ctx,
+                download_sub_langs=getattr(args, "download_sub_langs", None),
+                download_audio_langs=getattr(args, "download_audio_langs", None),
+                subtitle_mode=getattr(args, "subtitle_mode", None),
+            )
+            worker.add_item(item)
+
+        manager_result = run_download_manager(worker, standalone=True)
+        args.download = False
+        ms.selected_stream = None
+        app_core._clear_streams()
+        if manager_result == "QUIT":
+            return "QUIT"
+        if getattr(flags, "plain_mode", False) or not sys.stdin.isatty() or getattr(args, "_cli_episode_passed", False):
+            return "QUIT"
+        return "DETAILS"
 
     if is_download_mode:
         app_core.restore_terminal()
@@ -1008,12 +1142,6 @@ def handle_play_state(
                     app_core.set_action_feedback(ui.ui_show_ctx, "Loading cancelled.")
                     return "DETAILS"
                 ep_num = episode_progress_number(ms.current_ep)
-                if mal_id:
-                    from ..core.workers import DaemonExecutor
-
-                    from ..media.aniskip import fetch_skip_times
-                    _skip_pool = DaemonExecutor(max_workers=1)
-                    aniskip_future = _skip_pool.submit(fetch_skip_times, mal_id, ep_num)
 
             if getattr(ms, "_is_downloads", False) and not is_download_mode:
                 ep_data = {"is_local": True}
@@ -1279,6 +1407,9 @@ def handle_play_state(
                     return "DETAILS"
                 ep_num = episode_progress_number(ms.current_ep)
                 from ..media import custom_skips as custom_skip_mod
+                from ..media.provider_skips import normalize_provider_skips
+
+                native_skips = normalize_provider_skips((ms.selected_stream or {}).get("skip_intervals"))
                 custom_skip = None
                 title_keys = custom_skip_mod.stable_title_keys(action_show, ms.show_id)
                 disabled_custom = any(str(key) in getattr(ms, "custom_skip_disabled_titles", set()) for key in title_keys)
@@ -1298,6 +1429,9 @@ def handle_play_state(
                         skip_parts.append(f"{s.get('label', 'Skip')} ({_fmt_time(s['start'])} → {end})")
                     skip_summary = " · ".join(skip_parts)
                     skip_msg = f"\033[38;5;120m✔ Custom Skips ({custom_skip['mode']}): {skip_summary}\033[0m"
+                elif native_skips:
+                    skip_status = _pending_skip_validation_status(android=app_core.is_termux())
+                    skip_msg = f"\033[38;5;244m• Provider skips: {skip_status}\033[0m"
                 elif mal_id:
                     try:
                         skips = _load_player_skips(
@@ -1420,130 +1554,8 @@ def handle_play_state(
         return "QUIT"
 
 
-    if getattr(args, 'download', False):
+    if is_download_mode:
         app_core._exit_player_screen(close_alt=True)
-
-        if not getattr(args, "no_tui", False) and not getattr(flags, "plain_mode", False) and sys.stdin.isatty() and sys.stdout.isatty():
-            downloader_choice = getattr(args, "downloader", cfg.get("downloader", "auto"))
-            download_dir = cfg.get("download_dir", "")
-            from media_cli.media.download_worker import DownloadItem, get_global_worker
-            from media_cli.ui.download_manager import run_download_manager
-            from media_cli.media.download import sanitize_filename
-
-            safe_title = sanitize_filename(ms.show_title) or ms.show_title
-            target_dir = os.path.join(download_dir, safe_title)
-            try:
-                os.makedirs(target_dir, exist_ok=True)
-            except Exception:
-                pass
-
-            worker = get_global_worker(download_dir)
-
-            target_eps = []
-            if ms.download_batch_end is not None:
-                for idx in range(ms.current_ep_index, ms.total_eps):
-                    epid = episode_id_at(episode_ids, idx)
-                    eplbl = playback_mod._display_episode_label(s_ctx, epid, ttype)
-                    target_eps.append((epid, eplbl))
-                    try:
-                        if int(float(str(eplbl))) >= int(float(str(ms.download_batch_end))):
-                            break
-                    except ValueError:
-                        if idx >= ms.total_eps - 1:
-                            break
-            else:
-                target_eps.append((ms.current_ep, current_ep_label))
-
-            def _make_resolver(show_id, ep_id, ttype, provider_id, quality):
-                def _res(item):
-                    stream_res = app_core.fetch_episode_stream(
-                        show_id,
-                        ep_id,
-                        ttype,
-                        quality,
-                        provider_id=provider_id,
-                        exclude_sources=getattr(item, "failed_mirrors", set()),
-                    )
-                    if not stream_res or not stream_res[0]:
-                        raise RuntimeError(f"No stream found for episode {ep_id}")
-                    stream, first_source_name = stream_res[0], stream_res[1]
-                    raw_url = stream.get("link") or stream.get("streamUrl") or stream.get("sourceUrl") or ""
-                    if not raw_url:
-                        raise RuntimeError("No stream URL in resolved stream")
-                    item.current_mirror_name = first_source_name or stream.get("source_name") or stream.get("source_parent_name") or "selected mirror"
-                    item.current_mirror_url = raw_url
-                    item.logs.append(f"▶ Testing mirror: {item.current_mirror_name}")
-                    headers = dict(stream.get("headers") or {})
-                    referer = stream.get("referer", "")
-                    if referer and "Referer" not in headers:
-                        headers["Referer"] = referer
-                    proxy_srv = None
-                    if (
-                        stream.get("requires_proxy")
-                        or "uwucdn.top" in raw_url
-                        or "owocdn.top" in raw_url
-                        or "kwik." in referer
-                        or "megap." in raw_url
-                        or "akirax.buzz" in raw_url
-                    ):
-                        try:
-                            from media_cli.media.local_proxy import start_local_proxy
-                            raw_url, proxy_srv = start_local_proxy(raw_url, headers=headers, referer=referer)
-                        except Exception:
-                            pass
-                    item.audio_tracks = list(stream.get("audio_tracks") or [])
-                    item.audio_url = stream.get("audio_url", "")
-                    item.subtitles = list(stream.get("subtitles") or stream.get("vtt") or [])
-                    item.subtitle_url = stream.get("subtitle_url", "")
-                    return raw_url, headers, proxy_srv
-                return _res
-
-            def _on_complete(item):
-                try:
-                    from media_cli.core.storage import collect_downloaded_episode_files, register_downloaded_episode_files
-                    f_key = sanitize_filename(item.title) or item.title
-                    ep_str = str(getattr(item, "ep_id", item.episode))
-                    files = list(getattr(item, "output_files", []) or collect_downloaded_episode_files(item.destination_path))
-                    register_downloaded_episode_files(
-                        f_key,
-                        ep_str,
-                        files,
-                        metadata=getattr(item, "show_metadata", None),
-                    )
-                except Exception:
-                    pass
-
-            quality = cfg.get("quality", "best")
-            ext = ".mkv"
-
-            for epid, eplbl in target_eps:
-                item_id = f"{ms.show_id or safe_title}:{epid}"
-                dest_path = os.path.join(target_dir, f"{safe_title} - Episode {eplbl}{ext}")
-                item = DownloadItem(
-                    id=item_id,
-                    title=ms.show_title,
-                    episode=f"Episode {eplbl}",
-                    destination_path=dest_path,
-                    engine=downloader_choice if downloader_choice in ("yt-dlp", "aria2c", "ffmpeg") else "auto",
-                    resolve_fn=_make_resolver(ms.show_id, epid, ttype, provider_id, quality),
-                    on_complete=_on_complete,
-                    ep_id=epid,
-                    show_metadata=s_ctx,
-                    download_sub_langs=getattr(args, "download_sub_langs", None),
-                    download_audio_langs=getattr(args, "download_audio_langs", None),
-                    subtitle_mode=getattr(args, "subtitle_mode", None),
-                )
-                worker.add_item(item)
-
-            manager_result = run_download_manager(worker, standalone=True)
-            args.download = False
-            ms.selected_stream = None
-            app_core._clear_streams()
-            if manager_result == "QUIT":
-                return "QUIT"
-            if getattr(flags, "plain_mode", False) or not sys.stdin.isatty() or getattr(args, "_cli_episode_passed", False):
-                return "QUIT"
-            return "DETAILS"
 
         exclude_sources = set()
         download_ok = False
@@ -1603,7 +1615,7 @@ def handle_play_state(
                 break
 
             exclude_sources.add(first_source_name)
-            print(f"{YELLOW}Download failed on mirror '{first_source_name}'. Trying next mirror...{RESET}")
+            console_status(f"Download failed on mirror '{first_source_name}'. Trying next mirror...", kind='warning')
 
             res = app_core.fetch_episode_stream(
                 ms.show_id,
@@ -1620,7 +1632,7 @@ def handle_play_state(
             app_core._extend_streams(streams)
 
         if not download_ok:
-            print(f"\n{RED}All mirrors failed for EP {current_ep_label}. Skipping to next episode...{RESET}")
+            console_status(f"All mirrors failed for EP {current_ep_label}. Skipping to next episode...", kind='error')
 
         download_batch_end = ms.download_batch_end if ms.download_batch_end is not None else current_ep_label
         try:
@@ -1635,7 +1647,7 @@ def handle_play_state(
             app_core._clear_streams()
             return "PLAY"
         else:
-            print(f"\n{GREEN}Downloads complete.{RESET}")
+            console_status("Downloads complete.", kind='success')
             if download_ok:
                 app_core.set_action_feedback(ui.ui_show_ctx, f"✔ Downloaded {playback_mod._fmt_ep(current_ep_label)}")
                 if getattr(ms, "_is_downloads", False):
@@ -2124,7 +2136,7 @@ def handle_play_state(
                                     ms._binge_auto_downloading = True
                                     args.download = True
                                     app_core._ipc_player.quit()
-                                    print(f"\n\033[1;36mAuto-downloading next episode ({lbl_next}) for binge playback…\033[0m")
+                                    console_status(f"Auto-downloading next episode ({lbl_next}) for binge playback…")
                                     return "PLAY"
                                 else:
                                     app_core._ipc_player.quit()
@@ -2157,7 +2169,7 @@ def handle_play_state(
                     return "PLAY"
                 else:
                     app_core._ipc_player.quit()
-                    print(f"\n{GREEN}Finished the last episode.{RESET}")
+                    console_status("Finished the last episode.", kind='success')
                     return "QUIT"
             else:
                 app_core._ipc_player.quit()
@@ -2220,7 +2232,7 @@ def handle_play_state(
                 return "PLAY"
             else:
                 app_core._ipc_player.quit()
-                print(f"\n{GREEN}Finished the last episode.{RESET}")
+                console_status("Finished the last episode.", kind='success')
                 return "QUIT"
 
         elif result == "PREV":

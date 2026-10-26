@@ -2,6 +2,7 @@
 
 import os
 import re
+import urllib.error
 import urllib.request
 
 from ..core.terminal import fit_terminal_line
@@ -93,7 +94,12 @@ def fetch_cover_bytes(url, max_bytes=MAX_COVER_BYTES):
             context=SSL_CTX_SECURE,
             timeout=10,
         )
-    except Exception:
+    except Exception as error:
+        if isinstance(error, urllib.error.HTTPError) and error.code in {403, 429, 503}:
+            from ..services.browser_access.integration import fetch_cached_image
+            image = fetch_cached_image(url, max_bytes=max_bytes)
+            if image is not None:
+                return image
         # If a Jetpack i*.wp.com CDN URL fails or times out, try the direct host URL as fallback
         if parsed.netloc.endswith(".wp.com") and "/" in parsed.path.lstrip("/"):
             direct_url = f"https://{parsed.path.lstrip('/')}"

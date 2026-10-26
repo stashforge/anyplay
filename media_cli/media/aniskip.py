@@ -276,7 +276,7 @@ def generate_chapters_file(skip_intervals: list[dict], filepath: str) -> str:
         end = max(start, float(item["end"]))
         label = item.get("label", "Chapter")
         if start > curr:
-            name = "Intro" if curr == 0.0 else "Episode"
+            name = "Intro" if curr == 0.0 and item.get("type") in ("op", "mixed-op") else "Episode"
             points.append((curr, start, name))
         points.append((start, end, label))
         curr = end
