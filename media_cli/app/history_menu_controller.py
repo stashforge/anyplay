@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
 from ..context import CliFlags, UiState
@@ -13,8 +13,9 @@ from ..ui.confirmation import confirm_view_action
 from ..ui.transition import PreparationCancelled
 from ..ui.view_model import ViewSpec
 from ..ui.view_picker import run_view_session
-from ..ui.view_session import ExitSession, HandlerResult, ReplaceView, UiCommand, UiEvent, ViewSession
+from ..ui.view_session import ExitSession, HandlerResult, ReplaceView, UiCommand, UiEvent, UpdateFooter, ViewSession
 from .history_menu_view import HISTORY_FOCUS_DELAY, HistoryEntryReference
+from .history_diagnostics import HistoryDiagnostics
 
 _ACTIONS = frozenset({"select", "back", "quit", "tab", "help", "information", "refresh_title", "refresh_view", "delete"})
 
@@ -43,6 +44,7 @@ class HistoryMenuController:
         focus: Callable[[HistoryEntryReference], object] | None = None,
         poll: Callable[[], object] | None = None,
         clock: Callable[[], float] = time.monotonic,
+        diagnostics: HistoryDiagnostics | None = None,
     ) -> None:
         self._read, self._switch, self._select = read_view, switch_mode, select
         self._refresh_view, self._focus, self._poll = refresh_view, focus, poll
@@ -54,6 +56,7 @@ class HistoryMenuController:
             if callback is not None and not callable(callback):
                 raise TypeError("Optional History handlers require callables or None")
         self._clock, self._next_poll = clock, 0.0
+        self.diagnostics = diagnostics if diagnostics is not None else HistoryDiagnostics()
         self._published = self._read()
         self._validate(self._published)
         self.session = ViewSession(self._published, self._handle_event)
@@ -78,14 +81,35 @@ class HistoryMenuController:
         if not force and now < self._next_poll:
             return ()
         self._next_poll = now + 0.1
-        if self._poll is not None:
-            self._poll()
-        view = self._read()
-        self._validate(view)
-        if view == self._published:
-            return ()
-        self._published = view
-        return (ReplaceView(self.session.current.id, self.session.generation, view),)
+        self.diagnostics.count('polls')
+        try:
+            with self.diagnostics.phase('controller'):
+                with self.diagnostics.phase('poll'):
+                    if self._poll is not None:
+                        self._poll()
+                with self.diagnostics.phase('view_read'):
+                    view = self._read()
+                with self.diagnostics.phase('validate'):
+                    self._validate(view)
+                with self.diagnostics.phase('compare'):
+                    unchanged = view == self._published
+                if unchanged:
+                    return ()
+                footer_only = replace(view, footer_statuses=self._published.footer_statuses) == self._published
+                if footer_only:
+                    self.diagnostics.count('footer_updates')
+                    self._published = view
+                    return (UpdateFooter(self.session.current.id, self.session.generation, view.footer_statuses),)
+                if self.diagnostics.enabled:
+                    if view.items != self._published.items:
+                        kind = 'items'
+                    else:
+                        kind = 'other'
+                    self.diagnostics.count(f'replace_{kind}')
+                self._published = view
+                return (ReplaceView(self.session.current.id, self.session.generation, view),)
+        finally:
+            self.diagnostics.report()
 
     def _handle_event(self, event: UiEvent) -> HandlerResult:
         if event.kind in {"back", "quit"}:
@@ -131,6 +155,7 @@ def run_history_menu(
     information: Callable[[HistoryEntryReference], object],
     focus: Callable[[HistoryEntryReference], object] | None = None,
     poll: Callable[[], object] | None = None,
+    diagnostics: HistoryDiagnostics | None = None,
 ) -> HistoryMenuResult:
     def confirmed_delete(reference: HistoryEntryReference) -> None:
         view = controller.session.current
@@ -144,13 +169,16 @@ def run_history_menu(
     controller = HistoryMenuController(
         read_view=read_view, switch_mode=switch_mode, select=select, refresh_title=refresh_title,
         refresh_view=refresh_view, delete=confirmed_delete if delete is not None else None,
-        information=information, focus=focus, poll=poll,
+        information=information, focus=focus, poll=poll, diagnostics=diagnostics,
     )
-    result = run_view_session(
-        flags, ui, controller.session, theme=APPLICATION_THEME, updates_fn=controller.updates,
-        position_key=(controller.session.current.id,),
-        focus_delay=HISTORY_FOCUS_DELAY,
-    )
+    try:
+        result = run_view_session(
+            flags, ui, controller.session, theme=APPLICATION_THEME, updates_fn=controller.updates,
+            position_key=(controller.session.current.id,),
+            focus_delay=HISTORY_FOCUS_DELAY,
+        )
+    finally:
+        controller.diagnostics.report(force=True)
     if not isinstance(result, HistoryMenuResult):
         raise TypeError("History session must return a typed outcome")
     return result

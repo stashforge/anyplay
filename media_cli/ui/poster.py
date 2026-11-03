@@ -1,6 +1,7 @@
 """Asynchronous cover cache and poster rendering coordination."""
 
 import hashlib
+import logging
 import os
 import re
 import shutil
@@ -177,10 +178,6 @@ class PosterManager:
         if not url:
             self.set_status(show, "missing")
             return ""
-        if not shutil.which("chafa"):
-            self.set_status(show, "no_chafa")
-            return ""
-
         url_hash = hashlib.sha256(url.encode("utf-8")).hexdigest()[:32]
 
         with self.poster_lock:
@@ -202,42 +199,54 @@ class PosterManager:
         if failed:
             self.set_status(show, "failed")
             return ""
-
-        # Check if the image is already cached on disk; render asynchronously to avoid UI navigation stutter
-        found_path = None
-        for r_dir in self.read_cache_dirs():
-            p = os.path.join(r_dir, f"{url_hash}.jpg")
-            if os.path.exists(p):
-                found_path = p
-                break
-
-        if found_path:
-            self.set_status(show, "loading")
-            if self._mark_download(url_hash):
-                threading.Thread(
-                    target=self._render_chafa_async,
-                    args=(show, found_path, url_hash),
-                    daemon=True,
-                ).start()
+        if show.get("_poster_status") == "no_chafa":
             return ""
 
-        write_dir = self.cache_dir()
-        cached_path = os.path.join(write_dir, f"{url_hash}.jpg")
+        # Cache discovery and executable checks can block too. Only schedule from
+        # the UI; repeated header/poster reads share the same pending lookup.
         self.set_status(show, "loading")
         if self._mark_download(url_hash):
-            threading.Thread(
-                target=self._download,
-                args=(show, url, url_hash, write_dir, cached_path),
-                daemon=True,
-            ).start()
+            try:
+                threading.Thread(
+                    target=self._prepare_cover,
+                    args=(show, url, url_hash),
+                    daemon=True,
+                ).start()
+            except Exception:
+                self._unmark_download(url_hash)
+                raise
         return ""
 
-    def _render_chafa_async(self, show, path, url_hash):
+    def _prepare_cover(self, show, url, url_hash):
+        try:
+            if not shutil.which("chafa"):
+                self.set_status(show, "no_chafa")
+                self.request_redraw()
+                return
+            for directory in self.read_cache_dirs():
+                path = os.path.join(directory, f"{url_hash}.jpg")
+                if os.path.exists(path):
+                    self._render_chafa_async(show, path, url_hash, release_pending=False)
+                    return
+            write_dir = self.cache_dir()
+            cached_path = os.path.join(write_dir, f"{url_hash}.jpg")
+            self._download(show, url, url_hash, write_dir, cached_path, release_pending=False)
+        except Exception as exc:
+            with self.poster_lock:
+                show["_poster_failed"] = True
+            self.set_status(show, "failed")
+            logging.getLogger(__name__).debug("Cover lookup failed (%s)", type(exc).__name__)
+            self.request_redraw()
+        finally:
+            self._unmark_download(url_hash)
+
+    def _render_chafa_async(self, show, path, url_hash, *, release_pending=True):
         time.sleep(0.06)
         hovered = self.hovered_show_id()
         target_id = show.get("_id") or show.get("id") or show.get("title") or show.get("name")
         if hovered and target_id and str(hovered) != str(target_id):
-            self._unmark_download(url_hash)
+            if release_pending:
+                self._unmark_download(url_hash)
             return
 
         try:
@@ -261,7 +270,8 @@ class PosterManager:
         except Exception:
             pass
         finally:
-            self._unmark_download(url_hash)
+            if release_pending:
+                self._unmark_download(url_hash)
 
     def prewarm_shows(self, shows):
         """Asynchronously pre-renders covers for a list of shows into RAM in the background."""
@@ -304,12 +314,13 @@ class PosterManager:
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _download(self, show, url, url_hash, cache_dir, cached_path):
+    def _download(self, show, url, url_hash, cache_dir, cached_path, *, release_pending=True):
         time.sleep(COVER_DOWNLOAD_DWELL_SECONDS)
         hovered = self.hovered_show_id()
         target_id = show.get("_id") or show.get("id") or show.get("title") or show.get("name")
         if hovered and target_id and str(hovered) != str(target_id):
-            self._unmark_download(url_hash)
+            if release_pending:
+                self._unmark_download(url_hash)
             return
 
         # Check if jpg already exists in any read cache dir
@@ -398,4 +409,5 @@ class PosterManager:
                     os.remove(temporary_path)
                 except Exception:
                     pass
-            self._unmark_download(url_hash)
+            if release_pending:
+                self._unmark_download(url_hash)

@@ -66,9 +66,10 @@ def _run_view_session(flags, ui, session, *, picker=None, poster_manager=None, t
                       position_memory=None, focus_delay=0.5):
     """Run a session, dispatching selection/actions after the picker releases input.
 
-    Each renderer invocation owns an immutable index map. Accepted updates
+    Each renderer invocation owns an immutable index map. Structural updates
     finish that invocation before reopening, so label-based legacy selection
     reconciliation cannot change the identity of a focused or marked item.
+    Paint-only footer updates retain the invocation and are read on live ticks.
     updates_fn may publish already-prepared commands on the UI owner thread;
     it must not fetch data, wait for work or write to the terminal.
     """

@@ -12,7 +12,7 @@ from threading import Lock
 from typing import Literal, TypeAlias
 
 from .actions import ActionBindings, ResolvedAction
-from .footer import StatusKind
+from .footer import FooterStatus, StatusKind
 from .loading_lifecycle import LoadingLifecycle
 from .loading_model import (
     CancelLoading,
@@ -191,6 +191,22 @@ class ReplaceView:
 
 
 @dataclass(frozen=True)
+class UpdateFooter:
+    """Paint-only status chrome; cannot change rows, actions or picker lifetime."""
+
+    view_id: str
+    generation: int
+    footer_statuses: tuple[FooterStatus, ...]
+
+    def __post_init__(self) -> None:
+        _address(self.view_id, self.generation)
+        if not isinstance(self.footer_statuses, tuple) or any(
+            not isinstance(status, FooterStatus) for status in self.footer_statuses
+        ):
+            raise TypeError("footer_statuses requires a tuple of FooterStatus values")
+
+
+@dataclass(frozen=True)
 class PopView:
     pass
 
@@ -265,9 +281,10 @@ UiCommand: TypeAlias = (
     | PopView
     | UpdateItems
     | UpdateStatus
+    | UpdateFooter
     | ExitSession
 )
-BackgroundCommand: TypeAlias = UpdateItems | UpdateStatus | ReplaceView | CompleteNavigation | FailNavigation
+BackgroundCommand: TypeAlias = UpdateItems | UpdateStatus | UpdateFooter | ReplaceView | CompleteNavigation | FailNavigation
 HandlerResult: TypeAlias = UiCommand | tuple[UiCommand, ...] | list[UiCommand] | None
 EventHandler: TypeAlias = Callable[[UiEvent], HandlerResult]
 _COMMAND_TYPES = (
@@ -279,6 +296,7 @@ _COMMAND_TYPES = (
     PopView,
     UpdateItems,
     UpdateStatus,
+    UpdateFooter,
     ExitSession,
 )
 
@@ -538,6 +556,14 @@ class ViewSession:
             self.navigation = None
             self._stack[-1].auto_entered = True
             self._reconcile(self._stack[-1])
+        elif isinstance(command, UpdateFooter):
+            frame = self.frame(command.view_id, command.generation)
+            if frame is None or frame.view.footer_statuses == command.footer_statuses:
+                return False
+            # Presentation reads current footer values on each live tick. Keep
+            # the row map, selection and structural version valid while it paints.
+            frame.view = replace(frame.view, footer_statuses=command.footer_statuses)
+            return True
         elif isinstance(command, (ReplaceView, UpdateItems, UpdateStatus)):
             frame = self.frame(command.view_id, command.generation)
             if frame is None:
@@ -717,8 +743,9 @@ class ViewSession:
                 tuple(item.id for item in command.items),
                 command.expected_images,
             )
-        elif isinstance(command, (ReplaceView, UpdateStatus)):
-            key = ("replace" if isinstance(command, ReplaceView) else "status", command.view_id, command.generation)
+        elif isinstance(command, (ReplaceView, UpdateStatus, UpdateFooter)):
+            kind = "replace" if isinstance(command, ReplaceView) else "footer" if isinstance(command, UpdateFooter) else "status"
+            key = (kind, command.view_id, command.generation)
         elif isinstance(command, (CompleteNavigation, FailNavigation)):
             key = ("navigation", command.view_id, command.generation, command.request_id)
         else:

@@ -381,6 +381,7 @@ def tui_pick(
     last_clock_minute = int(time.time() // 60)
     last_hint_poll_time = 0.0
     last_rendered_hint_val = None
+    last_paint_at = time.monotonic()
     pending_delete_index = confirmation_index
     boundary_hint = ""
     boundary_hint_time = 0.0
@@ -477,6 +478,7 @@ def tui_pick(
         nonlocal scroll, last_poster_key, sel, last_rendered_hint_val, first_frame_pending
         nonlocal page_size, query_start, width_notice_active
         nonlocal frame_ack_pending
+        nonlocal last_paint_at
         runtime.assert_owner_thread()
         runtime.input_bindings = input_bindings
         render_started = time.monotonic()
@@ -505,6 +507,7 @@ def tui_pick(
             first_frame_pending = False
             tty_file.write(f"{clear_prefix}\033[?25l{frame}\033[{rows};{cols}H\033[?25l".encode())
             tty_file.flush()
+            last_paint_at = time.monotonic()
             return
         if width_notice_active:
             logging.getLogger(__name__).debug("Picker width restored: columns=%s", cols)
@@ -529,8 +532,10 @@ def tui_pick(
             _persistent_rendered_lines = list(out)
             tty_file.write(buf.encode())
             tty_file.flush()
+            last_paint_at = time.monotonic()
             return
 
+        presentation_started = time.monotonic()
         actual_top_header = None
         if top_header_fn is not None and filt:
             sel_idx = filt[sel] if sel < len(filt) else -1
@@ -541,6 +546,7 @@ def tui_pick(
         if header_fn is not None:
             sel_idx = filt[sel] if (filt and sel < len(filt)) else -1
             actual_header = header_fn(sel_idx)
+        presentation_elapsed = time.monotonic() - presentation_started
         header_lines = actual_header.splitlines() if actual_header else []
         wait_message = live_feedback.message("") if waiting_for_results() else ""
         if pending_delete_index is not None:
@@ -780,15 +786,20 @@ def tui_pick(
         _persistent_rendered_lines = list(out)
 
         acknowledge_frame = frame_ack_pending and not loading_input_waiting
+        write_elapsed = 0.0
         if frame or clear_prefix or overlay or acknowledge_frame:
             # Park hidden hardware cursor at bottom-right so it never renders under graphics
             buf = f"{clear_prefix}\033[?25l{frame}{overlay}\033[{rows};{cols}H\033[?25l"
-            tty_file.write(buf.encode())
+            encoded = buf.encode()
+            write_started = time.monotonic()
+            tty_file.write(encoded)
             tty_file.flush()
+            write_elapsed = time.monotonic() - write_started
             if acknowledge_frame:
                 frame_ack_pending = False
                 frame_ready_fn()
-        elapsed = time.monotonic() - render_started
+        last_paint_at = time.monotonic()
+        elapsed = last_paint_at - render_started
         if first_frame_pending:
             first_frame_pending = False
             from ..core.startup import startup_first_frame
@@ -799,7 +810,11 @@ def tui_pick(
                 time.monotonic() - picker_started, rows, len(options),
             )
         if elapsed >= 0.1:
-            logging.getLogger(__name__).debug("Slow picker frame: %.3fs", elapsed)
+            logging.getLogger(__name__).debug(
+                "Slow picker frame: %.3fs layout=%.3fs presentation=%.3fs write=%.3fs overlay_bytes=%d",
+                elapsed, max(0.0, elapsed - presentation_elapsed - write_elapsed), presentation_elapsed,
+                write_elapsed, len(overlay.encode()),
+            )
 
     # -----------------------------------------------------------------------
     # Main event loop
@@ -1540,15 +1555,15 @@ def tui_pick(
             if cursor_pos != old_cursor_pos or query != old_query:
                 cursor_activity.edit(time.time())
 
-            # Render immediately if no more keys are buffered in the terminal.
-            # This gives responsive feedback on single presses AND during held-key
-            # scrolling (renders after each burst drains, not just after release).
-            if _needs_redraw and not key_queue:
+            # Single presses paint immediately. Sustained repeats must also get
+            # paint opportunities: never wait indefinitely for an empty input
+            # buffer. Keep every key and its original order; only bound deferral.
+            if _needs_redraw:
                 try:
                     more_input = select.select([tty_fd], [], [], 0)[0]
                 except Exception:
                     more_input = []
-                if not more_input:
+                if (not key_queue and not more_input) or time.monotonic() - last_paint_at >= 0.05:
                     render(filt)
                     _needs_redraw = False
 

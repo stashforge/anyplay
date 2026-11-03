@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import replace
 from itertools import count
@@ -28,6 +29,7 @@ C_META = "\033[38;5;248m"
 C_HINT = "\033[38;5;244m"
 C_RESET = "\033[0m"
 _SEPARATOR = " \u2022 "
+_log = logging.getLogger(__name__)
 
 
 class ViewPresentation:
@@ -258,10 +260,13 @@ class ViewPresentation:
         return f"{color}{bounded}{C_RESET}"
 
     def details(self, item_id=None, width=80) -> str:
+        timed = _log.isEnabledFor(logging.DEBUG)
+        started = time.perf_counter() if timed else 0.0
         fields = self._details(item_id)
         lines = list(render_detail_lines(
             primary=fields.title, secondary=fields.secondary, details=fields.metadata, width=width, theme=self.theme,
         ))
+        text_done = time.perf_counter() if timed else 0.0
         show = self.show_for(item_id)
         message = self._view_message()
         if self.session.navigation is not None:
@@ -276,8 +281,11 @@ class ViewPresentation:
             statuses = [view_loading]
         else:
             statuses = [FooterStatus(message, kind, frame() if busy else "")] if message else []
+        status_done = time.perf_counter() if timed else 0.0
+        cover_done = status_done
         if self.image_enabled() and show["_image_state"] == "available":
             self.poster_manager.get(show)
+            cover_done = time.perf_counter() if timed else 0.0
             footer = self.poster_manager.footer_line(show, self._footer(statuses, item_id=item_id), width, persistent=True)
         else:
             status = self._image_status(show)
@@ -291,6 +299,14 @@ class ViewPresentation:
                     statuses.append(FooterStatus(status, kind))
             footer = render_footer(self._footer(statuses, item_id=item_id), width, theme=self.theme)
         lines.append(footer)
+        if timed:
+            finished = time.perf_counter()
+            if finished - started >= 0.05:
+                _log.debug(
+                    "Slow view header: total=%.3fs text=%.3fs status=%.3fs cover_lookup=%.3fs footer=%.3fs",
+                    finished - started, text_done - started, status_done - text_done,
+                    cover_done - status_done, finished - cover_done,
+                )
         return "\n".join(lines)
 
     def plain_details(self, item_id=None) -> list[str]:

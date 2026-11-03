@@ -33,6 +33,7 @@ from ..ui.transition import call_on_ui_thread
 from . import playback as playback_mod
 from .search_results_controller import run_search_results
 from .history_refresh_handoff import HistoryRefreshInbox, merge_history_refresh
+from .history_diagnostics import HistoryDiagnostics
 from .history_menu_view import HISTORY_MODES, HistoryEntryReference, build_history_view
 
 # ---------------------------------------------------------------------------
@@ -96,6 +97,7 @@ def handle_history_state(
     if not hist:
         app_core.warn("Watch history is empty.")
         return "QUIT"
+    diagnostics = HistoryDiagnostics()
 
     history_loading = BackgroundLoadingStatus(
         LoadingTaskSpec(
@@ -124,10 +126,12 @@ def handle_history_state(
     def _rebuild_history_view():
         nonlocal filtered_hist, history_base_view
         history_base_view = None
-        filtered_hist = app_core.filter_history_entries(hist, history_mode)
+        with diagnostics.phase('filter'):
+            filtered_hist = app_core.filter_history_entries(hist, history_mode)
         fshows = [h.get("show") for h in filtered_hist if isinstance(h.get("show"), dict)]
         if fshows:
-            app_core.batch_prepare_shows_display_state(fshows, ttype)
+            with diagnostics.phase('display_prepare'):
+                app_core.batch_prepare_shows_display_state(fshows, ttype)
 
     def _persist_history_entry_state(entry):
         try:
@@ -180,10 +184,13 @@ def handle_history_state(
             if target is not None:
                 refreshed_entries.append(target)
 
-        accepted = refresh_inbox.drain(accept)
+        with diagnostics.phase('accept'):
+            accepted = refresh_inbox.drain(accept)
+        diagnostics.count('accepted', accepted)
         if refreshed_entries:
             try:
-                app_core.patch_history_entries_state(refreshed_entries)
+                with diagnostics.phase('persist'):
+                    app_core.patch_history_entries_state(refreshed_entries)
             except Exception:
                 logging.getLogger(__name__).debug("History refresh batch save failed", exc_info=True)
         completed_keys = set()
@@ -356,11 +363,12 @@ def handle_history_state(
         nonlocal history_base_view
         status = _history_refresh_status()
         if history_base_view is None:
-            history_base_view = build_history_view(
-                filtered_hist, mode=history_mode, total_count=len(hist),
-                incognito=flags.incognito_mode, now=_history_open_time,
-                show_cover=flags.show_image,
-            )
+            with diagnostics.phase('build_view'):
+                history_base_view = build_history_view(
+                    filtered_hist, mode=history_mode, total_count=len(hist),
+                    incognito=flags.incognito_mode, now=_history_open_time,
+                    show_cover=flags.show_image,
+                )
         return (replace(history_base_view, footer_statuses=(status,))
                 if status is not None else history_base_view)
     def _show_history_information(reference):
@@ -383,6 +391,7 @@ def handle_history_state(
                 refresh_view=_refresh_visible_history,
                 delete=None if flags.incognito_mode else _delete_history_reference,
                 information=_show_history_information, focus=_refresh_hover_reference, poll=_drain_refreshes,
+                diagnostics=diagnostics,
             ))
         else:
             from .history_legacy_picker import run_legacy_history
@@ -399,6 +408,7 @@ def handle_history_state(
                                             or history_refresh_status.get("SINGLE") or _in_flight_hover_refresh),
             ))
     finally:
+        diagnostics.report(force=True)
         def close_refreshes():
             refresh_inbox.close()
             for key, _, _, _ in pending_refreshes.values():
