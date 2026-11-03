@@ -2,6 +2,9 @@
 
 import math
 import re
+from contextlib import closing
+
+from ..services.media_probe import MediaProbeOutcome, classify_media_status
 
 CIPHER = {
     "79":"A","7a":"B","7b":"C","7c":"D","7d":"E","7e":"F","7f":"G","70":"H",
@@ -289,20 +292,19 @@ def calculate_stream_expiry(stream: dict, resolved_at: float | None = None) -> f
 
 
 def ping_stream_liveness(stream: dict, timeout: float = 1.5) -> bool:
-    """
-    Fast heuristic probe to verify if a stream URL is reachable.
-    - 2xx: alive
-    - 3xx: alive if redirect resolves
-    - 4xx: dead
-    - 5xx / timeout: transient (treated as alive / not destroyed)
-    """
+    """Compatibility retention check: uncertainty must not destroy a mirror."""
+    return _probe_stream_liveness(stream, timeout) is not MediaProbeOutcome.MISSING
+
+
+def _probe_stream_liveness(stream: dict, timeout: float = 1.5) -> MediaProbeOutcome:
+    """Separate positive HTTP evidence, confirmed missing content and uncertainty."""
     if not isinstance(stream, dict):
-        return False
+        return MediaProbeOutcome.MISSING
     url = stream.get("link") or stream.get("streamUrl") or stream.get("sourceUrl")
-    if not url:
-        return False
+    if not isinstance(url, str) or not url:
+        return MediaProbeOutcome.MISSING
     if url.startswith("file://") or url.startswith("/"):
-        return True
+        return MediaProbeOutcome.AVAILABLE
 
     headers = dict(stream.get("headers") or stream.get("http_headers") or {})
     if "User-Agent" not in headers and "user-agent" not in headers:
@@ -314,36 +316,25 @@ def ping_stream_liveness(stream: dict, timeout: float = 1.5) -> bool:
     try:
         from curl_cffi import requests as cffi_requests
         imp = "firefox147" if "Firefox" in headers.get("User-Agent", "") else "chrome"
-        r = cffi_requests.get(url, headers=headers, timeout=timeout, impersonate=imp, verify=False, stream=True)
-        if r.status_code in (200, 206, 301, 302, 307, 308):
-            return True
-        if 400 <= r.status_code < 500:
-            return False
-        return True
+        with closing(cffi_requests.get(
+            url, headers=headers, timeout=timeout, impersonate=imp, verify=False, stream=True,
+        )) as response:
+            return classify_media_status(response.status_code)
     except Exception:
         pass
 
     try:
         import requests
-        r = requests.head(url, headers=headers, timeout=timeout, allow_redirects=True)
-        if r.status_code in (200, 206):
-            return True
-        if r.status_code in (301, 302, 307, 308):
-            return True
-        if r.status_code == 405:
-            r_get = requests.get(url, headers={**headers, "Range": "bytes=0-100"}, timeout=timeout, stream=True)
-            if r_get.status_code in (200, 206, 301, 302, 307, 308):
-                return True
-            if 400 <= r_get.status_code < 500:
-                return False
-            return True
-        if 400 <= r.status_code < 500:
-            return False
-        # 5xx or server hiccups: treat as transient
-        return True
+        with closing(requests.head(url, headers=headers, timeout=timeout, allow_redirects=True)) as response:
+            if response.status_code != 405:
+                return classify_media_status(response.status_code)
+        with closing(requests.get(
+            url, headers={**headers, "Range": "bytes=0-100"}, timeout=timeout, stream=True,
+        )) as response:
+            return classify_media_status(response.status_code)
     except Exception:
         # Timeout or network glitch: transient, don't kill immediately
-        return True
+        return MediaProbeOutcome.INCONCLUSIVE
 
 
 def check_stream_health_and_refresh(stream: dict, now: float | None = None) -> bool:
@@ -356,8 +347,8 @@ def check_stream_health_and_refresh(stream: dict, now: float | None = None) -> b
     3. Stale Revalidation (now - validated_at >= soft_ttl):
        - Heuristic probe using exact stream headers.
        - If alive: update validated_at = now (+30m renewal, expires_at unchanged) -> Return True.
-       - If confirmed dead (4xx): -> Return False (prune).
-       - If transient (5xx / timeout): -> Return True (preserve stale mirror).
+       - If confirmed missing (404/410): -> Return False (prune).
+       - If inconclusive: -> Return True without renewing validated_at.
     """
     if not isinstance(stream, dict):
         return False
@@ -394,11 +385,10 @@ def check_stream_health_and_refresh(stream: dict, now: float | None = None) -> b
         return True
 
     # 3. Stale Revalidation Probe
-    if ping_stream_liveness(stream, timeout=1.5):
+    outcome = _probe_stream_liveness(stream, timeout=1.5)
+    if outcome is MediaProbeOutcome.AVAILABLE:
         stream["validated_at"] = current_time
-        return True
-
-    return False
+    return outcome is not MediaProbeOutcome.MISSING
 
 
 def is_stream_valid_fast(stream: dict, now: float | None = None) -> bool:

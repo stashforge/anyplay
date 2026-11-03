@@ -11,6 +11,7 @@ from queue import Empty, Queue
 
 from ..core.api import read_json_response
 from ..media.urls import validate_optional_referer, validate_stream_url
+from .media_probe import MediaProbeOutcome, classify_media_status
 
 SSL_CTX = ssl.create_default_context()
 SSL_CTX.check_hostname = False
@@ -176,7 +177,7 @@ def is_alive(url, referer="", timeout=6):
                 context=SSL_CTX,
                 timeout=timeout,
             ) as response:
-                return 200 <= response.status < 400
+                return classify_media_status(response.status) is MediaProbeOutcome.AVAILABLE
         except Exception:
             continue
     return False

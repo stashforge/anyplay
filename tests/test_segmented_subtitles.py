@@ -6,6 +6,7 @@ from media_cli.media import subtitles
 
 URL = "https://media.test/subs/list?token=hidden"
 PLAYLIST = b"#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXTINF:10,\na.vtt\n#EXTINF:10,\nb.vtt\n#EXT-X-ENDLIST\n"
+SINGLE_FILE = b"#EXTM3U\n#EXT-X-TARGETDURATION:30\n#EXTINF:30,\nwhole.srt\n#EXT-X-ENDLIST\n"
 
 
 def segment(cues, mapping=""):
@@ -37,6 +38,35 @@ def test_shared_assembler_keeps_global_times_and_deduplicates_overlap(monkeypatc
     assert b"line:90%\n<i>Across\nthe boundary</i>" in data
     assert len(calls) == 3
     assert all(headers == {"Origin": "https://media.test"} and ref == "https://media.test/" for _, headers, ref in calls)
+
+
+def test_single_complete_srt_in_hls_is_kept_as_a_local_subtitle(monkeypatch):
+    from media_cli.media import mpv_subtitle_files
+
+    data = b"1\n00:00:01,000 --> 00:00:03,000\n<i>One sentence.</i>\n\n2\n00:00:06,000 --> 00:00:07,000\nAnother.\n"
+    calls = fetcher(monkeypatch, {URL: SINGLE_FILE, 'https://media.test/subs/whole.srt': data})
+    tracks = [{'url': URL, 'label': 'English', 'default': True}]
+    resource = mpv_subtitle_files.prepare_subtitle_files(tracks)
+    try:
+        path = Path(resource.subtitles[0]['url'])
+        assert path.suffix == '.srt' and path.read_bytes() == data
+        assert resource.subtitles[0]['default'] and resource.subtitles[0]['label'] == 'English'
+        assert tracks[0]['url'] == URL
+        assert len(calls) == 2
+    finally:
+        resource.close()
+    assert not path.exists()
+
+
+@pytest.mark.parametrize('data', [
+    b'<html>not subtitles</html>', b'1\nnot a time --> not a time\nText\n',
+    b'1\n00:00:02,000 --> 00:00:01,000\nText\n',
+    b'1\n00:00:01,000 --> 00:00:02,000\n',
+])
+def test_single_file_wrapper_does_not_accept_invalid_srt(monkeypatch, data):
+    fetcher(monkeypatch, {URL: SINGLE_FILE, 'https://media.test/subs/whole.srt': data})
+    with pytest.raises(ValueError):
+        subtitles.fetch_prepared_subtitle_bytes(URL)
 
 
 def test_segment_local_timestamps_follow_mpegts_mapping(monkeypatch):

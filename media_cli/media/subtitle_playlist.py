@@ -1,5 +1,6 @@
-"""Assemble finite WebVTT HLS tracks without exposing HLS to subtitle renderers."""
+"""Prepare finite subtitle HLS tracks without exposing HLS to subtitle renderers."""
 
+import logging
 import re
 import time
 
@@ -10,6 +11,7 @@ MAX_SUBTITLE_BYTES = 32 * 1024 * 1024
 ASSEMBLY_TIMEOUT = 90
 _CLOCK_WRAP = 1 << 33
 _TIMING = re.compile(r"(?P<start>(?:\d{2,}:)?\d{2}:\d{2}\.\d{3})\s+-->\s+(?P<end>(?:\d{2,}:)?\d{2}:\d{2}\.\d{3})(?P<settings>[^\n]*)$")
+_SRT_TIMING = re.compile(r"(?P<start>\d{2,}:\d{2}:\d{2},\d{3})\s+-->\s+(?P<end>\d{2,}:\d{2}:\d{2},\d{3})(?:[ \t].*)?$")
 
 
 class SubtitleAssemblyCancelled(Exception):
@@ -69,8 +71,25 @@ def _parse_segment(data):
     return mapping, cues, styles
 
 
+def _is_complete_srt(data):
+    """Recognize a whole subtitle file, not arbitrary text containing an arrow."""
+    text = data.decode("utf-8-sig").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        return False
+    for block in re.split(r"\n(?:[ \t]*\n)+", text):
+        lines = block.splitlines()
+        if len(lines) < 3 or not re.fullmatch(r"[0-9]+", lines[0]):
+            return False
+        timing = _SRT_TIMING.fullmatch(lines[1])
+        if timing is None:
+            return False
+        if _milliseconds(timing["end"].replace(",", ".")) <= _milliseconds(timing["start"].replace(",", ".")):
+            return False
+    return True
+
+
 def assemble_subtitle_playlist(url, data, *, fetch, cancel_check=None):
-    """Return a single VTT; incomplete/live/encrypted tracks fail without partial output."""
+    """Return assembled VTT or one complete SRT; reject unsupported timelines."""
     deadline = time.monotonic() + ASSEMBLY_TIMEOUT
 
     def check():
@@ -103,6 +122,12 @@ def assemble_subtitle_playlist(url, data, *, fetch, cancel_check=None):
         size += len(raw)
         if size > MAX_SUBTITLE_BYTES:
             raise ValueError("Subtitle assembly exceeds byte limit")
+        # Some hosts wrap a complete SRT in a one-segment HLS playlist. Keep
+        # its original timing/style bytes and give mpv the file, not the wrapper.
+        # Multiple SRT segments need a separate timeline policy, so stay strict.
+        if len(urls) == 1 and _is_complete_srt(raw):
+            logging.getLogger(__name__).debug("Subtitle playlist prepared: format=srt segments=1")
+            return raw
         mapping, rows, segment_styles = _parse_segment(raw)
         if mapped_segments is not None and mapped_segments != (mapping is not None):
             raise ValueError("Inconsistent subtitle timestamp mapping")
