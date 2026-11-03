@@ -64,6 +64,15 @@ local active_prompt = nil
 local known_duration = 0
 local mirror_prompt_serial = nil
 
+-- Read mpv's own preferences; do not reinterpret download language settings.
+mp.add_hook('on_load', 50, function()
+    local languages = mp.get_property_native('slang', {})
+    if #languages > 0 then
+        mp.set_property('file-local-options/subs-fallback', 'no')
+    end
+    mp.commandv('script-message', 'anyplay_subtitle_preferences', utils.format_json(languages))
+end)
+
 local function clear_mirror_prompt()
     mirror_prompt_serial = nil
     mp.remove_key_binding('anyplay_next_mirror')

@@ -62,6 +62,7 @@ class MpvIpc:
         self._pending_audio_url = ""
         self._pending_audio_tracks = []
         self._pending_subtitle_url = ""
+        self._subtitle_languages = []
         self._remote_skip_lookup = None
         self._remote_skips_enabled = False
         self._active_entry_id = None
@@ -71,6 +72,19 @@ class MpvIpc:
         self._load_url = None
         self._load_serial = 0
         self._awaiting_start_file = False
+
+    def _track_subtitle_preferences(self, msg):
+        """Use mpv's effective configuration, including its own config profiles."""
+        args = msg.get('args') or []
+        if (msg.get('event') != 'client-message' or len(args) != 2
+                or args[0] != 'anyplay_subtitle_preferences'):
+            return
+        try:
+            languages = json.loads(args[1])
+        except (TypeError, ValueError):
+            return
+        if isinstance(languages, list) and all(isinstance(lang, str) for lang in languages):
+            self._subtitle_languages = [lang for lang in languages if lang.strip()]
 
     def _track_file_event(self, msg):
         """Identify end events for entries explicitly replaced by load()."""
@@ -194,7 +208,9 @@ class MpvIpc:
                     while "\n" in self._ipc_buffer:
                         line, self._ipc_buffer = self._ipc_buffer.split("\n", 1)
                         try:
-                            self._track_file_event(json.loads(line))
+                            message = json.loads(line)
+                            self._track_subtitle_preferences(message)
+                            self._track_file_event(message)
                         except (ValueError, AttributeError):
                             pass
                     d = self.client.recv(8192)
@@ -358,17 +374,32 @@ class MpvIpc:
             self.send_cmd("audio-add", self._pending_audio_url, "select")
             self._pending_audio_url = ""
         if getattr(self, "_pending_subtitles", None):
-            for sub in self._pending_subtitles:
+            from ..media.languages import match_track_language, normalize_lang_code
+            preferred = self._subtitle_languages
+            selected = None
+            if preferred:
+                selected = next((index for lang in preferred
+                                 for index, sub in enumerate(self._pending_subtitles)
+                                 if (sub.get('url') or sub.get('file')) and match_track_language(
+                                     sub, {normalize_lang_code(lang)})), None)
+            for index, sub in enumerate(self._pending_subtitles):
                 sub_file = sub.get("url") or sub.get("file")
                 sub_label = sub.get("label") or "Subtitle"
                 if sub_file:
                     is_def = bool(sub.get("default") or sub_file == self._pending_subtitle_url)
-                    mode = "select" if is_def else "auto"
-                    self.send_cmd("sub-add", sub_file, mode, sub_label)
+                    mode = "select" if (index == selected if preferred else is_def) else "auto"
+                    language = sub.get('language') or sub.get('lang') or ''
+                    if not language and preferred and index == selected:
+                        language = normalize_lang_code(sub_label, target='alpha3')
+                    if language:
+                        self.send_cmd("sub-add", sub_file, mode, sub_label, language)
+                    else:
+                        self.send_cmd("sub-add", sub_file, mode, sub_label)
             self._pending_subtitles = []
             self._pending_subtitle_url = ""
         elif self._pending_subtitle_url:
-            self.send_cmd("sub-add", self._pending_subtitle_url, "select")
+            self.send_cmd("sub-add", self._pending_subtitle_url,
+                          "auto" if self._subtitle_languages else "select")
             self._pending_subtitle_url = ""
 
 
@@ -721,6 +752,7 @@ class MpvIpc:
                             if not line: continue
                             try:
                                 msg = json.loads(line)
+                                self._track_subtitle_preferences(msg)
                                 ev = msg.get("event")
                                 if ev in ('start-file', 'file-loaded', 'playback-restart', 'seek', 'end-file', 'property-change'):
                                     event_counts[ev] = event_counts.get(ev, 0) + 1

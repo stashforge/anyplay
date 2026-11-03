@@ -29,6 +29,7 @@ local handlers = {}
 local fixture = {{ type = KIND, label = "Skip", start = 100, ["end"] = 190 }}
 package.preload['mp.utils'] = function() return { parse_json = function() return fixture end } end
 mp = {
+ add_hook = function() end,
  observe_property = function() end,
  add_key_binding = function() end,
  register_event = function() end,

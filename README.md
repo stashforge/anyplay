@@ -294,6 +294,14 @@ editor =
 
 Anyplay keeps old valid values when it adds new config keys. If a key is missing, it writes the default value back into the config file.
 
+Desktop playback uses your normal mpv configuration. Set `slang=eng` in
+`~/.config/mpv/mpv.conf` to automatically select English subtitles only. With a
+subtitle language preference set, Anyplay leaves nonmatching subtitles off but
+keeps them available for manual selection, including separately attached tracks.
+Without a `slang` preference, selection behavior stays unchanged. This does not
+change download language settings or audio selection; burned-in captions cannot
+be disabled.
+
 ## Downloads
 
 The downloads screen is a small download manager. It can queue episodes, show progress, retry failed items, and play finished files.

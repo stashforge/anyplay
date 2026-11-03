@@ -109,3 +109,17 @@ def setup_player(monkeypatch):
     monkeypatch.setattr(mpv.select, 'select', select)
     player.load('https://example.com/first.m3u8', 'First', {}, '')
     return player, commands, events, observations
+
+
+def test_runtime_preferences_arrive_before_external_track_attachment(monkeypatch):
+    player, commands, events, _ = setup_player(monkeypatch)
+    player._pending_subtitles = [{'url': '/tmp/spanish.vtt', 'language': 'es', 'default': True}]
+    player._pending_subtitle_url = '/tmp/spanish.vtt'
+    events.extend([
+        {'event': 'client-message', 'args': ['anyplay_subtitle_preferences', '["eng"]']},
+        {'event': 'file-loaded'}, {'event': 'playback-restart'},
+        {'event': 'end-file', 'reason': 'error'},
+    ])
+    player.wait_for_playback({}, '1', 1, None)
+    assert [c for c in commands if c[0] == 'sub-add'] == [
+        ('sub-add', '/tmp/spanish.vtt', 'auto', 'Subtitle', 'es')]
