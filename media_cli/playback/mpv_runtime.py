@@ -62,6 +62,27 @@ local clear_chapters = false
 local skipped = {}
 local active_prompt = nil
 local known_duration = 0
+local mirror_prompt_serial = nil
+
+local function clear_mirror_prompt()
+    mirror_prompt_serial = nil
+    mp.remove_key_binding('anyplay_next_mirror')
+end
+
+mp.register_script_message('set_mirror_prompt', function(serial, enabled)
+    clear_mirror_prompt()
+    if enabled == 'yes' then
+        mirror_prompt_serial = serial
+        mp.add_forced_key_binding('ENTER', 'anyplay_next_mirror', function()
+            if mirror_prompt_serial then
+                mp.commandv('script-message', 'next_mirror', mirror_prompt_serial)
+            end
+        end)
+    end
+end)
+mp.register_event('start-file', clear_mirror_prompt)
+mp.register_event('playback-restart', clear_mirror_prompt)
+mp.register_event('end-file', clear_mirror_prompt)
 
 local function format_time(sec)
     if not sec then return "00:00" end

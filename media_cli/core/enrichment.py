@@ -2,7 +2,9 @@ import logging
 
 from media_cli.core.anilist import fetch_anilist_by_ids
 from media_cli.core.storage import get_source_anilist_matches, save_source_anilist_matches
-from media_cli.domain.matching import choose_confident_match, reset_title_cache
+from media_cli.domain.titles import title_provider_key
+from media_cli.state.preferences import _provider_title_key
+from media_cli.domain.matching import anilist_match_contradiction, choose_confident_match, reset_title_cache
 from media_cli.domain.metadata import provider_status_is_authoritative, title_metadata_complete
 
 
@@ -91,56 +93,55 @@ def enrich_provider_results_fast(results, fuzzy_anilist_results=None):
     by_anilist_id = {str(m["_id"]): m for m in al_shows if m.get("_id")}
     by_mal_id = {str(m["malId"]): m for m in al_shows if m.get("malId")}
 
-    pending = {}
-    unmatched_ids = set()
-    unmatched_shows_with_ids = []
-
-    for s in results:
-        matched = None
-        if s.get("aniListId") and str(s["aniListId"]) in by_anilist_id:
-            matched = by_anilist_id[str(s["aniListId"])]
-            s["_match_source"] = "id"
-        elif s.get("malId") and str(s["malId"]) in by_mal_id:
-            matched = by_mal_id[str(s["malId"])]
-            s["_match_source"] = "id"
-
-        if matched:
-            pending[id(s)] = matched
-        elif not title_metadata_complete(s):
-            unmatched_ids.add(id(s))
-            if s.get("aniListId") or s.get("malId"):
-                unmatched_shows_with_ids.append(s)
-
     stored_lookup = {}
-    if unmatched_ids and al_shows:
-        ids = [s.get("_id") for s in results if id(s) in unmatched_ids and s.get("_id")]
-        stored_lookup = get_source_anilist_matches(ids)
+    if al_shows:
+        sources = [s for s in results if s.get("_id")]
+        if sources:
+            stored_lookup = get_source_anilist_matches(sources)
 
+    unmatched_shows_with_ids = []
     to_save = []
     for s in results:
-        matched = pending.get(id(s))
+        stored = stored_lookup.get(
+            _provider_title_key(str(s.get("_id")), title_provider_key(s))
+        ) or {}
+        stored_id = str(stored.get("_id") or "")
+        manual = stored_id and stored.get("match_source") == "manual"
+        matched = None
+        match_source = ""
 
-        if not matched and id(s) in unmatched_ids and al_shows:
-            stored = stored_lookup.get(s.get("_id")) or {}
-            stored_id = str(stored.get("_id") or "")
-            if stored_id:
-                matched = next(
-                    (c for c in al_shows if str(c.get("_id") or "") == stored_id),
-                    None,
-                )
-            if matched:
-                s["_match_source"] = "stored"
-            else:
-                matched = choose_confident_match(s, al_shows)
-                if matched:
-                    s["_match_source"] = "fuzzy"
+        if manual:
+            # Do not replace an explicit choice merely because it is absent
+            # from this search result batch. A later explicit lookup can load it.
+            matched = by_anilist_id.get(stored_id)
+            if not matched:
+                continue
+            match_source = "manual"
+        else:
+            al_id = str(s.get("aniListId") or s.get("_anilist_id") or "")
+            mal_id = str(s.get("malId") or s.get("myanimelist_id") or "")
+            direct = by_anilist_id.get(al_id) or by_mal_id.get(mal_id)
+            if direct and not anilist_match_contradiction(s, direct):
+                matched, match_source = direct, "id"
+
+            if not matched and not title_metadata_complete(s) and al_shows:
+                saved = by_anilist_id.get(stored_id)
+                if saved and not anilist_match_contradiction(s, saved):
+                    matched, match_source = saved, "stored"
+                else:
+                    compatible = [c for c in al_shows if not anilist_match_contradiction(s, c)]
+                    matched = choose_confident_match(s, compatible)
+                    if matched:
+                        match_source = "fuzzy"
 
         if matched:
+            s["_match_source"] = match_source
             to_save.append((s, matched))
             _merge_anilist_into_provider(s, matched)
-            # Remove from unmatched if fuzzy matched
-            if s in unmatched_shows_with_ids:
-                unmatched_shows_with_ids.remove(s)
+        elif not title_metadata_complete(s) and (
+            s.get("aniListId") or s.get("_anilist_id") or s.get("malId") or s.get("myanimelist_id")
+        ):
+            unmatched_shows_with_ids.append(s)
 
     if to_save:
         save_source_anilist_matches(to_save)
@@ -343,7 +344,9 @@ def enrich_show_if_missing(show: dict) -> bool:
                         if clean_name and clean_name != title_name:
                             candidates = search_anilist(token, clean_name)
                     if candidates:
-                        best = choose_confident_match(show, candidates) or candidates[0]
+                        best = choose_confident_match(show, candidates)
+                        if best is None:
+                            continue
                         _merge_anilist_into_provider(show, best)
                         updated = True
                         break

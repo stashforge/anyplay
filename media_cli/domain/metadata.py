@@ -642,9 +642,10 @@ def batch_prepare_shows_display_state(shows, ttype="sub"):
     if not shows:
         return shows
     from media_cli.context import FLAGS as runtime_flags
-    from media_cli.core.storage import load_history, load_prefs
+    from media_cli.core.storage import load_history, load_prefs, save_prefs, _title_sync_preferences
     from media_cli.domain.history import local_progress
     from media_cli.domain.matching import is_same_show
+    from media_cli.domain.titles import title_provider_key
     from media_cli.state import preferences as preference_state
 
     if runtime_flags.incognito_mode:
@@ -677,7 +678,7 @@ def batch_prepare_shows_display_state(shows, ttype="sub"):
         eid = es.get("_id")
         entry_ttype = entry.get("translation_type", "sub")
         if eid:
-            id_to_entry[(str(eid), entry_ttype)] = entry
+            id_to_entry[(title_provider_key(es).casefold(), str(eid), entry_ttype)] = entry
         al_id = es.get("aniListId")
         if al_id:
             al_to_entry[(str(al_id), entry_ttype)] = entry
@@ -688,6 +689,7 @@ def batch_prepare_shows_display_state(shows, ttype="sub"):
     preferred_history = tuple(entry for entry in history_list if entry.get("translation_type", "sub") == ttype)
     fallback_history = tuple(entry for entry in history_list if entry.get("translation_type", "sub") != ttype)
     matching_history = preferred_history + fallback_history
+    migrated_sync_preferences = False
     for show in shows:
         if not isinstance(show, dict):
             continue
@@ -705,6 +707,11 @@ def batch_prepare_shows_display_state(shows, ttype="sub"):
         elif raw_anilist_show or (runtime_flags.sync_force_on and show.get("aniListId")):
             sync_enabled = True
         else:
+            legacy_key = str(show.get("_id"))
+            previous_owner = (prefs.get(legacy_key) or {}).get("_sync_scope_owner")
+            _title_sync_preferences(show, preferences=prefs, history_entries=history_list, persist=False)
+            if previous_owner != (prefs.get(legacy_key) or {}).get("_sync_scope_owner"):
+                migrated_sync_preferences = True
             sync_pref = preference_state.title_sync_preference(prefs, show)
             sync_enabled = sync_pref is True
         show["_sync_enabled"] = bool(sync_enabled)
@@ -713,7 +720,13 @@ def batch_prepare_shows_display_state(shows, ttype="sub"):
         sal = str(show.get("aniListId") or "")
         sname = str(show.get("name") or "").strip().lower()
 
-        matched_entry = id_to_entry.get((sid, ttype)) or al_to_entry.get((sal, ttype)) or name_to_entry.get((sname, ttype))
+        candidates = (
+            id_to_entry.get((title_provider_key(show).casefold(), sid, ttype)),
+            al_to_entry.get((sal, ttype)),
+            name_to_entry.get((sname, ttype)),
+        )
+        matched_entry = next((entry for entry in candidates
+                              if entry is not None and is_same_show(entry.get("show"), show)), None)
         if matched_entry is None:
             for entry in matching_history:
                 entry_show = entry.get("show")
@@ -755,10 +768,14 @@ def batch_prepare_shows_display_state(shows, ttype="sub"):
         if not show.get("_progress_authority"):
             show["_progress_authority"] = "AL" if sync_enabled else "LOCAL"
 
+    if migrated_sync_preferences:
+        save_prefs(prefs)
     return shows
 
 
 def apply_provider_metadata_to_history_show(show, provider_show):
+    from copy import deepcopy
+
     changed = False
 
     if provider_show.get("_metadata_fields_loaded"):
@@ -768,23 +785,25 @@ def apply_provider_metadata_to_history_show(show, provider_show):
             show["_metadata_fields_loaded"] = loaded
             changed = True
 
-    for key in ("status", "episodeCount", "airedStart", "score", "type", "season"):
+    for key in ("status", "episodeCount", "airedStart", "airedEnd", "score", "type", "season"):
         val = provider_show.get(key)
         if key == "status" and val and any(term in str(val).upper() for term in ("FINISHED", "COMPLETED", "ENDED")):
             val = "FINISHED"
         if val is not None and str(show.get(key)) != str(val):
-            show[key] = val
+            show[key] = deepcopy(val)
             changed = True
 
-    for key in ("thumbnail", "name", "englishName", "nativeName", "description", "banner", "format"):
+    for key in ("thumbnail", "name", "englishName", "romajiName", "nativeName", "description", "banner", "format"):
+        if key == "name" and provider_show.get("_provider_title_fallback"):
+            continue
         val = provider_show.get(key)
-        if val and not show.get(key):
+        if val and (not isinstance(val, str) or val.strip()) and show.get(key) != val:
             show[key] = val
             changed = True
 
     for key in ("genres", "altNames"):
         val = provider_show.get(key)
-        if val and not show.get(key):
+        if val and show.get(key) != list(val):
             show[key] = list(val)
             changed = True
 

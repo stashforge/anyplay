@@ -579,6 +579,15 @@ def refresh_history_anilist_airing_batch(history_entries, *, force=False, persis
     media_ids_to_fetch = []
     entry_map = {}
     provider_checked = set()
+    provider_refresh_due = set()
+
+    for entry in history_entries:
+        show = entry.get("show") or {}
+        if provider_status_is_authoritative(show) and get_show_anilist_id(show):
+            # Tracker checks must not postpone authoritative provider checks.
+            provider_entry = {**entry, "show": {**show, "_anilist_airing_checked_at": 0}}
+            if force or history_entry_should_auto_refresh(provider_entry, now=now):
+                provider_refresh_due.add(id(entry))
 
     for entry in history_entries:
         show = entry.get("show")
@@ -691,14 +700,16 @@ def refresh_history_anilist_airing_batch(history_entries, *, force=False, persis
                         if _provider_catalog_refresh_fn(entry):
                             changed = True
 
-    # Provider failures have their own retry window, independent of fresh
-    # AniList metadata. Do not repeat a provider attempt made above.
+    # Provider-owned status and failed catalogues have their own refresh cadence.
+    # A finished AniList segment is not proof the provider's catalogue ended.
+    # Do not repeat a provider attempt made above.
     if _provider_catalog_refresh_fn:
         for entry in history_entries:
             show = entry.get("show") or {}
-            if (id(entry) not in provider_checked and show.get("_provider_catalog_failed_at")
-                    and get_show_anilist_id(show)
-                    and (force or history_entry_should_auto_refresh(entry, now=now))):
+            if (id(entry) not in provider_checked and get_show_anilist_id(show)
+                    and (id(entry) in provider_refresh_due
+                         or (show.get("_provider_catalog_failed_at")
+                             and (force or history_entry_should_auto_refresh(entry, now=now))))):
                 if _provider_catalog_refresh_fn(entry):
                     changed = True
 

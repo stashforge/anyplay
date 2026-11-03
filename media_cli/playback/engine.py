@@ -378,6 +378,9 @@ def play_desktop(
     start_time_override: float | None = None,
     cancel_check: Callable[[], bool] | None = None,
 ):
+    from ..domain.titles import title_provider_key
+
+    mirror_provider_id = title_provider_key(_player_ui_state.get("show"), default="")
     if cancel_check is None:
         try:
             from media_cli.ui.player_screen import loading_cancel_requested
@@ -389,8 +392,10 @@ def play_desktop(
         title,
         ep,
         stream,
-        get_resume_time=get_resume_time,
-        get_preferred_mirror=get_preferred_mirror,
+        get_resume_time=lambda sid, episode: get_resume_time(sid, episode, mirror_provider_id),
+        get_preferred_mirror=lambda sid: get_preferred_mirror(
+            sid, mirror_provider_id,
+        ),
         update_stream_info=lambda info: _player_ui_state.__setitem__(
             "stream_info", info
         ),
@@ -413,6 +418,7 @@ def play_desktop(
         prepare_subtitle_files_fn=_prepare_mpv_subtitle_files,
         prepare_proxy_fn=_prepare_proxy_for_playback,
         start_player_fn=_start_player_for_playback,
+        background_subtitles=True,
         playback_input_scope=_playback_input_scope,
     )
 

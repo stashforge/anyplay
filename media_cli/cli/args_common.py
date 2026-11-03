@@ -23,7 +23,7 @@ _ANSI_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
 COMMAND_NAMES = {
     "search", "download", "downloads", "anilist", "history", "continue",
-    "auth", "companion", "providers", "completion", "config",
+    "auth", "companion", "providers", "completion", "config", "health",
 }
 
 COMPLETION_SHELLS = ("bash", "zsh", "fish")
@@ -225,6 +225,14 @@ def _add_debug_option(parser, *, suppress_default=False):
     parser.add_argument("--debug", **kwargs)
 
 
+def _add_mpv_window_option(parser, *, suppress_default=False):
+    parser.add_argument(
+        "--mpv-window", choices=("ready", "immediate"),
+        default=argparse.SUPPRESS if suppress_default else "ready",
+        help="Desktop mpv window: ready (default) or immediate while loading",
+    )
+
+
 def _add_plain_option(parser, *, suppress_default=False):
     kwargs = {
         "dest": "plain",
@@ -337,6 +345,7 @@ def _add_search_options(parser):
     )
     _add_debug_option(global_options, suppress_default=True)
     _add_plain_option(global_options, suppress_default=True)
+    _add_mpv_window_option(global_options, suppress_default=True)
     global_options.add_argument(
         "-h", "--help", action="help", help="Show this help message and exit"
     )
@@ -397,6 +406,7 @@ def _add_download_options(parser):
     global_options = parser.add_argument_group("Global options")
     _add_debug_option(global_options, suppress_default=True)
     _add_plain_option(global_options, suppress_default=True)
+    _add_mpv_window_option(global_options, suppress_default=True)
     global_options.add_argument(
         "-h", "--help", action="help", help="Show this help message and exit"
     )
@@ -424,6 +434,7 @@ def _add_anilist_options(parser, *, search=False):
     )
     _add_debug_option(global_options, suppress_default=True)
     _add_plain_option(global_options, suppress_default=True)
+    _add_mpv_window_option(global_options, suppress_default=True)
     global_options.add_argument(
         "-h", "--help", action="help", help="Show this help message and exit"
     )
@@ -476,6 +487,7 @@ def _add_resume_options(parser):
     )
     _add_debug_option(global_options, suppress_default=True)
     _add_plain_option(global_options, suppress_default=True)
+    _add_mpv_window_option(global_options, suppress_default=True)
     global_options.add_argument(
         "-h", "--help", action="help", help="Show this help message and exit"
     )

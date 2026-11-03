@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     from ..context import CliFlags, MachineState, UiState
 
 from .. import app_core
+from ..domain.titles import title_provider_key
 from ..domain.episodes import (
     clean_episode_identifier,
     episode_id_at,
@@ -301,7 +302,7 @@ def handle_episode_state(
         episodes_map = show["_episodes_map_by_ttype"].get(ttype) or {}
     episode_labels = _episode_labels_for(show, ttype)
     display_order = list(range(len(episode_ids)))
-    if app_core.get_episode_order(ms.show_id, cfg.get("episode_order", "asc")) == "desc":
+    if app_core.get_episode_order(ms.show_id, cfg.get("episode_order", "asc"), title_provider_key(show)) == "desc":
         display_order.reverse()
     deleted_download_keys: set[str] = set()
     offline_files = _build_offline_file_lookup(
@@ -488,7 +489,7 @@ def handle_episode_state(
             episode_labels = _episode_labels_for(show, ttype)
             episodes_map = (show.get("_episodes_map_by_ttype") or {}).get(ttype) or show.get("_episodes_map") or {}
             display_order = list(range(len(episode_ids)))
-            if app_core.get_episode_order(ms.show_id, cfg.get("episode_order", "asc")) == "desc":
+            if app_core.get_episode_order(ms.show_id, cfg.get("episode_order", "asc"), title_provider_key(show)) == "desc":
                 display_order.reverse()
             ep_opts = _build_ep_options()
             app_core.set_action_feedback(show, f"Switched to {ttype.title()}.")
@@ -498,7 +499,7 @@ def handle_episode_state(
 
     def _ep_reverse_fn(opt=None):
         nonlocal ep_opts, display_order
-        new_order = app_core.toggle_episode_order(ms.show_id, cfg.get("episode_order", "asc"))
+        new_order = app_core.toggle_episode_order(ms.show_id, cfg.get("episode_order", "asc"), title_provider_key(show))
         display_order.reverse()
         ep_opts = ep_opts[::-1]
         app_core.set_action_feedback(show, f"Order: {'Newest first (N → 1)' if new_order == 'desc' else 'Oldest first (1 → N)'}")

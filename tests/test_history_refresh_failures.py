@@ -36,7 +36,10 @@ def test_failed_refresh_preserves_known_data_and_success_time(monkeypatch, provi
     assert show["_provider_catalog_checked_at"] == 5_000
     assert show.get("_episode_catalog_state") != "loaded"
     assert show["_provider_catalog_failed_at"] == now
-    assert show["_provider_catalog_refresh_error"] == "Provider unavailable"
+    assert show["_provider_catalog_refresh_error"] == (
+        "Provider is no longer included; choose another provider." if provider == "allanime"
+        else "Provider unavailable"
+    )
     assert entry["has_new_release"]
     assert not history.history_entry_refresh_is_stale(entry, now=now + 59)
     assert history.history_entry_refresh_is_stale(entry, now=now + 60)

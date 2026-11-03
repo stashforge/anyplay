@@ -12,15 +12,20 @@ from media_cli.ui.transition import PreparationCancelled
 @pytest.mark.parametrize("outcome", ["success", "cancel", "empty", "cache_cancel"])
 @pytest.mark.parametrize("result", ["NEXT_MIRROR", "ERROR"])
 @pytest.mark.parametrize("cached", [False, True])
-def test_recovery_fallback_owns_loading_frame_and_preserves_exclusions(monkeypatch, outcome, result, cached):
+@pytest.mark.parametrize('quality_first', [False, True, 'pending'])
+def test_recovery_fallback_owns_loading_frame_and_preserves_exclusions(monkeypatch, outcome, result, cached, quality_first):
     core = playback_player.app_core
     show = {"_id": "one", "_provider": "torrent", "name": "Example"}
     ui = UiState(ui_show_ctx=show)
     failed = {"source_name": "Failed", "link": "failed-url"}
     replacement = {"source_name": "Replacement", "link": "replacement-url"}
+    lower = {'source_name': 'Hardsub English Rumble 720p', 'resolution': '720p', 'link': 'lower-url'}
+    if quality_first:
+        show['_provider'] = 'animexin'
+        replacement.update(source_name='All Sub Dailymotion 1080p', resolution='1080p')
     data = {"episode": {"sourceUrls": []}}
     ms = MachineState(current_ep="1", selected_stream=failed,
-                      ep_cache_key=("one", "1", "sub", "torrent"), ep_cache_data=data)
+                      ep_cache_key=("one", "1", "sub", show['_provider']), ep_cache_data=data)
     calls = []
     monkeypatch.setattr(player_screen, "_player_ui_state", {})
     monkeypatch.setattr(player_screen, "_loading_cancel_event", threading.Event())
@@ -33,6 +38,7 @@ def test_recovery_fallback_owns_loading_frame_and_preserves_exclusions(monkeypat
     monkeypatch.setattr(core, "get_show_mal_id", lambda *a, **kw: None)
     monkeypatch.setattr(core, "get_custom_skips", lambda *a: {})
     monkeypatch.setattr(core, "is_termux", lambda: False)
+    monkeypatch.setattr(playback_player, '_lookup_player_sources', lambda *a, **kw: data)
     monkeypatch.setattr(core, "enter_alt_screen", lambda: calls.append("enter"))
 
     def exit_screen(*args, **kwargs):
@@ -43,12 +49,17 @@ def test_recovery_fallback_owns_loading_frame_and_preserves_exclusions(monkeypat
     monkeypatch.setattr(core, "play_desktop", lambda *a, **kw: (result, 0, 10, 1000, 5))
     monkeypatch.setattr(core, "_ipc_player", SimpleNamespace(send_cmd=lambda *a: None, quit=lambda: None))
     monkeypatch.setattr(core, "_get_cached_ep_data", lambda *a: data)
+    monkeypatch.setattr(playback_player.streams_mod, 'background_resolution_pending',
+                        lambda key: quality_first == 'pending' and cached)
+
     def snapshot(*args, **kwargs):
         assert player_screen._player_ui_state["active"]
         calls.append("cache")
         if outcome == "cache_cancel":
             raise PreparationCancelled
-        return [failed, replacement] if cached else []
+        if quality_first == 'pending' and cached and calls.count('cache') == 1:
+            return [failed, lower]
+        return ([failed, lower, replacement] if quality_first else [failed, replacement]) if cached else []
 
     def pump(work, **kwargs):
         return work()
@@ -78,7 +89,7 @@ def test_recovery_fallback_owns_loading_frame_and_preserves_exclusions(monkeypat
     def probe(candidates, key, **kwargs):
         assert player_screen._player_ui_state["active"]
         assert kwargs["recovery"] is True
-        assert candidates == (replacement,)
+        assert candidates == ((replacement, lower) if quality_first else (replacement,))
         calls.append("probe")
         if outcome == "cancel":
             raise PreparationCancelled
@@ -87,10 +98,15 @@ def test_recovery_fallback_owns_loading_frame_and_preserves_exclusions(monkeypat
     monkeypatch.setattr(playback_player, "_probe_player_mirrors", probe)
     monkeypatch.setattr(core, "ping_stream_liveness", lambda *a, **kw: pytest.fail("Recovery bypassed shared probe"))
     args = SimpleNamespace(download=False, print_url=False, sources=False, binge=False, aniskip=False, auto_skip=False)
+    if quality_first:
+        args.quality = '1080p'
     state = playback_player.handle_play_state(CliFlags(), ui, ms, {}, args, "sub", "best", lambda *a: False)
     assert state == ("PLAY" if outcome == "success" else "DETAILS")
     assert not player_screen._player_ui_state["active"]
-    work = ["cache"] + (["probe"] if cached and outcome != "cache_cancel" else [])
+    work = ["cache"]
+    if quality_first == 'pending' and cached and outcome != 'cache_cancel':
+        work.append('cache')
+    work += (["probe"] if cached and outcome != "cache_cancel" else [])
     if outcome != "cache_cancel" and (not cached or outcome == "empty"):
         work.append("fallback")
     assert calls == ["enter", "exit", "enter"] + work + ["exit"] + (["commit"] if outcome == "success" and not cached else [])

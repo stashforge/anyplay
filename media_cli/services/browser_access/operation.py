@@ -8,6 +8,8 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from threading import Event
 
+shutdown_event = Event()
+
 
 @dataclass(frozen=True)
 class BrowserOperation:

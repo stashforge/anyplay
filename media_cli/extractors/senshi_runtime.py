@@ -218,7 +218,13 @@ def resolve_vidcloud(remote_id: int | str, *, timeout: float = 30, cancel: Event
             raise ProviderDependencyError(
                 "Senshi could not run Node.js. Install a working Node.js 26 or newer and retry."
             ) from None
-        if version.returncode or not re.match(r"v(?:2[6-9]|[3-9][0-9])\.", version.stdout):
+        if version.returncode:
+            missing = re.search(r"error while loading shared libraries: ([A-Za-z0-9_.+\-]{1,160}):", version.stderr or "")
+            detail = f" Missing shared library: {missing.group(1)}." if missing else ""
+            raise ProviderDependencyError(
+                "Senshi could not start Node.js." + detail + " Repair the local Node.js installation and retry."
+            )
+        if not re.match(r"v(?:2[6-9]|[3-9][0-9])\.", version.stdout):
             raise ProviderDependencyError(
                 "Senshi local extraction requires Node.js 26 or newer. Upgrade Node.js and retry."
             )

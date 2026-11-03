@@ -152,20 +152,40 @@ def handle_history_state(
 
         call_on_ui_thread(start)
 
-    def _accept_refresh(update):
+    def _accept_refresh(update, latest_by_reference):
         if update.entry is None:
             return
         target = next((entry for entry in hist if HistoryEntryReference.from_entry(entry) == update.reference), None)
-        latest = next((entry for entry in app_core.load_history()
-                       if HistoryEntryReference.from_entry(entry) == update.reference), None)
+        latest = latest_by_reference.get(update.reference)
         if target is None or latest is None:
             return
         merge_history_refresh(target, update, latest)
         _refreshed_history_references.add(update.reference)
-        _persist_history_entry_state(target)
+        return target
 
     def _drain_refreshes():
-        accepted = refresh_inbox.drain(_accept_refresh)
+        latest_by_reference = None
+        refreshed_entries = []
+
+        def accept(update):
+            nonlocal latest_by_reference
+            if update.entry is None:
+                return
+            if latest_by_reference is None:
+                latest_by_reference = {
+                    HistoryEntryReference.from_entry(entry): entry
+                    for entry in app_core.load_history()
+                }
+            target = _accept_refresh(update, latest_by_reference)
+            if target is not None:
+                refreshed_entries.append(target)
+
+        accepted = refresh_inbox.drain(accept)
+        if refreshed_entries:
+            try:
+                app_core.patch_history_entries_state(refreshed_entries)
+            except Exception:
+                logging.getLogger(__name__).debug("History refresh batch save failed", exc_info=True)
         completed_keys = set()
         for token, (key, message, requests, hover_reference) in tuple(pending_refreshes.items()):
             if any(refresh_inbox.is_pending(request) for request in requests):

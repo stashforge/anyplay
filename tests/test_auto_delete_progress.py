@@ -19,10 +19,28 @@ def cleanup(monkeypatch):
     progress = Mock(return_value=None)
     delete = Mock(return_value=True)
     monkeypatch.setattr(playback_player.app_core, "get_local_progress", progress)
-    monkeypatch.setattr(playback_player.app_core, "find_offline_file_for_episode", lambda *a: None)
+    monkeypatch.setattr(playback_player.app_core, "find_offline_file_for_episode", lambda *a, **kw: None)
+    monkeypatch.setattr(playback_player.app_core.storage, "load_downloads_db", lambda: {"shows": {}})
     monkeypatch.setattr(playback_player.app_core, "delete_offline_episode", delete)
     monkeypatch.setattr(playback_player.app_core, "set_action_feedback", Mock())
     return show, ms, progress, delete
+
+
+def test_long_catalogue_cleanup_reuses_one_registry_snapshot(cleanup, monkeypatch):
+    show, ms, progress, delete = cleanup
+    ids = [str(ep) for ep in range(1, 165)]
+    progress.return_value = 164
+    ms._download_files = {}
+    snapshot = {"shows": {}}
+    load = Mock(return_value=snapshot)
+    def lookup(*args, **kwargs):
+        assert kwargs == {"registered_only": True, "downloads_db": snapshot}
+        return None
+    monkeypatch.setattr(playback_player.app_core.storage, "load_downloads_db", load)
+    monkeypatch.setattr(playback_player.app_core, "find_offline_file_for_episode", lookup)
+    assert playback_player._auto_delete_watched_downloads(show, ids, "sub", {}, ms) == []
+    load.assert_called_once_with()
+    delete.assert_not_called()
 
 
 @pytest.mark.parametrize("explicit", [[], ["32"], ["32 [464]"]])

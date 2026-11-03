@@ -122,11 +122,12 @@ def _finish_queued_pending_completion(record):
     episode = completion.get("episode")
     if not show_id or episode is None:
         return
-    pending = storage.get_pending_completion(show_id)
+    provider = completion.get("provider_id") or storage.legacy_resume_owner(show_id)
+    pending = storage.get_pending_completion(show_id, provider)
     if str(pending.get("episode")) != str(episode):
         return
-    storage.save_resume_time(show_id, episode, 0)
-    storage.clear_pending_completion(show_id)
+    storage.save_resume_time(show_id, episode, 0, provider)
+    storage.clear_pending_completion(show_id, provider)
 
 
 def _run_anilist_callback(callback, label):

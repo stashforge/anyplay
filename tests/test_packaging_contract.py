@@ -42,11 +42,11 @@ def test_default_install_keeps_essential_provider_and_quality_modules():
 
 def test_optional_features_have_clear_groups_and_compatible_aliases():
     extras = PROJECT["optional-dependencies"]
-    assert extras["native-crypto"] == extras["allanime"]
+    assert not {"allanime", "allanime-termux", "miruro"} & extras.keys()
     assert extras["legacy-browser"] == extras["animepahe-browser"]
     assert set(requirements(extras["native-crypto"])) == {"cryptography"}
     assert set(requirements(extras["legacy-browser"])) == {"playwright"}
-    assert {"allanime-termux", "crypto-termux", "miruro", "dev"} <= extras.keys()
+    assert {"crypto-termux", "dev"} <= extras.keys()
     assert {"setuptools", "wheel"} <= requirements(extras["dev"]).keys()
 
 
@@ -83,6 +83,7 @@ def test_wheel_contains_exact_runtime_assets_and_entry_point(wheel):
     assets = ["media_cli/providers/registry.json", "media_cli/extractors/senshi_runtime.cjs",
               "media_cli/services/browser_access/assets/executor.js", "media_cli/services/browser_access/assets/worker.js"]
     with zipfile.ZipFile(wheel) as archive:
+        assert not any(name.endswith(("/providers/miruro.py", "/providers/allanime.py")) or name.startswith("archive/") for name in archive.namelist())
         for asset in assets:
             assert archive.read(asset) == (ROOT / asset).read_bytes()
         assert not any(name.startswith(("tests/", "scratch/", ".git/", ".venv/")) for name in archive.namelist())

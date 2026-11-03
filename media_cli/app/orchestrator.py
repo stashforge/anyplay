@@ -707,6 +707,7 @@ def main(parsed=None) -> None:
         pa.error("--incognito cannot be combined with downloads, login, or logout")
     if args.incognito:
         args.no_sync = True
+    runtime_flags.mpv_window = getattr(args, "mpv_window", "ready")
     runtime_flags.sync_force_on = bool(args.sync and not args.no_sync)
     runtime_flags.sync_force_off = bool(args.no_sync)
     runtime_flags.plain_mode = bool(

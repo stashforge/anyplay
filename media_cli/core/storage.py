@@ -263,26 +263,27 @@ def save_prefs(prefs: dict):
     return True
 
 
-def get_preferred_mirror(show_id: str) -> dict:
-    return preference_state.preferred_mirror(load_prefs(), show_id)
+def get_preferred_mirror(show_id: str, provider_id=None) -> dict:
+    return preference_state.preferred_mirror(load_prefs(), show_id, provider_id)
 
 
-def toggle_preferred_mirror(show_id: str, sname: str, resolution: str):
+def toggle_preferred_mirror(show_id: str, sname: str, resolution: str, provider_id=None):
     save_prefs(preference_state.toggle_preferred_mirror(
-        load_prefs(), show_id, sname, resolution
+        load_prefs(), show_id, sname, resolution, provider_id
     ))
 
 
-def get_episode_order(show_id: str, default_order: str) -> str:
+def get_episode_order(show_id: str, default_order: str, provider_id=None) -> str:
     return preference_state.episode_order(
-        load_prefs(), show_id, default_order
+        _owned_title_preferences(show_id, provider_id, ("episode_order",), "_episode_order_scope_owner"),
+        show_id, default_order, provider_id
     )
 
 
-def toggle_episode_order(show_id: str, default_order: str) -> str:
-    prefs = load_prefs()
+def toggle_episode_order(show_id: str, default_order: str, provider_id=None) -> str:
+    prefs = _owned_title_preferences(show_id, provider_id, ("episode_order",), "_episode_order_scope_owner")
     new_order = preference_state.toggle_episode_order(
-        prefs, show_id, default_order
+        prefs, show_id, default_order, provider_id
     )
     save_prefs(prefs)
     return new_order
@@ -291,7 +292,7 @@ def toggle_episode_order(show_id: str, default_order: str) -> str:
 def get_title_sync_preference(show):
     if not show:
         return None
-    return preference_state.title_sync_preference(load_prefs(), show)
+    return preference_state.title_sync_preference(_title_sync_preferences(show), show)
 
 
 def get_title_sync(show) -> bool:
@@ -305,7 +306,7 @@ def set_title_sync(show, enabled: bool):
         show["_sync_enabled"] = False
         return
     save_prefs(preference_state.set_title_sync(
-        load_prefs(), show, enabled
+        _title_sync_preferences(show), show, enabled
     ))
     show["_sync_enabled"] = bool(enabled)
     try:
@@ -316,16 +317,16 @@ def set_title_sync(show, enabled: bool):
 
 
 def get_custom_skips(show, fallback_show_id=None):
-    return preference_state.custom_skips(load_prefs(), show or {}, fallback_show_id)
+    return preference_state.custom_skips(_custom_skip_preferences(show, fallback_show_id), show or {}, fallback_show_id)
 
 
 def set_custom_skips(show, fallback_show_id, entry):
-    prefs = load_prefs()
+    prefs = _custom_skip_preferences(show, fallback_show_id)
     save_prefs(preference_state.set_custom_skips(prefs, show or {}, fallback_show_id, entry))
 
 
 def clear_custom_skips(show, fallback_show_id=None):
-    prefs = load_prefs()
+    prefs = _custom_skip_preferences(show, fallback_show_id)
     save_prefs(preference_state.clear_custom_skips(prefs, show or {}, fallback_show_id))
 
 
@@ -333,35 +334,98 @@ def clear_custom_skips(show, fallback_show_id=None):
 # Resume / pending completion / AniList match prefs
 # ---------------------------------------------------------------------------
 
-def get_resume_time(show_id: str, ep: int) -> int:
-    return preference_state.resume_time(load_prefs(), show_id, ep)
+def _owned_title_preferences(show_id, provider_id, fields, owner_key, *,
+                             preferences=None, history_entries=None, persist=True):
+    """Adopt legacy fields once, only with one exact, consistent history owner."""
+    from copy import deepcopy
+    from ..provider_manifest import _PROVIDER_ALIASES
+    from ..domain.titles import title_provider_key
+
+    prefs = load_prefs() if preferences is None else preferences
+    if not provider_id:
+        return prefs
+    provider = str(provider_id).strip().casefold()
+    provider = _PROVIDER_ALIASES.get(provider, provider)
+    legacy = prefs.get(str(show_id)) or {}
+    known_owners = {str(legacy[key]) for key in ("_resume_scope_owner", "_episode_order_scope_owner", "_sync_scope_owner", "_custom_skip_scope_owner") if legacy.get(key)}
+    if (legacy.get(owner_key) or (known_owners and known_owners != {provider})
+            or not any(field in legacy for field in fields)):
+        return prefs
+    try:
+        owners = set()
+        for entry in (load_history() if history_entries is None else history_entries):
+            show = entry.get("show") or {}
+            if str(show.get("_id") or show.get("id") or "") == str(show_id):
+                owner = title_provider_key(show).casefold()
+                owners.add(_PROVIDER_ALIASES.get(owner, owner))
+    except Exception:
+        return prefs
+    if owners != {provider}:
+        return prefs
+    scoped = prefs.setdefault(preference_state._provider_title_key(show_id, provider), {})
+    for field in fields:
+        if field in legacy and field not in scoped:
+            scoped[field] = deepcopy(legacy[field])
+    legacy[owner_key] = provider
+    if persist:
+        save_prefs(prefs)
+    return prefs
 
 
-def save_resume_time(show_id: str, ep: int, time: int):
+def _title_sync_preferences(show, **kwargs):
+    from ..domain.titles import title_provider_key
+
+    return _owned_title_preferences((show or {}).get("_id"), title_provider_key(show),
+                                    ("sync_enabled",), "_sync_scope_owner", **kwargs)
+
+
+def _custom_skip_preferences(show, fallback_show_id=None):
+    from ..domain.titles import title_provider_key
+
+    show = show or {}
+    return _owned_title_preferences(show.get("_id") or show.get("id") or fallback_show_id,
+                                    title_provider_key(show), ("custom_skips",), "_custom_skip_scope_owner")
+
+
+def _resume_preferences(show_id, provider_id=None):
+    return _owned_title_preferences(show_id, provider_id,
+                                    ("resumes", "pending_completion"), "_resume_scope_owner")
+
+
+def legacy_resume_owner(show_id):
+    return (load_prefs().get(str(show_id)) or {}).get("_resume_scope_owner")
+
+
+def get_resume_time(show_id: str, ep: int, provider_id=None) -> int:
+    return preference_state.resume_time(_resume_preferences(show_id, provider_id), show_id, ep, provider_id)
+
+
+def save_resume_time(show_id: str, ep: int, time: int, provider_id=None):
     save_prefs(preference_state.save_resume_time(
-        load_prefs(), show_id, ep, time
+        _resume_preferences(show_id, provider_id), show_id, ep, time, provider_id
     ))
 
 
-def get_pending_completion(show_id: str) -> dict:
-    return preference_state.pending_completion(load_prefs(), show_id)
+def get_pending_completion(show_id: str, provider_id=None) -> dict:
+    return preference_state.pending_completion(_resume_preferences(show_id, provider_id), show_id, provider_id)
 
 
-def save_pending_completion(show_id: str, ep, progress_ep: int, next_ep, time_pos: int, duration: int):
+def save_pending_completion(show_id: str, ep, progress_ep: int, next_ep, time_pos: int, duration: int, provider_id=None):
     save_prefs(preference_state.save_pending_completion(
-        load_prefs(),
+        _resume_preferences(show_id, provider_id),
         show_id,
         ep,
         progress_ep,
         next_ep,
         time_pos,
         duration,
+        provider_id,
     ))
 
 
-def clear_pending_completion(show_id: str):
+def clear_pending_completion(show_id: str, provider_id=None):
     save_prefs(preference_state.clear_pending_completion(
-        load_prefs(), show_id
+        _resume_preferences(show_id, provider_id), show_id, provider_id
     ))
 
 
@@ -377,9 +441,9 @@ def save_al_match(al_id: str, aa_show: dict):
     ))
 
 
-def get_source_anilist_match(show_id: str) -> dict:
+def get_source_anilist_match(show_id: str, provider_id=None) -> dict:
     return preference_state.source_anilist_match(
-        load_prefs(), show_id
+        load_prefs(), show_id, provider_id
     )
 
 
@@ -390,9 +454,21 @@ def save_source_anilist_match(aa_show: dict, anilist_show: dict):
         load_prefs(), aa_show, anilist_show
     ))
 
-def get_source_anilist_matches(show_ids: list[str]) -> dict:
+def get_source_anilist_matches(show_ids: list, provider_id=None) -> dict:
+    from ..domain.titles import title_provider_key
+
     prefs = load_prefs()
-    return {sid: preference_state.source_anilist_match(prefs, sid) for sid in show_ids}
+    matches = {}
+    for source in show_ids:
+        if isinstance(source, dict):
+            sid = str(source.get("_id") or source.get("id") or "")
+            provider = title_provider_key(source)
+            key = preference_state._provider_title_key(sid, provider)
+        else:
+            sid, provider, key = source, provider_id, source
+        matches[key] = preference_state.source_anilist_match(prefs, sid, provider)
+    return matches
+
 
 def save_source_anilist_matches(pairs: list[tuple[dict, dict]]):
     if is_incognito() or not pairs:
@@ -452,6 +528,7 @@ HISTORY_SHOW_STRIP_KEYS = ANILIST_HISTORY_STRIP_KEYS | {
 def sanitize_show_for_history(show):
     stored = dict(show or {})
     from ..domain.episodes import episode_display_summary
+    from ..domain.metadata import provider_status_is_authoritative
 
     summaries = {}
     for ttype in ("sub", "dub", "raw"):
@@ -472,7 +549,7 @@ def sanitize_show_for_history(show):
     if prov:
         stored["_provider"] = str(prov)
     stored.pop("provider", None)
-    if stored.get("_anilist_status") == "FINISHED":
+    if stored.get("_anilist_status") == "FINISHED" and not provider_status_is_authoritative(stored):
         stored["status"] = "FINISHED"
     elif any(term in str(stored.get("status") or "").upper() for term in ("FINISHED", "COMPLETED", "ENDED")):
         stored["status"] = "FINISHED"
@@ -542,15 +619,11 @@ def _load_history():
 
 
 def get_history_entry(show, ttype="sub", *, history_entries=None):
-    show_id = str((show or {}).get("_id") or (show or {}).get("id") or "")
     from media_cli.domain.matching import is_same_show
     for entry in load_history() if history_entries is None else history_entries:
         if entry.get("translation_type", "sub") != ttype:
             continue
         entry_show = entry.get("show", {})
-        e_id = str(entry_show.get("_id") or entry_show.get("id") or "")
-        if show_id and e_id and e_id == show_id:
-            return entry
         if is_same_show(entry_show, show):
             return entry
     return None
@@ -812,15 +885,18 @@ def save_refreshed_history(history):
 
 @_history_transaction
 def patch_history_entry_show(show_id, ttype, updated_show, *, fields=None):
+    from ..domain.titles import title_provider_key
+
     if not show_id:
         return False
+    provider = title_provider_key(updated_show)
     history = load_history()
     changed = False
     str_show_id = str(show_id)
     safe_keys = {
         "_episode_display",
         "status", "episodeCount", "availableEpisodes", "availableEpisodesDetail",
-        "name", "englishName", "nativeName", "thumbnail", "altNames",
+        "name", "englishName", "romajiName", "nativeName", "thumbnail", "altNames",
         "type", "season", "airedStart", "airedEnd", "score",
         "_episode_ids", "_episode_ids_ttype", "_episode_labels", "_episode_labels_ttype",
         "_episode_catalog_state", "_allanime_checked_at",
@@ -841,7 +917,8 @@ def patch_history_entry_show(show_id, ttype, updated_show, *, fields=None):
     for entry in history:
         if ttype is None or entry.get("translation_type", "sub") == ttype:
             s = entry.get("show")
-            if s and str(s.get("_id") or s.get("id") or "") == str_show_id:
+            if (s and str(s.get("_id") or s.get("id") or "") == str_show_id
+                    and title_provider_key(s) == provider):
                 if s is updated_show:
                     changed = True
                 else:
@@ -857,9 +934,27 @@ def patch_history_entry_show(show_id, ttype, updated_show, *, fields=None):
     return False
 
 
-@_history_transaction
 def patch_history_entry_state(updated_entry):
-    """Persist refreshed history show metadata and category flags for one entry."""
+    """Persist one refreshed entry through the shared batch transaction."""
+    return patch_history_entries_state((updated_entry,))
+
+
+@_history_transaction
+def patch_history_entries_state(updated_entries):
+    """Patch matching entries against current progress, with at most one save."""
+    updates = tuple(updated_entries)
+    if not updates:
+        return False
+    history = load_history()
+    changed = False
+    for updated_entry in updates:
+        changed = _patch_history_entry_state(history, updated_entry) or changed
+    return save_refreshed_history(history) if changed else False
+
+
+def _patch_history_entry_state(history, updated_entry):
+    from ..domain.titles import title_provider_key
+
     if not isinstance(updated_entry, dict):
         return False
     updated_show = updated_entry.get("show") or {}
@@ -867,14 +962,14 @@ def patch_history_entry_state(updated_entry):
     if not show_id:
         return False
     ttype = updated_entry.get("translation_type", "sub")
-    history = load_history()
     changed = False
     str_show_id = str(show_id)
+    provider = title_provider_key(updated_show)
     entry_keys = {"was_caught_up", "has_new_release"}
     show_keys = {
         "_episode_display",
         "status", "episodeCount", "availableEpisodes", "availableEpisodesDetail",
-        "name", "englishName", "nativeName", "thumbnail", "altNames",
+        "name", "englishName", "romajiName", "nativeName", "thumbnail", "altNames",
         "type", "season", "airedStart", "airedEnd", "score",
         "_episode_ids", "_episode_ids_ttype", "_episode_labels", "_episode_labels_ttype",
         "_episode_ids_by_ttype", "_episodes_map", "_episodes_map_by_ttype",
@@ -893,7 +988,8 @@ def patch_history_entry_state(updated_entry):
         if entry.get("translation_type", "sub") != ttype:
             continue
         show = entry.get("show") or {}
-        if str(show.get("_id") or show.get("id") or "") != str_show_id:
+        if (str(show.get("_id") or show.get("id") or "") != str_show_id
+                or title_provider_key(show) != provider):
             continue
         if entry is updated_entry:
             changed = True
@@ -915,9 +1011,7 @@ def patch_history_entry_state(updated_entry):
         history_domain.history_entry_category(entry)
         changed = changed or previous_category != (entry.get("was_caught_up"), entry.get("has_new_release"))
         break
-    if changed:
-        return save_refreshed_history(history)
-    return False
+    return changed
 
 
 # ---------------------------------------------------------------------------
@@ -1251,6 +1345,28 @@ def _matching_episode_file_keys(episode_files: dict, episode) -> list[str]:
     return [str(key) for key in episode_files.keys() if _episode_matches(key, episode)]
 
 
+def _download_episode_registration_key(show_data: dict, episode) -> str | None:
+    """Resolve an alias to one registration without broadening episode deletion."""
+    from ..domain.episodes import episode_index_for_id
+
+    keys = [str(key) for key in (show_data.get("episode_files") or {})]
+    requested = str(episode).strip()
+    if requested in keys:
+        return requested
+    labels = (show_data.get("metadata") or {}).get("_episode_labels") or {}
+    catalog = list(labels)
+    catalog_index = episode_index_for_id(catalog, requested, labels=labels)
+    if catalog_index is None and any(
+        episode_index_for_id([key], requested, labels=labels) is not None for key in catalog
+    ):
+        # An ambiguous catalogue alias must not become "unique" merely because
+        # only one of those episodes currently has a local download.
+        return None
+    expected = labels[catalog[catalog_index]] if catalog_index is not None else requested
+    index = episode_index_for_id(keys, expected, labels=labels)
+    return keys[index] if index is not None else None
+
+
 def _download_show_lookup_keys(show_title: str) -> list[str]:
     keys = []
     for key in (show_title, str(show_title or "").strip()):
@@ -1264,6 +1380,53 @@ def _download_show_lookup_keys(show_title: str) -> list[str]:
     except Exception:
         pass
     return keys
+
+
+def _managed_download_file_identity(path: str) -> list[int] | None:
+    """Stable across renames, but not copies or edits; never follow a symlink."""
+    import stat
+
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return None
+    if not stat.S_ISREG(info.st_mode):
+        return None
+    return [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns]
+
+
+def _repair_registered_download_path(show_title: str, found: str) -> None:
+    """Repair unique original-file ownership after lookup verified episode tags."""
+    fingerprint = _managed_download_file_identity(found)
+    if fingerprint is None:
+        return
+    db = load_downloads_db()
+    for title in _download_show_lookup_keys(show_title):
+        data = db.get("shows", {}).get(title)
+        if not data:
+            continue
+        identities = data.get("episode_file_identities") or {}
+        registered = data.get("episode_files") or {}
+        matches = []
+        # Saved keys can be provider IDs, season numbers or dual-number labels.
+        # File identity is stronger evidence than parsing those keys again.
+        for key, raw_files in registered.items():
+            files = [raw_files] if isinstance(raw_files, str) else list(raw_files or ())
+            for index, old in enumerate(files):
+                if (old != found and not os.path.lexists(old)
+                        and identities.get(old) == fingerprint):
+                    matches.append((key, files, index, old))
+        if len(matches) != 1:
+            continue
+        key, files, index, old = matches[0]
+        if _managed_download_file_identity(found) != fingerprint:
+            return
+        files[index] = found
+        registered[key] = files
+        identities.pop(old, None)
+        identities[found] = fingerprint
+        save_downloads_db(db)
+        return
 
 
 def register_downloaded_episode_files(show_title: str, episode, files: list[str] | tuple[str, ...], metadata: dict | None = None) -> bool:
@@ -1294,6 +1457,11 @@ def register_downloaded_episode_files(show_title: str, episode, files: list[str]
         show_data["metadata"] = metadata
     episode_files = show_data.setdefault("episode_files", {})
     episode_files[ep_str] = clean_files
+    identities = show_data.setdefault("episode_file_identities", {})
+    for path in clean_files:
+        fingerprint = _managed_download_file_identity(path)
+        if fingerprint is not None:
+            identities[path] = fingerprint
     meta = show_data.get("metadata", {})
     if isinstance(meta, dict):
         meta["downloadedCount"] = len(show_data.get("episodes", []))
@@ -1390,12 +1558,13 @@ _TEXT_FAKE_VIDEO_MARKERS = (
 )
 
 
-def is_valid_download_video(filepath: str) -> bool:
+def is_valid_download_video(filepath: str, *, raise_on_error: bool = False) -> bool:
     """Return False for known non-video payloads saved with video extensions.
 
     Keep this cheap because downloads/history views call it while scanning
     folders. It intentionally rejects known playlist/error text, while leaving
-    deeper media probing to the downloader completion path.
+    deeper media probing to the downloader completion path. Scanners can request
+    I/O errors explicitly so unreadable files are not treated as absent.
     """
     if not filepath:
         return False
@@ -1403,11 +1572,17 @@ def is_valid_download_video(filepath: str) -> bool:
     if not path.lower().endswith(VIDEO_DOWNLOAD_EXTS):
         return False
     try:
-        if not os.path.isfile(path) or os.path.getsize(path) <= 0:
+        import stat
+        stamp = os.stat(path)
+        if not stat.S_ISREG(stamp.st_mode) or stamp.st_size <= 0:
             return False
         with open(path, "rb") as fh:
             head = fh.read(4096)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
     except OSError:
+        if raise_on_error:
+            raise
         return False
 
     stripped = head.lstrip().lower()
@@ -1424,7 +1599,102 @@ def is_valid_download_video(filepath: str) -> bool:
     return True
 
 
-def find_offline_file_for_episode(show_title: str, episode, cfg: dict | None = None) -> str | None:
+def find_offline_file_for_episode(
+    show_title: str, episode, cfg: dict | None = None, *,
+    registered_only: bool = False, downloads_db: dict | None = None,
+) -> str | None:
+    """Find local media; cleanup can restrict lookup to a shared registry snapshot."""
+    if not show_title or episode is None:
+        return None
+    from ..media.download import sanitize_filename
+    from ..domain.episodes import episode_index_for_id
+    from ..media.episode_identity import (
+        download_identity_conflicts, find_matching_episode_identity, read_episode_identity,
+    )
+
+    cfg = cfg or load_config()
+    root = os.path.realpath(os.path.expanduser(str(cfg.get("download_dir") or get_default_download_dir())))
+    if not os.path.isdir(root):
+        return None
+    shows = (load_downloads_db() if downloads_db is None else downloads_db).get("shows", {})
+    data = next((shows[key] for key in _download_show_lookup_keys(show_title) if key in shows), {})
+    metadata = data.get("metadata") or {}
+    title_id = str(metadata.get("_id") or metadata.get("id") or metadata.get("_provider_id") or "")
+    names = {str(name).casefold() for name in (show_title, metadata.get("name"), metadata.get("englishName")) if name}
+    names |= {sanitize_filename(name).casefold() for name in tuple(names)}
+    expected = (metadata.get("_episode_labels") or {}).get(str(episode), str(episode))
+
+    def title_matches(identity, *, require_identity=False):
+        if title_id and identity.title_id:
+            return title_id == identity.title_id
+        if identity.title:
+            return identity.title.casefold() in names or sanitize_filename(identity.title).casefold() in names
+        return not require_identity
+
+    def tagged_match(identity):
+        return title_matches(identity, require_identity=True) and (
+            bool(identity.episode_id and identity.episode_id == str(episode))
+            or bool(identity.episode and episode_index_for_id([identity.episode], expected) is not None)
+        )
+
+    def known_path(path):
+        path = _normal_download_file_path(path)
+        if os.path.commonpath((root, os.path.realpath(path))) != root or not is_valid_download_video(path):
+            return None
+        identity = read_episode_identity(path)
+        if identity is not None and (not title_matches(identity)
+                or download_identity_conflicts(expected, path, identity_reader=lambda _: identity)):
+            return None
+        return path
+
+    registered = data.get("episode_files") or {}
+    for key in _matching_episode_file_keys(registered, episode):
+        paths = registered[key]
+        for path in (paths,) if isinstance(paths, str) else paths or ():
+            valid = known_path(path)
+            if valid:
+                return valid
+    if registered_only:
+        return None
+    named = _find_offline_file_by_name(show_title, episode, {**cfg, "download_dir": root})
+    if named:
+        valid = known_path(named)
+        if valid:
+            _repair_registered_download_path(show_title, valid)
+            return valid
+
+    # Only direct show folders; never recursively probe an entire media library.
+    folders = []
+    for name in _download_show_lookup_keys(show_title):
+        folder = os.path.join(root, name)
+        if os.path.isdir(folder) and not os.path.islink(folder) and os.path.dirname(os.path.realpath(folder)) == root:
+            folders.append(folder)
+    try:
+        with os.scandir(root) as entries:
+            for entry in entries:
+                if len(folders) >= 128:
+                    break
+                if entry.is_dir(follow_symlinks=False) and entry.path not in folders:
+                    folders.append(entry.path)
+        candidates = []
+        for folder in folders:
+            with os.scandir(folder) as entries:
+                for entry in entries:
+                    if entry.is_file(follow_symlinks=False) and is_valid_download_video(entry.path):
+                        candidates.append(entry.path)
+                    if len(candidates) >= 128:
+                        break
+            if len(candidates) >= 128:
+                break
+    except OSError:
+        return None
+    found = find_matching_episode_identity(candidates, tagged_match)
+    if found:
+        _repair_registered_download_path(show_title, found)
+    return found
+
+
+def _find_offline_file_by_name(show_title: str, episode, cfg: dict | None = None) -> str | None:
     if not show_title or episode is None:
         return None
     import re
@@ -1496,11 +1766,13 @@ def delete_offline_episode(show_title: str, episode, cfg: dict | None = None, re
             break
 
     registered_files: list[str] = []
+    registered_key = None
     if show_data:
+        registered_key = _download_episode_registration_key(show_data, episode)
         expected = (((show_data.get("metadata") or {}).get("_episode_labels") or {})
-                    .get(str(episode), str(episode)))
+                    .get(registered_key, registered_key or str(episode)))
         episode_files = show_data.get("episode_files", {})
-        for key in _matching_episode_file_keys(episode_files, episode):
+        for key in ([registered_key] if registered_key is not None else []):
             raw_files = episode_files.get(key, [])
             if isinstance(raw_files, str):
                 raw_files = [raw_files]
@@ -1515,12 +1787,14 @@ def delete_offline_episode(show_title: str, episode, cfg: dict | None = None, re
     filepath = None if registered_files else find_offline_file_for_episode(show_title, episode, cfg)
     target_files = registered_files or ([filepath] if filepath else [])
     deleted = False
+    deleted_parents = set()
     for target in target_files:
         try:
             target_path = _normal_download_file_path(target)
             if target_path and os.path.isfile(target_path):
                 os.remove(target_path)
                 deleted = True
+                deleted_parents.add(os.path.dirname(target_path))
         except OSError:
             pass
 
@@ -1529,18 +1803,42 @@ def delete_offline_episode(show_title: str, episode, cfg: dict | None = None, re
             show_data = db["shows"][title_key]
             eps = show_data.get("episodes", [])
             ep_str = str(episode).strip()
-            new_eps = [e for e in eps if not _episode_matches(e, ep_str)]
+            def matches_removed_episode(value):
+                if registered_key is not None:
+                    return _download_episode_registration_key(show_data, value) == registered_key
+                return _episode_matches(value, ep_str)
+
+            new_eps = [e for e in eps if not matches_removed_episode(e)]
 
             show_data["episodes"] = new_eps
             meta = show_data.get("metadata", {})
             meta["downloadedCount"] = len(new_eps)
             watched = show_data.get("watched_episodes", [])
-            show_data["watched_episodes"] = [w for w in watched if not _episode_matches(w, ep_str)]
+            show_data["watched_episodes"] = [w for w in watched if not matches_removed_episode(w)]
             episode_files = show_data.get("episode_files", {})
             if isinstance(episode_files, dict):
-                for key in _matching_episode_file_keys(episode_files, ep_str):
+                for key in ([registered_key] if registered_key is not None else _matching_episode_file_keys(episode_files, ep_str)):
+                    removed_paths = episode_files.get(key) or []
+                    if isinstance(removed_paths, str):
+                        removed_paths = [removed_paths]
+                    for path in removed_paths:
+                        (show_data.get("episode_file_identities") or {}).pop(path, None)
                     episode_files.pop(key, None)
             save_downloads_db(db)
             break
+
+    if deleted_parents:
+        cleanup_cfg = cfg or load_config()
+        download_root = os.path.realpath(os.path.expanduser(str(
+            cleanup_cfg.get("download_dir") or get_default_download_dir()
+        )))
+        for folder in deleted_parents:
+            # Never recurse, remove the download root, or follow a show symlink.
+            if os.path.islink(folder) or os.path.dirname(os.path.realpath(folder)) != download_root:
+                continue
+            try:
+                os.rmdir(folder)  # Atomic: any remaining file keeps the folder.
+            except OSError:
+                pass
 
     return deleted

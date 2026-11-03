@@ -27,4 +27,6 @@ def test_ipc_player_cannot_compete_for_tui_keyboard_input(monkeypatch):
     player.start()
     command, kwargs = launches[0]
     assert "--input-terminal=no" in command
+    assert "--force-window=no" in command
+    assert "--force-window=yes" not in command
     assert kwargs["stdin"] == subprocess.DEVNULL

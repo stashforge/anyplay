@@ -22,6 +22,7 @@ def test_order_flip_reuses_rows_without_reloading_status(monkeypatch, watched):
     order = {"value": "asc"}
 
     def toggle(*args):
+        assert args == ("show", "asc", "example")
         order["value"] = "desc" if order["value"] == "asc" else "asc"
         return order["value"]
 
@@ -31,7 +32,11 @@ def test_order_flip_reuses_rows_without_reloading_status(monkeypatch, watched):
     monkeypatch.setattr(app_core, "ensure_episode_ids", lambda *a: ids)
     monkeypatch.setattr(app_core, "check_translation_switch_capability", lambda *a: (True, ""))
     monkeypatch.setattr(app_core, "with_loading", lambda msg, fn, *a: fn(*a))
-    monkeypatch.setattr(app_core, "get_episode_order", lambda *a: order["value"])
+    def read_order(show_id, default, provider_id):
+        assert (show_id, default, provider_id) == ("show", "asc", "example")
+        return order["value"]
+
+    monkeypatch.setattr(app_core, "get_episode_order", read_order)
     monkeypatch.setattr(app_core, "toggle_episode_order", toggle)
     monkeypatch.setattr(app_core, "build_info_panel", lambda *a, **kw: None)
     monkeypatch.setattr(playback_episodes, "_build_offline_file_lookup", lambda *a: {})

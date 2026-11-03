@@ -191,7 +191,7 @@ def render_skip_form(
             f"# Available providers: {available}",
             "",
             "# Applies to provider(s). Use all, or comma-separated provider ids/names.",
-            "# Examples: all | mkissa | anizone,anidb",
+            "# Examples: all | anipm | anizone,anidb",
             f"providers = {provider_value}",
             "",
             "# Providers to exclude even when providers = all.",
@@ -336,22 +336,26 @@ def pick_provider_entry(entries: list[dict] | None, provider_id: str) -> dict | 
 
 
 def stable_title_keys(show: dict | None, fallback_show_id: str | None = None) -> list[str]:
+    """Separate provider IDs from shared tracker IDs; names are local fallback."""
+    from ..domain.titles import title_provider_key
+    from ..state.preferences import _provider_title_key
+
     show = show or {}
+    provider = title_provider_key(show)
     keys = []
-    for raw in (
-        fallback_show_id,
-        show.get("_id"),
-        show.get("id"),
-        show.get("aniListId"),
-        show.get("malId"),
-        show.get("name"),
-        show.get("englishName"),
-    ):
-        if raw is None:
-            continue
-        key = str(raw).strip()
-        if key and key not in keys:
-            keys.append(key)
+    for raw in (fallback_show_id, show.get("_id"), show.get("id")):
+        if raw is not None and str(raw).strip():
+            key = _provider_title_key(str(raw).strip(), provider)
+            if key not in keys:
+                keys.append(key)
+    for field, prefix in (("aniListId", "al"), ("malId", "mal")):
+        raw = str(show.get(field) or "").strip()
+        if raw.isdecimal() and int(raw) > 0:
+            keys.append(f"{prefix}:{int(raw)}")
+    if not keys:
+        title = str(show.get("name") or show.get("englishName") or "").strip()
+        if title:
+            keys.append("custom-title:" + _provider_title_key(title, provider))
     return keys
 
 

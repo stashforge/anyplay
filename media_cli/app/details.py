@@ -11,6 +11,8 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from ..domain.titles import title_provider_key
+
 from media_cli import app_core
 from media_cli.ui.picker import tui_pick
 
@@ -269,7 +271,7 @@ def handle_details_state(
             ms.current_ep is not None
             and not cur_watched
             and resume_show_id
-            and (app_core.get_resume_time(resume_show_id, ms.current_ep) or 0) > 0
+            and (app_core.get_resume_time(resume_show_id, ms.current_ep, title_provider_key(s)) or 0) > 0
         )
         if (
             getattr(ms, "_android_pending_watched_ep", None) is not None
@@ -277,6 +279,10 @@ def handle_details_state(
             and ms.current_ep_index is not None
             and 0 <= ms.current_ep_index < len(episode_ids)
         ):
+            ms.current_ep = episode_id_at(episode_ids, ms.current_ep_index)
+        elif not _just_entered and ms.current_ep_index is not None:
+            # Returning from an action preserves its episode context; progress
+            # updates must not silently select the next unwatched episode.
             ms.current_ep = episode_id_at(episode_ids, ms.current_ep_index)
         elif cur_has_resume:
             ms.current_ep_index = episode_index_for_id(episode_ids, ms.current_ep, labels=s.get("_episode_labels"))

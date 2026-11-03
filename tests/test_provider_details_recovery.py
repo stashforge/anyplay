@@ -117,3 +117,46 @@ def test_existing_catalog_can_still_be_used_after_error(recovery, monkeypatch):
     assert calls == ["sub"]
     assert r.show["_episode_ids"] == ["4"]
     assert next(item for item in r.views[-1].items if item.reference == "PLAY_CURRENT").selectable
+
+
+@pytest.mark.parametrize("provider_field", ["_provider", "provider", None])
+def test_provider_switch_cleanup_preserves_other_provider_history(
+    recovery, monkeypatch, tmp_path, provider_field
+):
+    from copy import deepcopy
+    from media_cli.core import storage
+
+    r = recovery
+    r.show.pop("_provider")
+    old_provider = "animexin" if provider_field else "allanime"
+    if provider_field:
+        r.show[provider_field] = old_provider
+    entries = [
+        dict(show=dict(_id="one", _provider=provider, name="Example"),
+             episode="3", translation_type=translation)
+        for provider, translation in (
+            (old_provider, "sub"), ("other", "sub"), (old_provider, "dub")
+        )
+    ]
+    monkeypatch.setattr(storage.paths, "HISTORY_PATH", str(tmp_path / "history.json"))
+    monkeypatch.setattr(storage, "_history_cache", deepcopy(entries))
+    monkeypatch.setattr(storage, "is_incognito", lambda: False)
+    monkeypatch.setattr(app_core, "delete_history_entry", storage.delete_history_entry)
+    monkeypatch.setattr(app_core, "save_history", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        app_core, "_run_manual_match_search",
+        lambda *a, **kw: dict(_id="new", _provider="replacement", name="Example"),
+    )
+    monkeypatch.setattr(
+        playback_menu, "run_details_menu",
+        lambda *a, **kw: DetailsMenuResult("selected", "CHANGE_PROVIDER"),
+    )
+
+    assert playback_menu.handle_action_menu_state(
+        r.flags, r.ui, r.ms, {}, r.args, "sub", lambda *a: False
+    ) == "DETAILS"
+    storage._history_cache = None
+    remaining = storage.load_history()
+    assert [(e["show"]["_provider"], e["translation_type"]) for e in remaining] == [
+        ("other", "sub"), (old_provider, "dub")
+    ]

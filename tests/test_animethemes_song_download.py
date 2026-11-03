@@ -200,7 +200,7 @@ from media_cli.app.animethemes_song_menu import SongMenuController
 batches = []
 def queue(indices):
     batches.append(list(indices))
-    print('DOWNLOAD_BATCH', flush=True)
+    terminal_marker('DOWNLOAD_BATCH')
 menu = SongMenuController(json.loads({payload!r}), lambda *args: None, collection_id='test', download=queue)
 result = run_view_session(flags, ui, menu.session, poster_manager=manager)
 finish(dict(result=result, batches=batches, selected=menu.selected_index))
@@ -224,7 +224,7 @@ from media_cli.app.animethemes_song_menu import SongMenuController
 batches = []
 def queue(indices):
     batches.append(list(indices))
-    print('SELECTED_BATCH', flush=True)
+    terminal_marker('SELECTED_BATCH')
 menu = SongMenuController(json.loads({payload!r}), lambda *args: None, collection_id='test', download=queue)
 result = run_view_session(flags, ui, menu.session, poster_manager=manager)
 finish(dict(result=result, batches=batches, selected=menu.selected_index))

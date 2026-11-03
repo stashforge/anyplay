@@ -19,7 +19,7 @@ DEFAULT_CONFIG = {
     "anilist_sort_reverse": False,
     "spinner": "braille",
     "editor": "",
-    "provider": "miruro",
+    "provider": "anipm",
     "title_language": "romaji",
     "aniskip": True,
     "auto_skip": True,
@@ -59,6 +59,10 @@ def migrate_config_keys(config):
                 config[new_key] = config[old_key]
             del config[old_key]
             changed = True
+    from ..provider_manifest import RETIRED_PROVIDERS
+    if str(config.get("provider", "")).casefold() in RETIRED_PROVIDERS:
+        config["provider"] = "anipm"
+        changed = True
     if "allanime_frontend_domain" in config:
         del config["allanime_frontend_domain"]
         changed = True
@@ -128,7 +132,7 @@ def serialize_conf(config: dict) -> str:
         f"quality = {config.get('quality', '1080p')}",
         f"translation_type = {config.get('translation_type', 'sub')}",
         f"player = {config.get('player', 'mpv')}",
-        f"provider = {config.get('provider', 'miruro')}",
+        f"provider = {config.get('provider', 'anipm')}",
         f"title_language = {config.get('title_language', 'romaji')}",
         "",
         "# Providers",

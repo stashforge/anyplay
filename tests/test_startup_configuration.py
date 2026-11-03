@@ -17,7 +17,7 @@ from media_cli.state.config import DEFAULT_CONFIG
 def test_startup_loads_configuration_once_and_keeps_resolved_directory(monkeypatch, tmp_path, command):
     args, parser = parse_cli_args(command)
     config = deepcopy(DEFAULT_CONFIG)
-    config.update(anilist_token="", download_dir=str(tmp_path / "configured"), provider="miruro")
+    config.update(anilist_token="", download_dir=str(tmp_path / "configured"), provider="anipm")
     reads = Mock(side_effect=lambda: deepcopy(config))
     resolved = str(tmp_path / "resolved")
     captured = []
@@ -42,7 +42,7 @@ def test_startup_loads_configuration_once_and_keeps_resolved_directory(monkeypat
     reads.assert_called_once()
     assert captured[0]["download_dir"] == resolved
     assert args.download_dir == resolved
-    assert args.provider == "miruro"
+    assert args.provider == "anipm"
 
 
 @pytest.mark.parametrize("command", [["history"], ["downloads"], ["search", "example"]])
@@ -52,13 +52,13 @@ def test_unspecified_provider_remains_unset_until_configuration_is_loaded(comman
 
 
 @pytest.mark.parametrize("command,provider", [(["search", "anikoto:example"], "anikoto"),
-                                            (["search", "example", "--provider", "mkissa"], "mkissa")])
+                                            (["search", "example", "--provider", "anidb"], "anidb")])
 def test_explicit_provider_still_takes_precedence(command, provider):
     args, _ = parse_cli_args(command)
     assert args.provider == provider
 
 
-@pytest.mark.parametrize("explicit,expected", [(None, "anikoto"), ("mkissa", "mkissa")])
+@pytest.mark.parametrize("explicit,expected", [(None, "anikoto"), ("anidb", "anidb")])
 def test_search_input_uses_configured_provider_without_legacy_default(monkeypatch, explicit, expected):
     from media_cli.app import search
     from media_cli.context import MachineState, UiState

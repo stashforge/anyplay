@@ -11,12 +11,12 @@ def select_playback_settings(monkeypatch):
     from media_cli.app.details_menu_controller import DetailsMenuController, DetailsMenuResult
     from media_cli.ui.view_picker import run_view_session
 
-    def run_menu(flags, ui, *, read_view, switch_translation, information, activate=None):
+    def run_menu(flags, ui, *, read_view, switch_translation, information, activate=None, ready=None, can_activate=None):
         view = read_view()
         if view.prompt in {"Playback", "Skip Settings"}:
             controller = DetailsMenuController(
                 ui=ui, read_view=read_view, switch_translation=switch_translation,
-                information=information, activate=activate,
+                information=information, activate=activate, ready=ready, can_activate=can_activate,
             )
             return run_view_session(
                 flags, ui, controller.session, picker=playback_menu.tui_pick, updates_fn=controller.updates,

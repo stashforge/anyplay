@@ -34,6 +34,10 @@ ROUTES = {
         ["vidnest.io", "vidnest.net", "vidnest.fun", "vidnest.com"],
         [re.compile("vidnest\\.", re.IGNORECASE)],
     ),
+    "odysee": ExtractorRoute(
+        "odysee", "OdyseeExtractor", [],
+        [re.compile(r"^https?://(?:www\.)?(?:odysee\.com|lbry\.tv)/", re.IGNORECASE)],
+    ),
     "streamwish": ExtractorRoute(
         "streamwish",
         "StreamWishExtractor",

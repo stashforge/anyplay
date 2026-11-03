@@ -7,7 +7,8 @@ from typing import Any
 
 from .constants import APP_NAME, LEGACY_APP_NAMES
 
-_PROVIDER_ALIASES = {"anidbapp": "anidb", "allanime": "mkissa"}
+_PROVIDER_ALIASES = {"anidbapp": "anidb"}
+RETIRED_PROVIDERS = frozenset({"miruro", "mkissa", "allanime"})
 
 
 class _RegistryDict(dict):

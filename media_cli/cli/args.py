@@ -13,6 +13,7 @@ from .args_common import (
     _add_anilist_options,
     _add_debug_option,
     _add_plain_option,
+    _add_mpv_window_option,
     _configure_help_parser,
     _provider_command_names,
     _set_cli_defaults,
@@ -53,6 +54,7 @@ def build_command_parser(search_provider=None):
     )
     _add_debug_option(global_options)
     _add_plain_option(global_options)
+    _add_mpv_window_option(global_options)
 
     register_all_subcommands(commands, search_provider)
     return parser
@@ -159,7 +161,25 @@ def parse_cli_args(argv=None):
     if args.command is None:
         parser.print_help()
         parser.exit()
-    if args.command == "anilist":
+    if args.command == "health":
+        from ..health.profiles import PROFILES
+        if args.health_verify is not None and args.health_action not in (*PROFILES, "all"):
+            parser.error("--verify requires a supported provider health check")
+        if args.health_action in PROFILES and args.health_verify is not None and args.health_verify not in PROFILES[args.health_action]["levels"]:
+            parser.error("This provider health check currently supports: " + ", ".join(PROFILES[args.health_action]["levels"]))
+        if args.health_seed is not None and (args.health_action not in (*PROFILES, "all") or not 0 <= args.health_seed < 2**63):
+            parser.error("--seed requires a supported provider health check and a nonnegative 63-bit integer")
+        if args.health_translation is not None and args.health_action not in (*PROFILES, "all"):
+            parser.error("--translation requires a provider health check or health all")
+        if args.health_delete and args.health_action != "report":
+            parser.error("--delete requires health report <id or latest>")
+        if args.health_action == "report" and not args.health_report_id:
+            parser.error("health report requires a report ID or latest")
+        if args.health_action == "reports" and args.health_report_id:
+            parser.error("health reports does not accept a report ID")
+        if args.health_action in (*PROFILES, "all") and args.health_report_id:
+            parser.error("Provider health checks do not accept a report ID")
+    elif args.command == "anilist":
         target = str(args.target or "menu").lower()
         if target == "search":
             parser.error("anilist search requires a query")

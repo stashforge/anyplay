@@ -185,13 +185,13 @@ def test_cached_search_does_not_load_a_transport_it_will_not_use(monkeypatch):
     check = Mock(side_effect=AssertionError("Cached search must not load HTTP transport"))
     monkeypatch.setattr(search, "require_provider_operation", check)
     monkeypatch.setattr(search, "load_config", lambda: {})
-    monkeypatch.setattr(search, "_provider_search_cache", {("example", "sub", "miruro"): []})
-    live, results, loading, error = search.make_provider_oneshot_search("example", "sub", "miruro")
+    monkeypatch.setattr(search, "_provider_search_cache", {("example", "sub", "anipm"): []})
+    live, results, loading, error = search.make_provider_oneshot_search("example", "sub", "anipm")
     assert results() == [] and error() == ""
     check.assert_not_called()
 
 
-@pytest.mark.parametrize("provider", ["miruro", "mkissa"])
+@pytest.mark.parametrize("provider", ["anipm", "reanime"])
 @pytest.mark.parametrize("operation", ["search", "title"])
 def test_catalog_browsing_does_not_require_playback_libraries(monkeypatch, provider, operation):
     module = requirements()
@@ -253,8 +253,7 @@ def test_senshi_missing_remote_dependency_preserves_other_available_sources(monk
 
 
 @pytest.mark.parametrize("provider,operation,package", [
-    ("miruro", "episodes", "curl-cffi"), ("miruro", "sources", "curl-cffi"),
-    ("mkissa", "sources", "cryptography"),
+    ("senshi", "remote_sources", "curl-cffi"),
 ])
 def test_required_stream_operations_report_missing_backend(monkeypatch, provider, operation, package):
     from media_cli.core.api import ProviderDependencyError

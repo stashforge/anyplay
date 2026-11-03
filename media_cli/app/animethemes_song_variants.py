@@ -1,6 +1,6 @@
 """Ready-data animation version grouping and existing quality preference policy."""
 
-from ..media.sources import quality_preference_key
+from ..media.sources import stream_quality_preference_key
 
 
 def version_number(row):
@@ -14,4 +14,4 @@ def best_variant(variants, quality, version=None):
     if version is None:
         version = min(version_number(row) for row in variants)
     return min((row for row in variants if version_number(row) == version),
-               key=lambda row: quality_preference_key(row["stream"].get("resolution", ""), quality))
+               key=lambda row: stream_quality_preference_key(row["stream"], quality))

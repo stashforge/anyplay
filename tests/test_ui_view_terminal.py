@@ -66,7 +66,7 @@ manager = PosterManager(
     loading_frame=lambda: '~',
 )
 def finish(value):
-    print('RESULT:' + json.dumps(value, default=sorted) + 'END_RESULT', flush=True)
+    terminal_marker('RESULT:' + json.dumps(value, default=sorted) + 'END_RESULT')
 """
 
 

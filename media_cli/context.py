@@ -56,6 +56,9 @@ class CliFlags:
     plain_mode: bool = False
     """``--plain`` / ``--no-tui`` flag: disable full-screen TUI and use line-by-line numbered prompts."""
 
+    mpv_window: str = "ready"
+    """Session-only desktop player window timing override."""
+
     spinner_style: object = "braille"
     """Resolved configured spinner style name or custom frame list."""
 
@@ -123,7 +126,7 @@ class UiState:
     ui_ttype_ctx: str = "sub"
     """Translation type (``"sub"`` or ``"dub"``) for the current show."""
 
-    ui_provider_ctx: str = "miruro"
+    ui_provider_ctx: str = "anipm"
     """Active streaming provider ID."""
 
     # Persistent filter / sort prefs (survive state transitions)

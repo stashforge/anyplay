@@ -45,6 +45,9 @@ class _ThreadedHTTPServer(http.server.ThreadingHTTPServer):
     daemon_threads = True
     block_on_close = False
 
+    def serve_forever(self, poll_interval=0.05):
+        super().serve_forever(poll_interval=poll_interval)
+
 
 def _is_playlist(url, content_type):
     u = url.lower()

@@ -107,7 +107,7 @@ def test_resolve_custom_skips_prefers_session_over_saved():
         show=show,
         fallback_show_id="provider-1",
         provider_id="mkissa",
-        session_store={"provider-1": [session]},
+        session_store={key: [session] for key in custom_skips.stable_title_keys(show, "provider-1")},
         saved_entries=[saved],
     )
 

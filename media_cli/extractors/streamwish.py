@@ -11,6 +11,7 @@ from bs4 import BeautifulSoup
 from .base import BaseExtractor
 from .routing import ROUTES
 from .unpack import JsUnpacker
+from ..media.urls import validate_stream_url
 
 
 class StreamWishExtractor(BaseExtractor):
@@ -20,6 +21,100 @@ class StreamWishExtractor(BaseExtractor):
     domains = ROUTES['streamwish'].domains
     patterns = ROUTES['streamwish'].patterns
 
+    def _extract_app(self, url, origin, page_referer, request_headers, name, priority, subtitles):
+        from ..media.player_metadata import decode_player_metadata
+
+        parsed = urllib.parse.urlsplit(url)
+        video_id = parsed.fragment.split('&', 1)[0].strip('/')
+        if not video_id:
+            return []
+        query = urllib.parse.urlencode({
+            'id': video_id, 'w': 1920, 'h': 1080,
+            'r': (urllib.parse.urlsplit(page_referer).hostname or '').removeprefix('www.'),
+        })
+        payload = self.fetch_page(origin + '/api/v1/video?' + query,
+                                  referer=url, headers=request_headers)
+        data = decode_player_metadata(payload)
+        if not isinstance(data.get('player'), dict):
+            return []
+        config = data.get('streamingConfig') or {}
+        if isinstance(config, str):
+            config = json.loads(config)
+        if not isinstance(config, dict):
+            return []
+        tracks = [dict(track) for track in (subtitles or [])]
+        api_tracks = data.get('subtitle') or []
+        if isinstance(api_tracks, str):
+            api_tracks = json.loads(api_tracks)
+        if isinstance(api_tracks, dict):
+            api_tracks = [{'label': label, 'url': location} for label, location in api_tracks.items()]
+        if isinstance(api_tracks, list) and data['player'].get('allowExternal'):
+            extra = urllib.parse.parse_qs(parsed.fragment.partition('&')[2]).get('subs', [])
+            if extra:
+                try:
+                    embedded = json.loads(extra[0])
+                    if isinstance(embedded, list):
+                        api_tracks = [*api_tracks, *embedded]
+                except (ValueError, TypeError):
+                    pass
+        if isinstance(api_tracks, list):
+            for track in api_tracks:
+                if not isinstance(track, dict):
+                    continue
+                location = track.get('url') or track.get('file')
+                if isinstance(location, str) and location:
+                    parts = urllib.parse.urlsplit(location)
+                    language = track.get('language') or parts.fragment or parts.path.rsplit('/', 1)[-1][:2]
+                    tracks.append({
+                        'url': urllib.parse.urljoin(origin + '/', location),
+                        'label': track.get('label') or 'Subtitles',
+                        'language': str(language).lower(),
+                        'default': bool(track.get('default')),
+                    })
+        if tracks and not any(track.get('default') for track in tracks):
+            preferred = str(data['player'].get('defaultSubtitle') or 'en').lower()
+            chosen = next((track for track in tracks if track.get('language') == preferred), tracks[0])
+            chosen['default'] = True
+        fields = {'Tiktok': 'hlsVideoTiktok', 'Google': 'hlsVideoGoogle', 'In-House': 'source'}
+        order = config.get('order') or ['Tiktok', 'Google', 'Cloudflare', 'In-House']
+        adjustments = config.get('adjust') or {}
+        if not isinstance(order, list) or not isinstance(adjustments, dict):
+            return []
+        for delivery in order:
+            # Cloudflare delivery needs rotating per-segment player tokens; do
+            # not publish those links as directly playable before that is supported.
+            field = fields.get(delivery)
+            adjustment = adjustments.get(delivery) or {}
+            if not field or not isinstance(adjustment, dict) or adjustment.get('disabled'):
+                continue
+            value = data.get(field)
+            if not isinstance(value, str) or not value:
+                continue
+            try:
+                master = urllib.parse.urlsplit(validate_stream_url(urllib.parse.urljoin(origin + '/', value)))
+                path = master.path
+                domain = adjustment.get('domain')
+                if isinstance(domain, str) and domain:
+                    path = path.replace('/hls/', '/hlsmod/' + urllib.parse.quote(domain, safe='.-') + '/', 1)
+                params = dict(urllib.parse.parse_qsl(master.query, keep_blank_values=True))
+                if isinstance(adjustment.get('params'), dict):
+                    params.update(adjustment['params'])
+                master_url = urllib.parse.urlunsplit(master._replace(path=path, query=urllib.parse.urlencode(params)))
+                playlist = self.fetch_page(master_url, referer=origin + '/', headers=request_headers, timeout=8)
+                if not playlist.lstrip().startswith('#EXTM3U'):
+                    continue
+                rows = self.extract_m3u8(
+                    master_url, referer=origin + '/', origin=origin, name=name or self.name,
+                    priority=priority, headers=request_headers, subtitles=tracks,
+                    manifest_content=playlist,
+                )
+                for row in rows:
+                    row['delivery_type'] = delivery
+                return rows
+            except Exception:
+                continue
+        return []
+
     def extract(
         self,
         url: str,
@@ -27,12 +122,17 @@ class StreamWishExtractor(BaseExtractor):
         name: str = "",
         priority: int = 2,
         subtitles: list[dict] | None = None,
+        headers: dict[str, str] | None = None,
+        referer: str | None = None,
     ) -> list[dict]:
         parsed = urllib.parse.urlparse(url)
         origin = f"{parsed.scheme}://{parsed.netloc}"
+        page_referer = referer or url
         referer = f"{origin}/"
+        request_headers = {k: v for k, v in (headers or {}).items() if k.lower() not in ('referer', 'origin')}
+        request_headers['Origin'] = origin
 
-        html = self.fetch_page(url, referer=url, headers={"Origin": origin})
+        html = self.fetch_page(url, referer=page_referer, headers=request_headers)
         if not html:
             return []
 
@@ -83,6 +183,9 @@ class StreamWishExtractor(BaseExtractor):
                 break
 
         if not master_url:
+            if parsed.fragment and soup.find('script', type='module', src=True):
+                return self._extract_app(url, origin, page_referer, request_headers,
+                                         name, priority, extracted_subs)
             return []
 
         if master_url.startswith("//"):
@@ -96,4 +199,5 @@ class StreamWishExtractor(BaseExtractor):
             name=stream_name,
             priority=priority,
             subtitles=extracted_subs,
+            headers=request_headers,
         )

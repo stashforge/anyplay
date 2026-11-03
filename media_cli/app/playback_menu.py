@@ -10,6 +10,7 @@ import time
 from typing import Any
 
 from .. import app_core
+from ..domain.titles import title_provider_key
 from ..context import CliFlags, MachineState, UiState
 from ..core import streams
 from ..core.terminal import truncate_display as _truncate_display
@@ -176,8 +177,8 @@ def handle_action_menu_state(
         if not show_key:
             return 0
         return (
-            app_core.get_resume_time(show_key, ms.current_ep)
-            or app_core.get_resume_time(show_key, current_ep_label)
+            app_core.get_resume_time(show_key, ms.current_ep, title_provider_key(action_show))
+            or app_core.get_resume_time(show_key, current_ep_label, title_provider_key(action_show))
             or 0
         )
 
@@ -478,11 +479,14 @@ def handle_action_menu_state(
         if not is_watched and not is_completed:
             opts.append("Mark Watched")
             acts.append("TRACK_ONLY")
-            action_hints["Mark Watched"] = "save progress"
+            action_hints["Mark Watched"] = f"mark {playback_mod._fmt_ep(current_ep_label)} watched"
         else:
             opts.append("Mark Unwatched")
             acts.append("UNTRACK")
-            action_hints["Mark Unwatched"] = "clear progress"
+            action_hints["Mark Unwatched"] = f"mark {playback_mod._fmt_ep(current_ep_label)} unwatched"
+            if not getattr(ms, "_is_downloads", False):
+                rollback = playback_mod._fmt_ep(prev_ep_label) if prev_ep is not None else "0"
+                action_hints["Mark Unwatched"] += f" · progress to {rollback}"
 
         # Progress
         opts.append("Progress")
@@ -1092,7 +1096,7 @@ def handle_action_menu_state(
                 app_core.set_action_feedback(
                     action_show, f"✔ Marked {playback_mod._fmt_ep(target_lbl)} watched"
                 )
-                app_core.save_resume_time(ms.show_id, target_ep, 0)
+                app_core.save_resume_time(ms.show_id, target_ep, 0, title_provider_key(action_show))
                 return False
 
         tkn = cfg.get("anilist_token")
@@ -1129,7 +1133,7 @@ def handle_action_menu_state(
                 action_show, f"✔ Marked {playback_mod._fmt_ep(target_lbl)} watched"
             )
 
-        app_core.save_resume_time(ms.show_id, target_ep, 0)
+        app_core.save_resume_time(ms.show_id, target_ep, 0, title_provider_key(action_show))
         app_core.prepare_show_display_state(action_show, ttype)
         return synced
 
@@ -1167,7 +1171,7 @@ def handle_action_menu_state(
         tkn = cfg.get("anilist_token")
         if tkn and resolve_tracking_fn(ui.search_prev_state, args, cfg, action_show):
             al_id = app_core.get_show_anilist_id(action_show)
-            app_core.with_loading(
+            result = app_core.with_loading(
                 "Syncing to AniList…",
                 app_core.sync_watched_to_anilist,
                 tkn,
@@ -1177,12 +1181,20 @@ def handle_action_menu_state(
                 action_show,
                 ttype,
             )
+            if not result:
+                message = (
+                    f"Marked {playback_mod._fmt_ep(current_ep_label)} unwatched locally • AniList sync failed"
+                    if getattr(ms, "_is_downloads", False)
+                    else "AniList sync failed • Progress unchanged"
+                )
+                app_core.set_action_feedback(action_show, message)
+                return False
             app_core.set_action_feedback(
                 action_show,
                 f"✔ Marked {playback_mod._fmt_ep(current_ep_label)} unwatched",
             )
         else:
-            app_core.with_loading(
+            result = app_core.with_loading(
                 "Updating progress…",
                 app_core.write_history_progress,
                 action_show,
@@ -1190,11 +1202,14 @@ def handle_action_menu_state(
                 ttype,
                 touch=False,
             )
+            if not result:
+                app_core.set_action_feedback(action_show, "Progress update failed • Resume kept")
+                return False
             app_core.set_action_feedback(
                 action_show,
                 f"✔ Marked {playback_mod._fmt_ep(current_ep_label)} unwatched",
             )
-        app_core.save_resume_time(ms.show_id, ms.current_ep, 0)
+        app_core.save_resume_time(ms.show_id, ms.current_ep, 0, title_provider_key(action_show))
         app_core.prepare_show_display_state(action_show, ttype)
         return True
 
@@ -1266,16 +1281,12 @@ def handle_action_menu_state(
 
     elif a == "TRACK_ONLY":
         _execute_track_action()
-        ms.current_ep_index = None
-        ms.current_ep = None
         return "DETAILS"
 
     elif a == "UNTRACK":
         ms._android_pending_watched_ep = None
         ms._android_pending_watched_idx = None
         _execute_untrack_action()
-        ms.current_ep_index = None
-        ms.current_ep = None
         return "DETAILS"
 
     elif a == "PROGRESS":
@@ -1337,7 +1348,7 @@ def handle_action_menu_state(
                         labels=action_show.get("_episode_labels"),
                     )
         playback_mod._clear_episode_source_state(ms)
-        app_core.save_resume_time(ms.show_id, ms.current_ep, 0)
+        app_core.save_resume_time(ms.show_id, ms.current_ep, 0, title_provider_key(action_show))
         return "PLAY"
 
     elif a == "MIRRORS":
@@ -1370,6 +1381,7 @@ def handle_action_menu_state(
 
     elif a == "CHANGE_PROVIDER":
         old_id = action_show.get("_id")
+        old_provider = app_core.title_provider_key(action_show)
         old_progress = action_show.get("_local_progress")
         old_label = action_show.get("_local_episode_label")
         target_pid = (
@@ -1409,7 +1421,7 @@ def handle_action_menu_state(
                 ms.current_ep_index = target_idx if target_idx is not None else 0
                 ms.current_ep = episode_id_at(episode_ids, ms.current_ep_index)
             if old_id and old_id != ms.show_id:
-                app_core.delete_history_entry(old_id, ttype)
+                app_core.delete_history_entry(old_id, ttype, provider_id=old_provider)
                 app_core.save_history(
                     new_match, ms.current_ep or old_progress or 0, ttype
                 )
@@ -1944,7 +1956,7 @@ def handle_mirrors_state(
 
     # Get cached streams with version check (non-blocking)
     cached_streams = app_core._stream_snapshot(
-        ms.show_id, mirror_ep, ttype, target_pid, quality, cached_ep_data
+        ms.show_id, mirror_ep, ttype, target_pid, quality, cached_ep_data, revalidate=False
     )
 
     exclude_names = set()
@@ -1995,7 +2007,7 @@ def handle_mirrors_state(
 
     def _mlabel(s):
         tag = " ✓" if s.get("android_safe") else ""
-        pref = app_core.get_preferred_mirror(ms.show_id)
+        pref = app_core.get_preferred_mirror(ms.show_id, target_pid)
         is_pref = pref.get("source_name") == s["source_name"] and pref.get(
             "resolution"
         ) == s.get("resolution", "?")
@@ -2017,14 +2029,13 @@ def handle_mirrors_state(
     def _dedup(live_ep_data):
         seen, out = set(), []
         active_list = app_core._stream_snapshot(
-            ms.show_id, mirror_ep, ttype, target_pid, quality, live_ep_data
+            ms.show_id, mirror_ep, ttype, target_pid, quality, live_ep_data, revalidate=False
         )
         target_quality = getattr(args, "quality", None) or cfg.get("quality", "best")
-        from ..media.sources import quality_preference_key
+        from ..media.sources import stream_quality_preference_key
 
         def _mirror_sort_key(s):
             sname = (s.get("source_name") or "").lower()
-            res = s.get("resolution") or sname
             prio = s.get("source_priority", 4)
             is_sub = "sub" in sname
             is_dub = ("dub" in sname) or (
@@ -2046,7 +2057,7 @@ def handle_mirrors_state(
                 sub_rank = 0 if is_hard else (2 if is_soft else 1)
             else:
                 sub_rank = 0 if is_soft else (2 if is_hard else 1)
-            q_key = quality_preference_key(res, target_quality)
+            q_key = stream_quality_preference_key(s, target_quality)
             return (
                 streams.torrent_fallback_sort_value(s),
                 sub_rank,
@@ -2089,6 +2100,15 @@ def handle_mirrors_state(
         spinner_from_config(cfg),
     )
 
+    availability = None
+    availability_loading = BackgroundLoadingStatus(
+        LoadingTaskSpec(
+            'mirror-availability', LoadingOwner('mirrors', 0), 'Checking mirror availability…',
+            LoadingInteraction.BACKGROUND, LoadingPlacement.FOOTER,
+            ActionBindings(()), delay=0,
+        ), spinner_from_config(cfg),
+    )
+
     def _mirror_refresh(q=""):
         nonlocal _live_deduped
         live_ep_data = app_core._get_cached_ep_data(cur_key) or cached_ep_data
@@ -2105,7 +2125,8 @@ def handle_mirrors_state(
             )
             with _torrent_mirror_augment_lock:
                 torrent_alive = cur_key in _torrent_mirror_augmenting
-            alive = resolver_alive or torrent_alive
+            availability_alive = bool(availability and availability.pending)
+            alive = resolver_alive or torrent_alive or availability_alive
             r, f = _bg_stats["resolved"], _bg_stats["failed"]
             tot = _bg_stats.get("total", r + f)
             status_msg = _bg_stats.get("status_msg", "")
@@ -2142,6 +2163,7 @@ def handle_mirrors_state(
             w = 80
 
         num_found = len(mopts)
+        availability_status = availability_loading.read(availability_alive)
         found_str = (
             f"{num_found} mirror found"
             if num_found == 1
@@ -2157,6 +2179,8 @@ def handle_mirrors_state(
                 left_part = f"{spinner} {found_str}"
                 right_part = torrent_status.message
             plain_status = f"{left_part}  │  {right_part}"
+        elif availability_alive and not resolver_alive:
+            plain_status = f'{availability_status.indicator} {found_str}  │  {availability_status.message}'
         elif alive and (r + f) < tot:
             spinner = counted_status.indicator
             left_part = f"{spinner} {found_str} • checking ({r+f}/{tot})"
@@ -2209,7 +2233,15 @@ def handle_mirrors_state(
         hdr = "\n".join(parts)
         return mopts, hdr, not alive
 
-    init_opts, init_hdr, _ = _mirror_refresh()
+    if cached_streams:
+        availability = streams.StreamRevalidation(cur_key, cached_ep_data)
+    try:
+        init_opts, init_hdr, _ = _mirror_refresh()
+    except BaseException:
+        if availability is not None:
+            availability.close()
+        availability_loading.read(False)
+        raise
     # Open mirror list immediately (even if empty) - live_fn will update as mirrors are resolved
     if not init_opts:
         with streams._bg_lock:
@@ -2237,19 +2269,24 @@ def handle_mirrors_state(
                         ui.ui_show_ctx,
                         f"No stream mirrors available for {playback_mod._fmt_ep(ep_label)} on {p_name}.",
                     )
+                if availability is not None:
+                    availability.close()
+                availability_loading.read(False)
                 return "DETAILS"
 
     def _tab_pref(opt_idx):
         if 0 <= opt_idx < len(_live_deduped):
             s = _live_deduped[opt_idx]
             app_core.toggle_preferred_mirror(
-                ms.show_id, s["source_name"], s.get("resolution", "?")
+                ms.show_id, s["source_name"], s.get("resolution", "?"), target_pid
             )
             ui.pref_toast = "Preferred server updated (Will apply on next playback)"
             ui.pref_toast_time = time.time()
         return _mirror_refresh()[:2]
 
     def _mirror_force_refresh(opt=None):
+        if availability is not None:
+            availability.close()
         app_core._clear_streams(cur_key)
         ep_data = app_core.with_loading(
             f"Refreshing {ttype.upper()} sources and torrents…",
@@ -2286,6 +2323,9 @@ def handle_mirrors_state(
             help_dict=hd8,
         )
     finally:
+        if availability is not None:
+            availability.close()
+        availability_loading.read(False)
         initial_source_loading.read(False)
         counted_source_loading.read(False)
         torrent_search_loading.read(False)

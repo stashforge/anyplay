@@ -505,9 +505,5 @@ def get_episode_data(show_id: str, ep: str, ttype: str = "sub", provider_id: str
 
 
 def get_clock_links(path: str) -> list[str]:
-    try:
-        from ..providers import allanime as allanime_service
-
-        return allanime_service.get_clock_links(_req, path)
-    except Exception:
-        return []
+    """Retired clock sources have no active provider backend."""
+    return []

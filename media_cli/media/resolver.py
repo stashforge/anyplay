@@ -28,9 +28,9 @@ def _info(message):
 
 
 def get_clock_links(*args, **kwargs):
-    from ..providers.allanime import get_clock_links as resolve_clock_links
+    """Retired clock sources have no active provider backend."""
+    return []
 
-    return resolve_clock_links(*args, **kwargs)
 def _ok(message):
     return None
 def _warn(message):

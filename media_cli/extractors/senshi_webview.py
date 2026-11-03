@@ -5,7 +5,7 @@ import json
 import re
 import time
 
-from ..services.android_webview.client import CompanionSetupRequired, ProbeClient, ProbeError
+from ..services.android_webview.client import CompanionSetupRequired, CompanionUnavailable, ProbeClient, ProbeError
 from ..services.android_webview.requirements import companion_dependency_error
 from ..services.http import UA
 from ..services.network_affinity import ipv4_curl_options
@@ -77,7 +77,7 @@ def resolve(remote_id, *, deadline=None, timeout=30, cancel=None, client=None):
                     ):
                         raise SenshiRuntimeError("Senshi returned no stream sources")
                     return result
-    except CompanionSetupRequired as error:
+    except (CompanionSetupRequired, CompanionUnavailable) as error:
         _check(deadline, cancel)
         raise companion_dependency_error(error) from None
     except ProbeError as error:

@@ -25,13 +25,15 @@ import time
 from ..media.sources import (
     calculate_stream_expiry,
     check_stream_health_and_refresh,
-    quality_preference_key,
+    is_stream_valid_fast,
+    stream_quality_preference_key,
     source_priority,
 )
 from ..services.requirements import add_dependency_hints, dependency_failure_hint, dependency_hint_messages
 from . import reporting
 from .api import ProviderDependencyError
 from .storage import get_preferred_mirror
+from ..providers import provider_key
 
 YELLOW = "\033[1;33m"
 RESET = "\033[0m"
@@ -134,6 +136,8 @@ _bg_thread = None  # type: Optional[threading.Thread]
 _bg_lock = threading.RLock()  # reentrant lock guards _bg_thread and _bg_stats
 _bg_generation = 0
 _bg_stats = {"resolved": 0, "failed": 0, "total": 0, "current": ""}
+_foreground_batches = {}
+_QUALITY_GRACE_SECONDS = 10.0
 
 # Periodic revalidation
 _revalidation_thread = None  # type: Optional[threading.Thread]
@@ -224,6 +228,15 @@ def _normalize_key(key) -> tuple | None:
     return make_stream_key(key)
 
 
+def background_resolution_pending(key) -> bool:
+    """Whether this episode still owns an active background extraction."""
+    with _streams_lock:
+        matches = (_active_stream_key == _normalize_key(key)
+                   and _bg_generation == _streams_generation)
+    with _bg_lock:
+        return matches and bool(_bg_thread and _bg_thread.is_alive())
+
+
 def _compute_ep_data_version(ep_data: dict) -> str:
     """Compute a hash of the source URLs to detect provider mirror list changes."""
     if not ep_data or not isinstance(ep_data, dict):
@@ -252,6 +265,9 @@ def _clear_streams(key=None, clear_cache=False):
     global _streams_generation, _active_stream_key
     with _streams_lock:
         _streams_generation += 1
+        retired = [batch_key for batch_key in _foreground_batches if key is None or batch_key[0] == _normalize_key(key)]
+        for batch_key in retired:
+            _foreground_batches.pop(batch_key).close()
         all_streams.clear()
         if key is not None:
             k = _normalize_key(key)
@@ -287,7 +303,7 @@ def _extend_streams(streams, key=None):
             _streams_cache[k]["streams"].extend(streams)
 
 
-def _stream_snapshot(show_id=None, ep=None, ttype="sub", provider_id=None, quality="best", ep_data=None, *, cancel_check=None) -> list:
+def _stream_snapshot(show_id=None, ep=None, ttype="sub", provider_id=None, quality="best", ep_data=None, *, cancel_check=None, revalidate=True) -> list:
     from copy import deepcopy
 
     if cancel_check and cancel_check():
@@ -311,7 +327,8 @@ def _stream_snapshot(show_id=None, ep=None, ttype="sub", provider_id=None, quali
     for index, candidate in enumerate(deepcopy(before)):
         if cancel_check and cancel_check():
             return []
-        if check_stream_health_and_refresh(candidate, now):
+        validate = check_stream_health_and_refresh if revalidate else is_stream_valid_fast
+        if validate(candidate, now):
             valid.append((index, candidate))
 
     with _streams_lock:
@@ -335,6 +352,35 @@ def _stream_snapshot(show_id=None, ep=None, ttype="sub", provider_id=None, quali
         else:
             all_streams[:] = accepted
         return list(accepted)
+
+
+class StreamRevalidation:
+    """One view's cancellable stale-link check; publication uses snapshot guards."""
+
+    def __init__(self, key, episode_data):
+        from copy import deepcopy
+        self._cancelled = threading.Event()
+        self.thread = threading.Thread(
+            target=self._run, args=(tuple(key), deepcopy(episode_data)),
+            name='anyplay-mirror-availability', daemon=True,
+        )
+        self.thread.start()
+
+    def _run(self, key, episode_data):
+        from .reporting import status_sink_scope
+        try:
+            with status_sink_scope(lambda *_: True):
+                _stream_snapshot(*key, episode_data, cancel_check=self._cancelled.is_set)
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning('Mirror availability check failed (%s)', type(exc).__name__)
+
+    @property
+    def pending(self):
+        return self.thread.is_alive()
+
+    def close(self):
+        self._cancelled.set()
 
 
 def _stream_count(show_id=None, ep=None, ttype="sub", provider_id=None, quality="best") -> int:
@@ -544,7 +590,7 @@ def start_bg_resolve(
     if show_id:
         try:
             from .storage import get_preferred_mirror
-            pref_mirror = get_preferred_mirror(show_id)
+            pref_mirror = get_preferred_mirror(show_id, provider_key(provider_id))
         except Exception:
             pass
 
@@ -572,7 +618,7 @@ def start_bg_resolve(
                 pref_boost = -100  # Very high priority
 
         prio = source_priority(s)
-        q_key = quality_preference_key(res, quality)
+        q_key = stream_quality_preference_key(s, quality)
         return (
             pref_boost,
             torrent_fallback_sort_value(s),
@@ -631,7 +677,14 @@ def start_bg_resolve(
             "status_msg": "checking sources..." if sources else "Loading sources…",
         }
 
-    def worker():
+    from .source_batch import SourceBatch
+    with _streams_lock:
+        batch = _foreground_batches.pop((stream_key, ep_data_version), None)
+    if batch is None:
+        resolver = resolve_source
+        batch = SourceBatch(lambda source: resolver(source, silent=True))
+
+    def worker_body():
         nonlocal sources
         resolution_version = ep_data_version
         if stream_key is not None:
@@ -674,8 +727,31 @@ def start_bg_resolve(
             except Exception:
                 pass
 
-        from ..media.resolver import generate_source_passes
-        for src, failed_queue, is_retry, is_final_pass in generate_source_passes(sources, max_passes=3):
+        from .source_batch import source_identity
+
+        def completed_sources():
+            pending = list({source_identity(src): src for src in sources
+                            if not _is_excluded_source(src)}.values())
+            for pass_index in range(3):
+                failed = []
+                if pass_index:
+                    for src in pending:
+                        batch.futures.pop(source_identity(src), None)
+                seen = set()
+                while len(seen) < len(pending):
+                    if not _generation_is_current(generation):
+                        return
+                    with _streams_lock:
+                        if stream_key is not None and _streams_cache.get(stream_key, {}).get("ep_data_version") != resolution_version:
+                            return
+                    for src, future in batch.poll(pending, seen):
+                        seen.add(source_identity(src))
+                        yield src, failed, pass_index == 2, future
+                pending = failed
+                if not pending:
+                    return
+
+        for src, failed_queue, is_final_pass, future in completed_sources():
             if not _generation_is_current(generation):
                 return
             with _streams_lock:
@@ -690,7 +766,9 @@ def start_bg_resolve(
                 return
             try:
                 found = False
-                for stream in resolve_source(src, silent=True):
+                resolved = future.result()
+                for stream in resolved or []:
+                    found = True
                     if not _generation_is_current(generation):
                         return
                     _record_dependency_feedback(stream_key, generation, hints=dependency_hint_messages(stream))
@@ -739,12 +817,25 @@ def start_bg_resolve(
                     entry["state"] = "FAILED"
         _update_bg_stats(generation, current="", status_msg="")
 
+    def worker():
+        try:
+            worker_body()
+        finally:
+            if batch:
+                batch.close()
+
     with _bg_lock:
         _bg_thread = threading.Thread(target=worker, daemon=True)
         _bg_thread.start()
 
 
 def fetch_episode_stream(show_id, ep_number, ttype="sub", quality="best", provider_id=None, exclude_sources=None, ep_data=None, *, cancel_check=None):
+    with _streams_lock:
+        foreground_generation = _streams_generation
+
+    def cancelled():
+        return bool((cancel_check and cancel_check()) or not _generation_is_current(foreground_generation))
+
     if cancel_check and cancel_check():
         return None
     if ep_data is None and _episode_data_fn:
@@ -760,7 +851,7 @@ def fetch_episode_stream(show_id, ep_number, ttype="sub", quality="best", provid
         reporting.warn("0 streaming mirrors found for this episode.")
         return None
 
-    pref = get_preferred_mirror(show_id)
+    pref = get_preferred_mirror(show_id, provider_key(provider_id))
     pref_name = pref.get("source_name", "")
     pref_res = pref.get("resolution", "")
 
@@ -769,7 +860,6 @@ def fetch_episode_stream(show_id, ep_number, ttype="sub", quality="best", provid
         if pref_name.startswith(api_name) and api_name:
             return (-1, 0, 0, (0, 0))
         sname = str(src.get("sourceName") or "").lower()
-        res = str(src.get("resolution") or sname)
         is_sub = "sub" in sname
         is_dub = ("dub" in sname) or ((" eng" in sname or "english" in sname) and not is_sub)
         audio_penalty = 1 if (ttype == "sub" and is_dub) or (ttype == "dub" and not is_dub) else 0
@@ -781,7 +871,7 @@ def fetch_episode_stream(show_id, ep_number, ttype="sub", quality="best", provid
         else:
             sub_rank = 0 if is_soft else (2 if is_hard else 1)
         prio = source_priority(src)
-        q_key = quality_preference_key(res, quality)
+        q_key = stream_quality_preference_key(src, quality)
         return (
             torrent_fallback_sort_value(src),
             sub_rank,
@@ -791,7 +881,6 @@ def fetch_episode_stream(show_id, ep_number, ttype="sub", quality="best", provid
             torrent_size_sort_value(src),
         )
 
-    from ..media.resolver import generate_source_passes
     exclude_sources = set(exclude_sources or [])
 
     def _is_excluded(s):
@@ -823,53 +912,97 @@ def fetch_episode_stream(show_id, ep_number, ttype="sub", quality="best", provid
     mirror_names = [s.get("sourceName", "?") for s in sorted_sources]
     reporting.info(f"Found {total_mirrors} mirror(s): {', '.join(mirror_names[:4])}{'...' if total_mirrors > 4 else ''}")
 
-    retry_announced = False
-    dependency_errors = []
-    for attempt_idx, (src, failed, is_retry, is_final_pass) in enumerate(generate_source_passes(sorted_sources, max_passes=2), 1):
-        if cancel_check and cancel_check():
-            return None
-        if is_retry and not retry_announced:
-            reporting.warn("Initial pass failed. Retrying failed mirrors (Pass 2/2)...")
-            retry_announced = True
-        src_name = src.get("sourceName", "?")
-        prefix = "Retry " if is_retry else ""
-        mirror_num = min(attempt_idx if not is_retry else len(failed) + 1, total_mirrors)
-        reporting.info(f"[{prefix}{mirror_num}/{total_mirrors}] Testing mirror: {src_name} ...")
-        try:
-            streams = resolve_source(src)
-        except ProviderDependencyError as exc:
-            dependency_errors.append(exc)
-            continue
-        if cancel_check and cancel_check():
-            return None
-        if streams:
-            hints = [dependency_failure_hint(error) for error in dependency_errors]
-            streams = [add_dependency_hints(stream, hints) for stream in streams]
-            selected_stream = streams[0]
-            found_pref = False
-            if pref_name:
-                for s in streams:
-                    if s.get("source_name") == pref_name and s.get("resolution", "?") == pref_res:
-                        selected_stream = s
-                        found_pref = True
-                        break
-            if not found_pref:
-                sorted_by_pref = sorted(
-                    streams,
-                    key=lambda s: quality_preference_key(s.get("resolution") or s.get("source_name", ""), quality)
-                )
-                if sorted_by_pref:
-                    selected_stream = sorted_by_pref[0]
-            reporting.ok(f"Connected: {selected_stream.get('source_name', src_name)} ({selected_stream.get('resolution', '?')})")
-            return selected_stream, src.get("sourceName", ""), ep_data, streams
-        elif streams is not None:
-            failed.append(src)
-            reporting.warn(f"[{prefix}{mirror_num}/{total_mirrors}] {src_name} unavailable. Trying next...")
+    from .source_batch import SourceBatch, source_identity
 
-    if dependency_errors:
-        raise dependency_errors[0]
-    reporting.warn("All mirrors were tested and failed.")
-    return None
+    batch = SourceBatch(resolve_source)
+    errors = []
+    candidates = []
+    deadline = None
+    handed_off = False
+    stream_key = make_stream_key(show_id, ep_number, ttype, provider_id, quality)
+    batch_key = (stream_key, _compute_ep_data_version(ep_data))
+
+    def candidate_key(pair):
+        source, row = pair
+        preferred = bool(pref_name and row.get("source_name") == pref_name and row.get("resolution", "?") == pref_res)
+        return (not preferred, torrent_fallback_sort_value(source), stream_quality_preference_key(row, quality), dynamic_prio(source))
+
+    def accept():
+        nonlocal handed_off
+        if cancelled():
+            return None
+        source, selected = min(candidates, key=candidate_key)
+        hints = [dependency_failure_hint(error) for error in errors]
+        found = [add_dependency_hints(row, hints) for _, row in candidates]
+        selected = add_dependency_hints(selected, hints)
+        with _streams_lock:
+            if cancelled():
+                return None
+            previous = _foreground_batches.pop(batch_key, None)
+            if previous:
+                previous.close()
+            _foreground_batches[batch_key] = batch
+            while len(_foreground_batches) > 8:
+                _foreground_batches.pop(next(iter(_foreground_batches))).close()
+            handed_off = True
+            reporting.ok(f"Connected: {selected.get('source_name', '?')} ({selected.get('resolution', '?')})")
+        return selected, source.get("sourceName", ""), ep_data, found
+
+    try:
+        pending = sorted_sources
+        for pass_index in range(2):
+            failures = []
+            if pass_index:
+                reporting.warn("Initial pass failed. Retrying failed mirrors (Pass 2/2)...")
+                for source in pending:
+                    batch.futures.pop(source_identity(source), None)
+            # Race comparable sources only: preserve language/subtype and torrent preference.
+            tiers = list(dict.fromkeys(dynamic_prio(source)[:3] for source in pending))
+            for tier in tiers:
+                group = list({source_identity(source): source for source in pending if dynamic_prio(source)[:3] == tier}.values())
+                seen = set()
+                reporting.info(f"Resolving up to 3 mirrors in parallel ({len(group)} sources)...")
+                while len(seen) < len(group):
+                    if cancelled():
+                        return None
+                    ready = batch.poll(group, seen)
+                    if cancelled():
+                        return None
+                    for source, future in ready:
+                        seen.add(source_identity(source))
+                        name = source.get("sourceName", "?")
+                        try:
+                            rows = future.result()
+                        except ProviderDependencyError as exc:
+                            errors.append(exc)
+                            continue
+                        except Exception:
+                            rows = []
+                        if rows:
+                            candidates.extend((source, row) for row in rows)
+                            if deadline is None:
+                                deadline = time.monotonic() + _QUALITY_GRACE_SECONDS
+                            reporting.ok(f"{name}: found {len(rows)} stream(s)")
+                        elif rows is not None:
+                            failures.append(source)
+                            reporting.warn(f"{name} unavailable; checking other mirrors...")
+                    if candidates:
+                        _, best = min(candidates, key=candidate_key)
+                        key = stream_quality_preference_key(best, quality)
+                        preferred = bool(pref_name and best.get("source_name") == pref_name and best.get("resolution", "?") == pref_res)
+                        matches = key[0] == 0 and not pref_name
+                        if preferred or matches or len(seen) == len(group) or time.monotonic() >= deadline:
+                            return accept()
+            pending = failures
+            if not pending:
+                break
+        if errors:
+            raise errors[0]
+        reporting.warn("All mirrors were tested and failed.")
+        return None
+    finally:
+        if not handed_off:
+            batch.close()
 
 
 # ── Cache Stats / Debugging ─────────────────────────────────────────────

@@ -10,7 +10,10 @@ from ..app_core import _get_poster, _poster_footer_line, build_info_panel, make_
 from ..core.storage import get_default_download_dir, is_valid_download_video, load_downloads_db, save_downloads_db
 from ..core.terminal import sanitize_terminal_text
 from ..core.workers import DaemonExecutor
-from ..media.episode_identity import download_identity_conflicts, read_episode_identity
+from ..media.episode_identity import (
+    download_identity_conflicts, episode_file_fingerprint,
+    read_episode_identities, read_episode_identity,
+)
 from ..ui.help import picker_help
 from ..ui.picker import tui_pick
 from ..ui.actions import ActionBindings
@@ -25,7 +28,7 @@ _RST = "\033[0m"
 VIDEO_EXTS = ('.mp4', '.mkv', '.avi', '.ts', '.webm')
 
 
-def _saved_episode_label(filepath: str, show_data: dict) -> str:
+def _saved_episode_label(filepath: str, show_data: dict, *, identity_reader=None) -> str:
     labels = (show_data.get("metadata") or {}).get("_episode_labels") or {}
     target = os.path.realpath(os.path.expanduser(filepath))
     candidates = set()
@@ -33,20 +36,22 @@ def _saved_episode_label(filepath: str, show_data: dict) -> str:
         paths = (files,) if isinstance(files, str) else files or ()
         if any(os.path.realpath(os.path.expanduser(str(path))) == target for path in paths):
             label = str(labels.get(str(identifier)) or identifier)
-            if not download_identity_conflicts(label, filepath):
+            if not download_identity_conflicts(label, filepath, identity_reader=identity_reader):
                 candidates.add(label)
     return next(iter(candidates)) if len(candidates) == 1 else ""
 
 
-def extract_offline_episode_info(filepath: str, *, show_data: dict | None = None) -> tuple[float, float, str, str]:
+def extract_offline_episode_info(
+    filepath: str, *, show_data: dict | None = None, identity_reader=None,
+) -> tuple[float, float, str, str]:
     """Extract (primary_num, secondary_num, clean_ep_id, raw_label) from filepath."""
-    identity = read_episode_identity(filepath)
+    identity = (identity_reader or read_episode_identity)(filepath)
     labels = ((show_data or {}).get("metadata") or {}).get("_episode_labels") or {}
     raw_label = ""
     if identity is not None:
         raw_label = identity.episode or str(labels.get(identity.episode_id) or identity.episode_id)
     if not raw_label and show_data:
-        raw_label = _saved_episode_label(filepath, show_data)
+        raw_label = _saved_episode_label(filepath, show_data, identity_reader=identity_reader)
     if raw_label:
         return _offline_label_info(raw_label)
 
@@ -79,16 +84,36 @@ def _offline_label_info(raw_label: str) -> tuple[float, float, str, str]:
     return prim_num, sec_num, clean_id, raw_label
 
 
-def offline_file_sort_key(filepath: str, *, show_data: dict | None = None) -> tuple[float, float, str]:
-    prim_num, sec_num, _, _ = extract_offline_episode_info(filepath, show_data=show_data)
+def offline_file_sort_key(filepath: str, *, show_data: dict | None = None, identity_reader=None) -> tuple[float, float, str]:
+    prim_num, sec_num, _, _ = extract_offline_episode_info(filepath, show_data=show_data, identity_reader=identity_reader)
     return (prim_num, sec_num, os.path.basename(filepath))
+
+
+def _scan_path_kind(path, *, directory=False):
+    """True/False for confirmed filesystem state, None when inspection failed."""
+    import stat
+    try:
+        mode = os.stat(path).st_mode
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError:
+        return None
+    return stat.S_ISDIR(mode) if directory else stat.S_ISREG(mode)
 
 
 def _scan_downloads(db, download_dir, ttype, *, persist=True):
     """Validate a caller-owned database snapshot; detached workers do not persist."""
     shows = db.get("shows", {})
 
-    dir_exists = os.path.isdir(download_dir)
+    dir_exists = _scan_path_kind(download_dir, directory=True)
+    if dir_exists is None:
+        logging.getLogger(__name__).debug("Downloads root unreadable; keeping saved records")
+        return db, list(shows.items()), False
+    try:
+        root_names = os.listdir(download_dir) if dir_exists else []
+    except OSError:
+        logging.getLogger(__name__).debug("Downloads root listing failed; keeping saved records")
+        return db, list(shows.items()), False
     db_dir = db.get("current_download_dir", "")
     dir_matches_db = bool(db_dir and os.path.abspath(os.path.expanduser(db_dir)) == os.path.abspath(download_dir))
     found_any_known_show = False
@@ -105,12 +130,48 @@ def _scan_downloads(db, download_dir, ttype, *, persist=True):
     dirty = False
     valid_titles = []
 
+    # Probe across folders together; keep failures local to this scan only.
+    folder_files = {}
+    folders = [os.path.join(download_dir, title) for title in shows]
+    if dir_exists:
+        folders.extend(os.path.join(download_dir, name) for name in root_names)
+    for folder in dict.fromkeys(folders):
+        exists = _scan_path_kind(folder, directory=True)
+        if exists is None:
+            folder_files[folder] = None
+            continue
+        if not exists:
+            continue
+        try:
+            folder_files[folder] = [
+                os.path.join(folder, name) for name in os.listdir(folder)
+                if is_valid_download_video(os.path.join(folder, name), raise_on_error=True)
+            ]
+        except OSError:
+            folder_files[folder] = None
+    stamps = {path: episode_file_fingerprint(path) for files in folder_files.values() if files is not None for path in files}
+    identities = read_episode_identities(stamps)
+
+    def scan_identity(path):
+        if (path in identities and stamps[path] is not None
+                and stamps[path] == episode_file_fingerprint(path)):
+            return identities[path]
+        return read_episode_identity(path)
+
     for title, data in list(shows.items()):
         folder_path = os.path.join(download_dir, title)
-        if not os.path.isdir(folder_path):
+        exists = _scan_path_kind(folder_path, directory=True)
+        if exists is None:
+            valid_titles.append((title, data))
+            continue
+        if not exists:
             from media_cli.media.download import sanitize_filename
             alt_path = os.path.join(download_dir, sanitize_filename(title))
-            if os.path.isdir(alt_path):
+            alternative = _scan_path_kind(alt_path, directory=True)
+            if alternative is None:
+                valid_titles.append((title, data))
+                continue
+            if alternative:
                 shows[sanitize_filename(title)] = data
                 del shows[title]
                 title = sanitize_filename(title)
@@ -122,6 +183,24 @@ def _scan_downloads(db, download_dir, ttype, *, persist=True):
                 continue
             else:
                 continue
+
+        if folder_files.get(folder_path) is None:
+            logging.getLogger(__name__).debug("Download folder unreadable; keeping saved episode records")
+            valid_titles.append((title, data))
+            continue
+
+        try:
+            actual_files = []
+            for path in folder_files.get(folder_path, []):
+                present = _scan_path_kind(path)
+                if present is None:
+                    raise OSError("File inspection failed")
+                if present:
+                    actual_files.append(path)
+            actual_files.sort(key=lambda path: offline_file_sort_key(path, show_data=data, identity_reader=scan_identity))
+        except OSError:
+            valid_titles.append((title, data))
+            continue
 
         meta = data.get("metadata", {})
         temp_show = {"name": title, "_folder_name": title, **meta}
@@ -156,19 +235,9 @@ def _scan_downloads(db, download_dir, ttype, *, persist=True):
             data["metadata"] = meta
             dirty = True
 
-        try:
-            actual_files = [
-                os.path.join(folder_path, f)
-                for f in os.listdir(folder_path)
-                if is_valid_download_video(os.path.join(folder_path, f))
-            ]
-            actual_files.sort(key=lambda path: offline_file_sort_key(path, show_data=data))
-        except OSError:
-            actual_files = []
-
         discovered_eps = []
         for f in actual_files:
-            _, _, clean_id, _ = extract_offline_episode_info(f, show_data=data)
+            _, _, clean_id, _ = extract_offline_episode_info(f, show_data=data, identity_reader=scan_identity)
             if clean_id and clean_id not in discovered_eps:
                 discovered_eps.append(clean_id)
 
@@ -198,24 +267,27 @@ def _scan_downloads(db, download_dir, ttype, *, persist=True):
 
     # Discovery scan: auto-import folders on disk that aren't tracked in the DB
     if os.path.isdir(download_dir):
-        for folder_name in os.listdir(download_dir):
+        for folder_name in root_names:
             folder_path = os.path.join(download_dir, folder_name)
             if not os.path.isdir(folder_path) or folder_name in shows:
                 continue
             try:
-                files = [
+                if folder_path in folder_files and folder_files[folder_path] is None:
+                    continue
+                files = list(folder_files[folder_path]) if folder_path in folder_files else [
                     os.path.join(folder_path, f)
                     for f in os.listdir(folder_path)
                     if is_valid_download_video(os.path.join(folder_path, f))
                 ]
-                files.sort(key=offline_file_sort_key)
+                files = [path for path in files if os.path.isfile(path)]
+                files.sort(key=lambda path: offline_file_sort_key(path, identity_reader=scan_identity))
             except OSError:
                 continue
             if not files:
                 continue
             episodes = []
             for f in files:
-                _, _, clean_id, _ = extract_offline_episode_info(f)
+                _, _, clean_id, _ = extract_offline_episode_info(f, identity_reader=scan_identity)
                 if clean_id and clean_id not in episodes:
                     episodes.append(clean_id)
 

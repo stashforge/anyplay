@@ -18,9 +18,7 @@ SSL_CTX.verify_mode = ssl.CERT_NONE
 SSL_CTX_SECURE = ssl.create_default_context()
 
 ANILIST_TIMEOUT = 8
-API_BASE = "https://api.mkissa.net/api"
-CLOCK_BASE = "allanime.day"
-REFERER = "https://mkissa.to/"
+REFERER = ""
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -28,8 +26,6 @@ UA = (
 )
 BASE_HDRS = {
     "User-Agent": UA,
-    "Origin": "https://mkissa.to",
-    "Referer": REFERER,
     "sec-ch-ua-platform": '"Windows"',
 }
 

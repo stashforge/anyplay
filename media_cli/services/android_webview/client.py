@@ -558,7 +558,7 @@ class ProbeClient:
     def _wake(self, token, timeout=5):
         manual = "Could not start companion service; open Anyplay WebView manually and retry"
         if sys.platform != "android" and "com.termux" not in sys.prefix:
-            raise ProbeError(manual)
+            raise CompanionUnavailable(manual)
         timestamp = str(int(time.time() * 1000))
         proof = self._mac(token, "wake:v1\n" + timestamp)
         try:
@@ -586,13 +586,13 @@ class ProbeClient:
             # Some Termux am implementations map Android RESULT_OK (-1) to exit 1.
             completed = re.search(r"(?m)^Broadcast completed: result=-1\s*$", result.stdout)
             if (result.returncode != 0 and not completed) or "Error" in result.stdout or "Error" in result.stderr:
-                raise ProbeError(manual)
+                raise CompanionUnavailable(manual)
         except FileNotFoundError:
             raise CompanionSetupRequired(
                 "Companion startup requires 'am'. Install it with: pkg install termux-am, then retry."
             ) from None
         except (OSError, subprocess.TimeoutExpired):
-            raise ProbeError(manual) from None
+            raise CompanionUnavailable(manual) from None
 
     @staticmethod
     def _identifier(value):

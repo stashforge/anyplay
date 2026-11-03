@@ -401,7 +401,9 @@ def normalize_embed_url(url: str) -> str:
         decoded_path = urllib.parse.unquote(parsed.path)
         prefix = "/$/embed/"
         if decoded_path.startswith(prefix):
-            return f"https://odysee.com/{decoded_path.removeprefix(prefix)}"
+            return parsed._replace(
+                scheme="https", path=f"/{decoded_path.removeprefix(prefix)}",
+            ).geturl()
     if host == "play.d.tube":
         video_id = urllib.parse.parse_qs(parsed.query).get("v", [""])[0]
         if video_id:
@@ -468,6 +470,7 @@ class WordPressAnimeProvider:
     def get_title(self, provider_id: str) -> dict | None:
         title_str = provider_id.rstrip("/").rsplit("/", 1)[-1].replace("-", " ").title()
         title = self._title_from_entry(Entry(title=title_str, url=provider_id))
+        title["_provider_title_fallback"] = True
 
         try:
             html = self._fetch(provider_id)
@@ -482,6 +485,10 @@ class WordPressAnimeProvider:
 
                 from bs4 import BeautifulSoup
                 soup = BeautifulSoup(html, "html.parser")
+                heading = soup.select_one('h1.entry-title, h1[itemprop="name"]')
+                if heading and clean_text(heading.get_text(" ", strip=True)):
+                    title["name"] = clean_text(heading.get_text(" ", strip=True))
+                    title["_provider_title_fallback"] = False
 
                 desc_div = soup.find("div", {"itemprop": "description"})
                 if desc_div and not title.get("description"):

@@ -7,12 +7,14 @@ or JUNK (e.g. AI speech-to-text hallucination loops).
 
 from __future__ import annotations
 
+import logging
 import re
 from collections import Counter
 from typing import Any
 
 # Cache evaluated results by url/content hash
 _SCORER_CACHE: dict[str, dict[str, Any]] = {}
+_LOG = logging.getLogger(__name__)
 
 
 def normalize_subtitle_text(text: str) -> str:
@@ -223,12 +225,18 @@ def evaluate_subtitle_content(
                 content = gzip.decompress(content)
             except Exception:
                 pass
-        text = content.decode("utf-8", errors="replace")
+        text = content.decode("utf-8-sig", errors="replace")
     else:
         text = str(content)
 
+    # A playlist is not a complete subtitle sample. In particular, an empty
+    # opening segment cannot establish that the whole track is junk.
+    if text.lstrip("\ufeff \t\r\n").startswith("#EXTM3U"):
+        return {"label": "UNASSESSED", "score": 0.0, "reason": "segmented_track_not_scored"}
+
     cues = parse_subtitle_cues(text)
     res = score_subtitle(cues, video_duration_s=video_duration_s)
+    res["cue_count"] = len(cues)
     if cache_key:
         _SCORER_CACHE[cache_key] = res
     return res
@@ -243,7 +251,7 @@ def filter_subtitles(
     *,
     cancel_check=None,
 ) -> list[dict]:
-    """Filter out JUNK subtitles (e.g. AI hallucination loops) and demote SUSPICIOUS tracks."""
+    """Reject scored JUNK files, demote SUSPICIOUS files, retain unassessed HLS tracks."""
     import urllib.parse
     import urllib.request
 
@@ -258,7 +266,9 @@ def filter_subtitles(
         if not url:
             continue
 
-        if url in _SCORER_CACHE:
+        cached = url in _SCORER_CACHE
+        error_type = ""
+        if cached:
             res = _SCORER_CACHE[url]
         elif (
             "auto" in url.lower()
@@ -276,25 +286,29 @@ def filter_subtitles(
                 if cancel_check and cancel_check():
                     return []
 
-                # If m3u8 playlist, follow to first segment
-                if ".m3u8" in actual_url.lower():
-                    m3u8_text = data.decode("utf-8", errors="replace")
-                    base = actual_url.rsplit("/", 1)[0] + "/"
-                    for line in m3u8_text.splitlines():
-                        line = line.strip()
-                        if line and not line.startswith("#"):
-                            seg_url = urllib.parse.urljoin(base, line)
-                            with urllib.request.urlopen(urllib.request.Request(seg_url, headers=req_hdrs), timeout=timeout) as s_resp:
-                                data = s_resp.read()
-                            break
-
                 if cancel_check and cancel_check():
                     return []
                 res = evaluate_subtitle_content(data, video_duration_s=video_duration_s, cache_key=url)
-            except Exception:
-                res = {"label": "VALID", "score": 0.0}
+            except Exception as exc:
+                error_type = type(exc).__name__
+                res = {"label": "VALID", "score": 0.0, "reason": "fetch_or_parse_error"}
         else:
-            res = {"label": "VALID", "score": 0.0}
+            res = {"label": "VALID", "score": 0.0, "reason": "not_sampled"}
+
+        try:
+            host = urllib.parse.urlsplit(url).hostname or "local"
+        except ValueError:
+            host = "invalid"
+        _LOG.debug(
+            "Subtitle quality decision: action=%s host=%s track=%r verdict=%s reason=%s "
+            "score=%s cues=%s repetition=%s words_per_min=%s vocabulary=%s cached=%s error=%s",
+            "reject" if res.get("label") == "JUNK" else "keep",
+            host,
+            sub.get("language") or sub.get("lang") or sub.get("label") or "unknown",
+            res.get("label"), res.get("reason", "quality_metrics"), res.get("score"),
+            res.get("cue_count"), res.get("repetition_ratio"), res.get("word_density"),
+            res.get("vocab_ratio"), cached, error_type or "none",
+        )
 
         if res.get("label") == "JUNK":
             continue

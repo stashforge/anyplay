@@ -9,6 +9,7 @@ from .args_common import (
     _add_debug_option,
     _add_download_options,
     _add_plain_option,
+    _add_mpv_window_option,
     _add_resume_options,
     _add_search_options,
     _anilist_target,
@@ -89,6 +90,7 @@ def add_downloads_subcommand(commands):
     global_options = downloads.add_argument_group("Global options")
     _add_debug_option(global_options, suppress_default=True)
     _add_plain_option(global_options, suppress_default=True)
+    _add_mpv_window_option(global_options, suppress_default=True)
     global_options.add_argument(
         "-h", "--help", action="help", help="Show this help message and exit"
     )
@@ -165,6 +167,7 @@ def add_animethemes_subcommand(commands):
     global_options = animethemes.add_argument_group("Global options")
     _add_debug_option(global_options, suppress_default=True)
     _add_plain_option(global_options, suppress_default=True)
+    _add_mpv_window_option(global_options, suppress_default=True)
     global_options.add_argument(
         "-h", "--help", action="help", help="Show this help message and exit"
     )
@@ -253,6 +256,7 @@ def add_auth_subcommand(commands):
     global_options = auth.add_argument_group("Global options")
     _add_debug_option(global_options, suppress_default=True)
     _add_plain_option(global_options, suppress_default=True)
+    _add_mpv_window_option(global_options, suppress_default=True)
     global_options.add_argument(
         "-h", "--help", action="help", help="Show this help message and exit"
     )
@@ -284,6 +288,7 @@ def add_companion_subcommand(commands):
     global_options = companion.add_argument_group("Global options")
     _add_debug_option(global_options, suppress_default=True)
     _add_plain_option(global_options, suppress_default=True)
+    _add_mpv_window_option(global_options, suppress_default=True)
     global_options.add_argument("-h", "--help", action="help", help="Show this help message and exit")
     return companion
 
@@ -298,12 +303,12 @@ def add_providers_subcommand(commands):
             "Examples:\n"
             "  Prefix your query with a provider ID:\n"
             f"    {APP_NAME} search animexin:renegade immortal\n"
-            f'    {APP_NAME} search miruro:"one piece"\n'
+            f'    {APP_NAME} search anipm:"one piece"\n'
             f"    {APP_NAME} search animethemes:idol\n\n"
             "  Show provider-specific search help:\n"
-            f"    {APP_NAME} search miruro: -h\n\n"
+            f"    {APP_NAME} search anipm: -h\n\n"
             "  Alternatively, you can temporarily switch providers during a normal search:\n"
-            f"    {APP_NAME} search frieren --provider miruro"
+            f"    {APP_NAME} search frieren --provider anipm"
         ),
         formatter_class=MinimalHelpFormatter,
     )
@@ -316,6 +321,7 @@ def add_providers_subcommand(commands):
     )
     _add_debug_option(global_options)
     _add_plain_option(global_options)
+    _add_mpv_window_option(global_options)
     return providers
 
 
@@ -355,6 +361,7 @@ def add_completion_subcommand(commands):
     global_options = completion.add_argument_group("Global options")
     _add_debug_option(global_options, suppress_default=True)
     _add_plain_option(global_options, suppress_default=True)
+    _add_mpv_window_option(global_options, suppress_default=True)
     global_options.add_argument(
         "-h", "--help", action="help", help="Show this help message and exit"
     )
@@ -419,6 +426,7 @@ def add_config_subcommand(commands):
     global_options = config.add_argument_group("Global options")
     _add_debug_option(global_options, suppress_default=True)
     _add_plain_option(global_options, suppress_default=True)
+    _add_mpv_window_option(global_options, suppress_default=True)
     global_options.add_argument(
         "-h", "--help", action="help", help="Show this help message and exit"
     )
@@ -452,10 +460,31 @@ def add_logs_subcommand(commands):
     global_options = logs.add_argument_group("Global options")
     _add_debug_option(global_options, suppress_default=True)
     _add_plain_option(global_options, suppress_default=True)
+    _add_mpv_window_option(global_options, suppress_default=True)
     global_options.add_argument(
         "-h", "--help", action="help", help="Show this help message and exit"
     )
     return logs
+
+
+def add_health_subcommand(commands):
+    from ..health.profiles import PROFILES
+    health = commands.add_parser(
+        "health", help="Check providers and manage saved health reports",
+        description="Check provider metadata, native catalogues, sources and streams, or manage saved reports. Use health all to check enabled providers sequentially; each keeps its supported depth. --translation both checks Sub and Dub separately. Supported depths depend on the provider. Senshi and other media-enabled adapters default to HTTP checks; --verify extraction stops before media access. --verify mpv silently decodes a short sample without a window or sound. AnimeThemes and Torrents currently offer catalogue/search-only checks; no torrent transfer is started. Visible playback checks are not available yet.\nView with: anyplay health report <id|latest>; q exits the pager.\nDelete one: anyplay health report <id|latest> --delete",
+        add_help=False, formatter_class=MinimalHelpFormatter,
+    )
+    _configure_help_parser(health)
+    health.add_argument("health_action", choices=("reports", "report", "all", *PROFILES), help="List/view reports or check a supported provider")
+    health.add_argument("health_report_id", nargs="?", metavar="ID", help="Report ID or latest (required with report)")
+    health.add_argument("--delete", dest="health_delete", action="store_true", help="Delete the selected report instead of viewing it")
+    health.add_argument("--seed", dest="health_seed", type=int, help="Repeat episode sample selection with this nonnegative seed (provider checks)")
+    health.add_argument("--verify", dest="health_verify", choices=("catalogue", "extraction", "http", "mpv"), help="Verification level (default depends on provider)")
+    health.add_argument("--translation", dest="health_translation", choices=("sub", "dub", "both"), help="Check Sub, Dub, or both independently (default: sub); unsupported translations are not applicable")
+    health.add_argument("-h", "--help", action="help", help="Show this help message and exit")
+    _add_debug_option(health, suppress_default=True)
+    _add_plain_option(health, suppress_default=True)
+    return health
 
 
 def register_all_subcommands(commands, search_provider=None):
@@ -470,3 +499,4 @@ def register_all_subcommands(commands, search_provider=None):
     add_completion_subcommand(commands)
     add_config_subcommand(commands)
     add_logs_subcommand(commands)
+    add_health_subcommand(commands)

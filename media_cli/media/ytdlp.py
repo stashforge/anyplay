@@ -12,6 +12,7 @@ import urllib.parse
 
 from ..core.processes import read_bounded_process_stdout
 from .dailymotion import is_dailymotion_url, stream_type_from_url
+from .proxy_rules import proxy_filtered_headers
 from .sources import format_source_label, quality_from_dimensions
 from .urls import validate_stream_url
 
@@ -22,6 +23,13 @@ def resolve_ytdlp_embed(url: str, *, name: str, priority: int, ok, warn, subtitl
         return []
 
     attempts = 1
+    # These hosts need multiple metadata/manifest requests; working Rumble
+    # extraction has been observed taking 13.6s before returning any formats.
+    host = (urllib.parse.urlparse(url).hostname or "").lower()
+    extraction_timeout = 20 if host in {
+        "odysee.com", "www.odysee.com", "lbry.tv", "www.lbry.tv",
+        "rumble.com", "www.rumble.com",
+    } else 6
     command = ["yt-dlp", "-j", "--no-warnings"]
     if "ok.ru" not in url and "odnoklassniki.ru" not in url:
         command.extend(["--impersonate", "chrome"])
@@ -43,7 +51,7 @@ def resolve_ytdlp_embed(url: str, *, name: str, priority: int, ok, warn, subtitl
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
             )
-            output = read_bounded_process_stdout(process, timeout=6)
+            output = read_bounded_process_stdout(process, timeout=extraction_timeout)
             if process.returncode != 0:
                 if b"Impersonate target" in output and b"not available" in output:
                     process = subprocess.Popen(
@@ -51,7 +59,7 @@ def resolve_ytdlp_embed(url: str, *, name: str, priority: int, ok, warn, subtitl
                         stdout=subprocess.PIPE,
                         stderr=subprocess.STDOUT,
                     )
-                    output = read_bounded_process_stdout(process, timeout=6)
+                    output = read_bounded_process_stdout(process, timeout=extraction_timeout)
                     if process.returncode == 0:
                         data = json.loads(output)
                         break
@@ -185,6 +193,18 @@ def _is_video_format(item: dict) -> bool:
     return True
 
 
+def _playback_request_context(data: dict, item: dict) -> tuple[dict, str]:
+    """Keep extractor request requirements, with per-format overrides."""
+    merged = {}
+    for owner in (data, item):
+        raw = owner.get("http_headers")
+        if isinstance(raw, dict):
+            for name, value in proxy_filtered_headers(raw).items():
+                merged[name.casefold()] = (name, value)
+    _, referer = merged.pop("referer", ("", ""))
+    return dict(merged.values()), referer
+
+
 def _stream_from_format(
         item: dict,
         data: dict,
@@ -207,14 +227,15 @@ def _stream_from_format(
     label = format_source_label(name, resolution)
 
     needs_audio = item.get("acodec") == "none"
+    headers, referer = _playback_request_context(data, item)
     stream: dict = {
         "source_name": label,
         "source_parent_name": name,
         "link": stream_url,
         "type": stream_type,
         "resolution": resolution,
-        "referer": "",
-        "headers": {},
+        "referer": referer,
+        "headers": headers,
         "source_priority": priority,
         "android_safe": not needs_audio and (
             stream_type in {"mp4", "hls"}
@@ -287,6 +308,7 @@ def _stream_from_format(
 def _manifest_stream_from_format(
         item: dict,
         *,
+        data: dict,
         name: str,
         priority: int) -> dict | None:
     manifest_url = item.get("manifest_url")
@@ -298,13 +320,14 @@ def _manifest_stream_from_format(
         return None
     if ".m3u8" not in urllib.parse.urlparse(manifest_url).path.casefold():
         return None
+    headers, referer = _playback_request_context(data, item)
     return {
         "source_name": f"{name} [HLS] Adaptive",
         "link": manifest_url,
         "type": "hls",
         "resolution": "Adaptive",
-        "referer": "",
-        "headers": {},
+        "referer": referer,
+        "headers": headers,
         "source_priority": priority,
         "android_safe": True,
         "_quality_rank": 0,
@@ -314,6 +337,13 @@ def _manifest_stream_from_format(
 
 def streams_from_ytdlp_data(data: dict, *, url: str, name: str, priority: int, parent_subtitles: list[dict] | None = None) -> list[dict]:
     formats = data.get("formats", [])
+    master_ceilings = {}
+    for item in formats:
+        manifest = item.get("manifest_url")
+        if manifest and _is_video_format(item):
+            rank = _quality_rank(item)
+            if rank > master_ceilings.get(manifest, (0, ""))[0]:
+                master_ceilings[manifest] = (rank, _resolution_label(item))
     _is_dm = is_dailymotion_url(url)
 
     # Extract soft subtitles from yt-dlp data if present
@@ -374,6 +404,7 @@ def streams_from_ytdlp_data(data: dict, *, url: str, name: str, priority: int, p
             continue
         stream = _manifest_stream_from_format(
             item,
+            data=data,
             name=name,
             priority=priority,
         )
@@ -388,6 +419,10 @@ def streams_from_ytdlp_data(data: dict, *, url: str, name: str, priority: int, p
             def_sub = next((s["url"] for s in subtitles if s.get("default")), subtitles[0]["url"])
             stream["subtitle_url"] = def_sub
         streams.append(stream)
+
+    for stream in streams:
+        if stream.get("resolution") == "Adaptive" and stream["link"] in master_ceilings:
+            stream["_max_quality_rank"], stream["max_resolution"] = master_ceilings[stream["link"]]
 
     _is_okru = "ok.ru" in url or "odnoklassniki.ru" in url or name.casefold() == "ok"
     if _is_okru:

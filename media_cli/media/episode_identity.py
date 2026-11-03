@@ -8,6 +8,7 @@ import os
 import shutil
 import stat
 import subprocess
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -28,6 +29,14 @@ class EmbeddedEpisodeIdentity:
 
 def _fingerprint(info: os.stat_result) -> _Fingerprint:
     return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+
+
+def episode_file_fingerprint(path: str) -> _Fingerprint | None:
+    """Identify a file version without reading tags or including access time."""
+    try:
+        return _fingerprint(os.stat(path))
+    except OSError:
+        return None
 
 
 def _decode_identity(data: object) -> EmbeddedEpisodeIdentity | None:
@@ -96,14 +105,79 @@ def clear_identity_cache() -> None:
     _probe_identity.cache_clear()
 
 
-def download_identity_conflicts(identifier: str, path: str) -> bool:
+def read_episode_identities(
+    paths: Iterable[str | os.PathLike[str]],
+) -> dict[str, EmbeddedEpisodeIdentity | None]:
+    """Read one bounded batch; failed reads remain retryable in later batches."""
+    from ..core.workers import DaemonExecutor
+
+    def unique_paths() -> Iterator[str]:
+        seen: set[str] = set()
+        for path in paths:
+            key = os.fspath(path)
+            if key not in seen:
+                seen.add(key)
+                yield key
+
+    def read(path: str) -> tuple[str, EmbeddedEpisodeIdentity | None]:
+        return path, read_episode_identity(path)
+
+    with DaemonExecutor(max_workers=4, max_pending=4) as executor:
+        return dict(executor.map(read, unique_paths()))
+
+
+def download_identity_conflicts(
+    identifier: str, path: str, *,
+    identity_reader: Callable[[str], EmbeddedEpisodeIdentity | None] | None = None,
+) -> bool:
     """Prefer supplied embedded episode identity over a renamed filename."""
     from ..domain.episodes import episode_file_identity_conflicts
 
-    identity = read_episode_identity(path)
+    identity = (identity_reader or read_episode_identity)(path)
     if identity is not None:
         if identity.episode_id and str(identifier) == identity.episode_id:
             return False
         if identity.episode:
             return episode_file_identity_conflicts(identifier, f"Episode {identity.episode}")
     return episode_file_identity_conflicts(identifier, path)
+
+
+def find_matching_episode_identity(
+    paths: Iterable[str], matches: Callable[[EmbeddedEpisodeIdentity], bool], *, timeout: float = 4.0,
+) -> str | None:
+    """Find a tagged file with four read-only probes and a bounded lookup wait."""
+    import time
+    from concurrent.futures import FIRST_COMPLETED, wait
+    from ..core.workers import DaemonExecutor
+
+    deadline = time.monotonic() + timeout
+    executor = DaemonExecutor(max_workers=4, max_pending=4)
+    iterator = iter(dict.fromkeys(paths))
+    pending = {}
+
+    def submit():
+        path = next(iterator, None)
+        if path is not None:
+            pending[executor.submit(read_episode_identity, path)] = path
+
+    try:
+        for _ in range(4):
+            submit()
+        while pending:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            done, _ = wait(pending, timeout=remaining, return_when=FIRST_COMPLETED)
+            if not done:
+                break
+            for future in done:
+                path = pending.pop(future)
+                identity = future.result()
+                if identity is not None and matches(identity):
+                    return path
+                submit()
+        return None
+    finally:
+        # Running probes own no application state; their existing probe deadline
+        # still applies, but navigation need not wait for them on an expired lookup.
+        executor.shutdown(wait=False, cancel_futures=True)

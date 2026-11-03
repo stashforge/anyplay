@@ -132,6 +132,36 @@ Open downloaded episodes:
 anyplay downloads
 ```
 
+## Provider health reports
+
+```bash
+anyplay health anipm --translation both --seed 42
+anyplay health all --translation both --seed 42
+anyplay health senshi --translation dub --verify mpv --seed 42
+anyplay health reports
+anyplay health report latest
+```
+
+Checks default to Sub; `--translation both` records Sub and Dub independently.
+Known unsupported translations are not applicable. `all` checks enabled providers
+sequentially, uses each provider's supported depth, and saves one combined report.
+An explicit provider can still be tested when disabled in normal use.
+
+The default depth depends on the provider. `--verify extraction` stops before
+media checks; HTTP checks fetch bounded samples, while `--verify mpv` silently
+decodes a short sample without a window or sound. In a batch, unsupported depths
+fall back to a supported shallower level, recorded separately for each provider.
+Search-only catalogues never imply working playback. Movies currently sample
+movie titles, not TV seasons; AnimeThemes and Torrents currently test search only.
+
+Each provider has a shared 15-minute diagnostic budget, including both
+translations, with up to three named sources sampled per episode. Large batch
+runs can take a long time. Timeouts and omitted checks stay unverified or
+inconclusive; local missing requirements do not mark providers broken. Ctrl+C
+saves completed evidence and unstarted work, then returns without opening a pager.
+Reports show scope, findings, a title digest and full evidence; `q` exits the
+viewer. No normal history, watched progress or provider configuration is changed.
+
 ## Useful Commands
 
 Play a specific episode:
@@ -200,8 +230,7 @@ Current provider IDs include:
 - `anizone`
 - `animexin`
 - `lucifer`
-- `miruro`
-- `mkissa`
+- `anipm`
 - `reanime`
 - `senshi`
 - `torrent`
@@ -228,7 +257,7 @@ Read or change one value:
 ```bash
 anyplay config get quality
 anyplay config set quality 1080p
-anyplay config set provider miruro
+anyplay config set provider anipm
 anyplay config set player mpv
 anyplay config set details_cover false
 ```
@@ -251,7 +280,7 @@ Common options:
 quality = 1080p
 translation_type = sub
 player = mpv
-provider = miruro
+provider = anipm
 title_language = romaji
 disabled_providers =
 download_dir =

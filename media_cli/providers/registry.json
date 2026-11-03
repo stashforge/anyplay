@@ -43,28 +43,6 @@
       "engine": "api",
       "features": ["anilist_sync", "search", "fallback_servers"]
     },
-    "miruro": {
-      "module": "miruro",
-      "python_requirements": {"episodes": ["curl_cffi.requests"], "sources": ["curl_cffi.requests"]},
-      "name": "Miruro",
-      "domains": ["https://www.miruro.tv", "https://www.miruro.to", "https://www.miruro.ru", "https://www.miruro.bz"],
-      "type": "anime",
-      "languages": ["sub", "dub"],
-      "status": "active",
-      "engine": "hybrid",
-      "features": ["anilist_sync", "search", "fallback_servers"]
-    },
-    "mkissa": {
-      "module": "allanime",
-      "python_requirements": {"sources": [["cryptography.hazmat.primitives.ciphers.aead", "Cryptodome.Cipher.AES", "Crypto.Cipher.AES"]]},
-      "name": "Mkissa",
-      "domains": ["https://mkissa.to", "https://allanime.to"],
-      "type": "anime",
-      "languages": ["sub", "dub"],
-      "status": "active",
-      "engine": "hybrid",
-      "features": ["anilist_sync", "search", "fallback_servers"]
-    },
     "anizone": {
       "module": "anizone",
       "python_requirements": {"import": ["bs4"]},

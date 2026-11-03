@@ -487,7 +487,7 @@ from media_cli.app import animethemes_song_playback as flow
 played = []
 def play(row, *args):
     played.append(row['stream']['link'])
-    print('PLAYED:' + str(len(played)), flush=True)
+    terminal_marker('PLAYED:' + str(len(played)))
 flow.play_variant = play
 result = flow.run_song_collection(flags, ui, dict(quality='1080p'), SimpleNamespace(quality=None),
                                   json.loads({payload!r}), 0)

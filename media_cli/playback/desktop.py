@@ -1,6 +1,7 @@
 """Desktop mpv playback orchestration."""
 
 import logging
+import time
 from contextlib import nullcontext
 from urllib.parse import urlsplit
 
@@ -15,6 +16,26 @@ _HLS_LOCAL_SUBTITLES = True
 
 class PlaybackPreparationCancelled(Exception):
     """A preparation adapter cancelled before the player could start."""
+
+
+def _prepare_with_timing(stage, operation, *args, **kwargs):
+    """Log stage boundaries without logging URLs, headers or exception text."""
+    started = time.perf_counter()
+    outcome = 'ok'
+    tracks_in = len(args[0]) if args and isinstance(args[0], (list, tuple)) else 0
+    tracks_out = 0
+    log.debug('Desktop preparation started: stage=%s tracks_in=%d', stage, tracks_in)
+    try:
+        result = operation(*args, **kwargs)
+        tracks = result if isinstance(result, (list, tuple)) else getattr(result, 'subtitles', ())
+        tracks_out = len(tracks or ())
+        return result
+    except BaseException as exc:
+        outcome = type(exc).__name__
+        raise
+    finally:
+        log.debug('Desktop preparation finished: stage=%s outcome=%s elapsed=%.3fs tracks_in=%d tracks_out=%d',
+                  stage, outcome, time.perf_counter() - started, tracks_in, tracks_out)
 
 
 def play_desktop(
@@ -45,6 +66,7 @@ def play_desktop(
         prepare_subtitle_files_fn=None,
         prepare_proxy_fn=None,
         start_player_fn=None,
+        background_subtitles=False,
         playback_input_scope=None):
     prepared_torrent = None
     torrent_ready_message = ""
@@ -92,10 +114,14 @@ def play_desktop(
     headers = proxy_filtered_headers(stream.get("headers", {}))
     audio_tracks = stream.get("audio_tracks") or []
     subtitles = stream.get("subtitles") or stream.get("vtt") or []
+    deferred_subtitles = subtitles if background_subtitles else []
+    if background_subtitles:
+        subtitles = []
     if subtitles:
         try:
             from ..media.subtitle_scorer import filter_subtitles
-            subtitles = (prepare_subtitles_fn or filter_subtitles)(
+            subtitles = _prepare_with_timing(
+                'subtitle-filter', prepare_subtitles_fn or filter_subtitles,
                 subtitles,
                 headers=headers,
                 referer=referer,
@@ -115,7 +141,8 @@ def play_desktop(
     if _HLS_LOCAL_SUBTITLES and is_hls and subtitles:
         from ..media.mpv_subtitle_files import SubtitleFilesCancelled, prepare_subtitle_files
         try:
-            prepared_subtitles = (prepare_subtitle_files_fn or prepare_subtitle_files)(
+            prepared_subtitles = _prepare_with_timing(
+                'subtitle-files', prepare_subtitle_files_fn or prepare_subtitle_files,
                 subtitles, headers=headers, referer=referer, cancel_check=cancel_check,
             )
             subtitles = prepared_subtitles.subtitles
@@ -218,7 +245,8 @@ def play_desktop(
     ):
         try:
             from ..media.local_proxy import replace_active_local_proxy, start_local_proxy
-            url, proxy_server = (prepare_proxy_fn or start_local_proxy)(
+            url, proxy_server = _prepare_with_timing(
+                'local-proxy', prepare_proxy_fn or start_local_proxy,
                 url,
                 referer,
                 headers,
@@ -256,11 +284,25 @@ def play_desktop(
         show_id, mal_id, episode, stream.get("source_name"), resolution,
         skip_lookup is not None,
     )
+    subtitle_job = None
     try:
+        if deferred_subtitles:
+            from .subtitle_job import SubtitleJob
+            subtitle_job = SubtitleJob(
+                deferred_subtitles, headers, referer, float(stream.get('duration') or 0),
+                _HLS_LOCAL_SUBTITLES and is_hls,
+            )
         if start_player_fn is not None:
-            start_player_fn(ipc_player)
+            _prepare_with_timing('mpv-start', start_player_fn, ipc_player)
+        if subtitle_job is not None:
+            subtitles = subtitle_job.poll() or []
+            subtitle_url = next(
+                (s.get('url') or s.get('file') for s in subtitles if s.get('default')),
+                (subtitles[0].get('url') or subtitles[0].get('file') or '') if subtitles else '',
+            )
         with playback_input_scope() if playback_input_scope else nullcontext(False) as terminal_managed:
-            ipc_player.load(
+            _prepare_with_timing(
+                'mpv-load', ipc_player.load,
                 url,
                 media_title,
                 headers,
@@ -291,6 +333,13 @@ def play_desktop(
                 "next_episode": next_episode,
             }
             update_stream_info(stream_info)
+            load_serial = getattr(ipc_player, '_load_serial', None)
+
+            def poll_subtitles():
+                tracks = subtitle_job.poll()
+                if tracks:
+                    ipc_player.queue_subtitles(tracks, load_serial=load_serial)
+
             result, played_seconds = ipc_player.wait_for_playback(
                 stream_info,
                 episode,
@@ -298,10 +347,13 @@ def play_desktop(
                 fetch_callback,
                 is_binge,
                 **({"terminal_managed": True} if terminal_managed else {}),
+                **({'poll_subtitles': poll_subtitles} if subtitle_job is not None else {}),
             )
     except PlaybackPreparationCancelled:
         return ("CANCELLED", 0, 0, 0, 0)
     finally:
+        if subtitle_job is not None:
+            subtitle_job.close()
         if prepared_subtitles is not None:
             prepared_subtitles.close()
         if proxy_server is not None:

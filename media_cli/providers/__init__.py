@@ -12,6 +12,7 @@ from typing import Any
 from ..provider_manifest import (
     _PROVIDER_ALIASES,
     PROVIDER_REGISTRY,
+    RETIRED_PROVIDERS,
     disabled_providers_from_config,
 )
 from ..provider_manifest import _RegistryDict as _RegistryDict
@@ -20,7 +21,7 @@ from .shared.models import title_provider_key as title_provider_key
 
 _SKIPPED_MODULES = {"shared"}
 _DISABLED_PROVIDERS: set[str] = set()
-_DEFAULT_PROVIDER_ID = "miruro"
+_DEFAULT_PROVIDER_ID = "anipm"
 _SESSION_PROVIDERS: OrderedDict[tuple, Any] = OrderedDict()
 _SESSION_PROVIDERS_LOCK = Lock()
 _MAX_SESSION_PROVIDERS = 16
@@ -170,12 +171,6 @@ PROVIDER_FACTORIES = _ProviderFactories()
 PROVIDERS = _ProviderInstances()
 
 
-def __getattr__(name: str):
-    if name == "ALLANIME":
-        return PROVIDERS["mkissa"]
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-
 def available_providers():
     disabled = _DISABLED_PROVIDERS | disabled_providers_from_config()
     return _AvailableProviders(key for key, meta in PROVIDER_REGISTRY.items()
@@ -202,6 +197,8 @@ def is_provider_active(provider_id: str) -> bool:
 
 def provider_key(provider_id=_DEFAULT_PROVIDER_ID):
     key = _canonical_key(provider_id or "")
+    if key in RETIRED_PROVIDERS:
+        return key  # Preserve legacy identity; never route it to another provider.
     if is_provider_active(key):
         return key
     alias = _PROVIDER_ALIASES.get(key)
@@ -217,6 +214,8 @@ def provider_key(provider_id=_DEFAULT_PROVIDER_ID):
 
 
 def get_provider(provider_id=_DEFAULT_PROVIDER_ID, request_json_fn=None):
+    if _canonical_key(provider_id or "") in RETIRED_PROVIDERS:
+        raise ValueError(f"Provider {provider_id!r} is no longer included. Choose another provider.")
     key = provider_key(provider_id)
     if key not in PROVIDERS and key in _PROVIDER_ALIASES:
         key = _PROVIDER_ALIASES[key]

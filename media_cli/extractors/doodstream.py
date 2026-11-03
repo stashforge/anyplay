@@ -9,6 +9,7 @@ import urllib.parse
 
 from .base import BaseExtractor
 from .routing import ROUTES
+from ..services.http import UA
 
 
 class DoodExtractor(BaseExtractor):
@@ -25,13 +26,17 @@ class DoodExtractor(BaseExtractor):
         name: str = "",
         priority: int = 2,
         subtitles: list[dict] | None = None,
+        headers: dict[str, str] | None = None,
+        referer: str | None = None,
     ) -> list[dict]:
         parsed = urllib.parse.urlparse(url)
         dood_host = parsed.netloc
+        request_headers = {k: v for k, v in (headers or {}).items() if k.lower() != 'referer'}
+        request_headers.setdefault('User-Agent', UA)
 
         # Convert /d/<id> to /e/<id> if necessary
         embed_url = url.replace("/d/", "/e/")
-        html = self.fetch_page(embed_url, referer=f"https://{dood_host}/")
+        html = self.fetch_page(embed_url, referer=referer or f"https://{dood_host}/", headers=request_headers)
         if not html or "'/pass_md5/" not in html:
             return []
 
@@ -40,7 +45,7 @@ class DoodExtractor(BaseExtractor):
             token = md5_path.split("/")[-1]
 
             pass_url = f"https://{dood_host}/pass_md5/{md5_path}"
-            video_url_prefix = self.fetch_page(pass_url, referer=embed_url).strip()
+            video_url_prefix = self.fetch_page(pass_url, referer=embed_url, headers=request_headers).strip()
             if not video_url_prefix or not video_url_prefix.startswith("http"):
                 return []
 
@@ -56,7 +61,7 @@ class DoodExtractor(BaseExtractor):
                 "resolution": "720p",
                 "referer": f"https://{dood_host}/",
                 "headers": {
-                    "User-Agent": "Mozilla/5.0",
+                    **request_headers,
                     "Referer": f"https://{dood_host}/",
                 },
                 "source_priority": priority,

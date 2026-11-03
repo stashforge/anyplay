@@ -70,7 +70,11 @@ def test_cancelled_probe_cannot_commit_late_result_and_retry_is_fresh(monkeypatc
         thread = threading.Thread(target=work)
         threads.append(thread)
         thread.start()
-        assert started.wait(1)
+        if recovery:
+            thread.join(1)
+            assert not thread.is_alive()
+        else:
+            assert started.wait(1)
         raise PreparationCancelled
 
     monkeypatch.setattr(player_screen, "run_loading_work", cancel)
@@ -98,15 +102,15 @@ def test_download_probe_bypasses_player_ui(monkeypatch):
     assert playback_player._probe_player_mirrors((candidate,), KEY, download=True) is candidate
 
 
-def test_recovery_probes_all_candidates_without_reusing_or_updating_validation(monkeypatch):
+def test_recovery_skips_probes_without_updating_validation(monkeypatch):
     now = playback_player.time.time()
     candidates = tuple({"link": str(i), "validated_at": now} for i in range(4))
     probes = []
     monkeypatch.setattr(player_screen, "run_loading_work", lambda work, **kw: work())
     monkeypatch.setattr(playback_player.app_core, "ping_stream_liveness", lambda c, **kw: probes.append(c["link"]) or c["link"] == "3")
     monkeypatch.setattr(playback_player.app_core, "_prune_dead_stream", lambda *a: pytest.fail("Recovery must not prune"))
-    assert playback_player._probe_player_mirrors(candidates, KEY, recovery=True) is candidates[3]
-    assert probes == ["0", "1", "2", "3"]
+    assert playback_player._probe_player_mirrors(candidates, KEY, recovery=True) is candidates[0]
+    assert probes == []
     assert all(c["validated_at"] == now for c in candidates)
 
 
@@ -117,3 +121,16 @@ def test_recovery_keeps_first_candidate_fallback_when_every_probe_fails(monkeypa
     monkeypatch.setattr(playback_player.app_core, "_prune_dead_stream", lambda *a: pytest.fail("Recovery must not prune"))
     assert playback_player._probe_player_mirrors(candidates, KEY, recovery=True) is candidates[0]
     assert candidates == ({"link": "first"}, {"link": "second"})
+
+
+def test_recovery_selects_without_extra_network_roundtrip(monkeypatch, caplog):
+    import logging
+
+    candidates = ({'link': 'https://cdn.example/video?secret=token', 'source_name': 'Ok.ru'},)
+    monkeypatch.setattr(player_screen, 'run_loading_work', lambda work, **kw: work())
+    monkeypatch.setattr(playback_player.app_core, 'ping_stream_liveness',
+                        lambda *a, **kw: pytest.fail('Recovery performed another HTTP probe'))
+    with caplog.at_level(logging.DEBUG, logger=playback_player.__name__):
+        assert playback_player._probe_player_mirrors(candidates, KEY, recovery=True) is candidates[0]
+    assert 'probe=skipped' in caplog.text
+    assert 'secret=token' not in caplog.text

@@ -14,7 +14,7 @@ import urllib.request
 from email.message import Message
 from functools import partial
 from pathlib import Path
-from threading import Event, Lock
+from threading import Lock
 from urllib.parse import urlsplit
 
 from ...core.processes import is_termux
@@ -23,7 +23,7 @@ from .challenge import is_verification_challenge
 from .clearance import Clearance, ClearanceStore, request_with_clearance
 from .diagnostics import record
 from .http_pool import ClearanceHttpPool
-from .operation import current_operation
+from .operation import current_operation, shutdown_event
 from .policy import BrowserPolicy
 from .process import _RequestCancellation
 from .profiles import BrowserAccessCancelled
@@ -33,7 +33,7 @@ RECOVERY_PROVIDERS = frozenset({"animepahe", "animexin"})
 _services: dict[tuple[Path, bool], tuple[BrowserAccess, tempfile.TemporaryDirectory | None]] = {}
 _services_lock = Lock()
 _http_pools: dict[tuple[Path, bool], ClearanceHttpPool] = {}
-_shutdown = Event()
+_shutdown = shutdown_event
 # Explicit image capabilities, not wildcard subdomain credential sharing.
 _IMAGE_ROUTES = {"https://i.animepahe.pw": ("animepahe", "https://animepahe.pw", "/uploads/posters/")}
 

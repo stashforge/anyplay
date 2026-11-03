@@ -1,6 +1,13 @@
 """Pure playback completion, navigation, and OSD rules."""
 
 
+def startup_loading_status(elapsed, timeout=None):
+    seconds = max(0, int(elapsed))
+    if elapsed >= 10:
+        return f"Taking longer than usual… ({seconds}s)"
+    return f"Loading video… ({seconds}s)"
+
+
 def should_clear_query_on_child_left(previous, direct_single):
     return bool(direct_single) and previous in ("SEARCH", "ANILIST_SEARCH")
 

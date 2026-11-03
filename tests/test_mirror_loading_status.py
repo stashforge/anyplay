@@ -47,7 +47,7 @@ def test_mirror_loading_states_use_shared_status_and_retire(monkeypatch, next_st
                 checks.append((active, progress))
             elif self._spec.task_id == "torrent-search":
                 torrents.append((active, progress))
-            else:
+            elif self._spec.task_id == "initial-sources":
                 reads.append(active)
             return super().read(active, progress=progress)
 
@@ -64,7 +64,7 @@ def test_mirror_loading_states_use_shared_status_and_retire(monkeypatch, next_st
     if next_state == "hint-fresh":
         monkeypatch.setattr(menu.app_core, "with_loading", lambda *args, **kwargs: data)
     monkeypatch.setattr(menu.app_core, "_set_cached_ep_data", lambda *args: None)
-    monkeypatch.setattr(menu.app_core, "_stream_snapshot", lambda *args: [])
+    monkeypatch.setattr(menu.app_core, "_stream_snapshot", lambda *args, **kwargs: [])
     monkeypatch.setattr(menu.app_core, "make_single_show_info_fn", lambda *args: None)
     from media_cli.services.requirements import MissingPythonDependency
 
@@ -75,7 +75,7 @@ def test_mirror_loading_states_use_shared_status_and_retire(monkeypatch, next_st
         if dependency_case else ((), None)
     ))
     if next_state == "dependency-alternative":
-        monkeypatch.setattr(menu.app_core, "_stream_snapshot", lambda *a: [{"link": "good", "source_name": "Good", "resolution": "720p"}])
+        monkeypatch.setattr(menu.app_core, "_stream_snapshot", lambda *a, **kw: [{"link": "good", "source_name": "Good", "resolution": "720p"}])
 
     def pick(*args, **kwargs):
         if dependency_case:

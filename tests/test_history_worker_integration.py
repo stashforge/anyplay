@@ -62,6 +62,12 @@ def test_background_refresh_does_not_touch_rows_until_owner_drain(monkeypatch, f
 
     monkeypatch.setattr(search.app_core, "patch_history_entry_state", persist)
 
+    def persist_batch(entries):
+        writes.append(get_ident())
+        persisted.extend(deepcopy(entries))
+
+    monkeypatch.setattr(search.app_core, "patch_history_entries_state", persist_batch, raising=False)
+
     def refresh(entry):
         assert get_ident() != owner
         if entry["show"]["_id"] == "failed":
@@ -95,6 +101,7 @@ def test_background_refresh_does_not_touch_rows_until_owner_drain(monkeypatch, f
         assert live["availableEpisodes"]["sub"] == 11
         assert live["_episode_ids"][-1] == "11"
         assert writes and all(thread == owner for thread in writes + rebuilds)
+        assert len(writes) == 1, "One UI drain must persist accepted refreshes as one batch"
         accepted = next(entry for entry in persisted if entry["show"]["_id"] == "one")
         assert accepted["episode"] == "11"
         assert accepted["progress"] == 11

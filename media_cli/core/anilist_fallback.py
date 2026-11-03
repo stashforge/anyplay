@@ -152,7 +152,7 @@ def search_mal(query: str) -> dict:
         if not mal_id:
             continue
 
-        ani_id = mal_id  # Fallback to mal_id if MalSync resolution is unavailable
+        ani_id = None
         try:
             ms_req = urllib.request.Request(
                 f"https://api.malsync.moe/mal/anime/{mal_id}",
@@ -161,10 +161,16 @@ def search_mal(query: str) -> dict:
             with urllib.request.urlopen(ms_req, timeout=5) as m_res:
                 ms_data = json.loads(m_res.read().decode("utf-8"))
                 found_ani_id = _extract_ani_id(ms_data)
-                if found_ani_id:
+                if isinstance(found_ani_id, int) and not isinstance(found_ani_id, bool) and found_ani_id > 0:
                     ani_id = found_ani_id
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Last-resort MAL mapping unavailable: mal_id=%s error=%s", mal_id, type(exc).__name__)
+
+        if ani_id is None:
+            # Consumers of this fallback expect AniList-shaped media identities.
+            # A MAL number in the AniList id field can select a different anime.
+            logger.debug("Skipping unmapped MAL search result: mal_id=%s", mal_id)
+            continue
 
         title_dict = {
             "english": item.get("title_english"),

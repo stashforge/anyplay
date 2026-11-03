@@ -32,18 +32,8 @@ native-crypto = [
 legacy-browser = [
     "playwright>=1.48.0",
 ]
-# Compatibility extra names retained for existing installation commands.
-allanime = [
-    "cryptography>=41.0.0",
-]
-allanime-termux = [
-    "pycryptodome>=3.19.0",
-]
 crypto-termux = [
     "pycryptodome>=3.19.0",
-]
-miruro = [
-    "curl_cffi>=0.7.4",
 ]
 animepahe-browser = [
     "playwright>=1.48.0",

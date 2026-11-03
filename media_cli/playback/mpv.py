@@ -2,7 +2,9 @@
 
 import json
 import logging
+import math
 import os
+import random
 import select
 import socket
 import subprocess
@@ -25,6 +27,7 @@ from .rules import (
     prefetch_matches_request,
     skip_prompt_osd,
     skipped_interval_osd,
+    startup_loading_status,
 )
 
 _logger = logging.getLogger(__name__)
@@ -61,6 +64,44 @@ class MpvIpc:
         self._pending_subtitle_url = ""
         self._remote_skip_lookup = None
         self._remote_skips_enabled = False
+        self._active_entry_id = None
+        self._replaced_entry_ids = set()
+        self._ipc_buffer = ""
+        self._played_in_process = False
+        self._load_url = None
+        self._load_serial = 0
+        self._awaiting_start_file = False
+
+    def _track_file_event(self, msg):
+        """Identify end events for entries explicitly replaced by load()."""
+        entry_id = msg.get("playlist_entry_id")
+        if not isinstance(entry_id, int) or isinstance(entry_id, bool):
+            return False
+        if msg.get("event") == "start-file":
+            self._active_entry_id = entry_id
+        elif msg.get("event") == "end-file":
+            replaced = entry_id in self._replaced_entry_ids
+            self._replaced_entry_ids.discard(entry_id)
+            if self._active_entry_id == entry_id:
+                self._active_entry_id = None
+            return replaced
+        return False
+
+    def _record_playback_end(self, event, *, reason=None, error=None, pending_action=None):
+        def label(value, limit):
+            text = str(value)[:limit] if value is not None else None
+            return '[URL omitted]' if text and '://' in text else text
+
+        try:
+            returncode = self.process.poll() if self.process is not None else None
+        except Exception:
+            returncode = None
+        _logger.debug(
+            "mpv exit diagnostic: event=%s reason=%r error=%r process_returncode=%r "
+            "pending_action=%r expected_transition=%s",
+            label(event, 32), label(reason, 32), label(error, 160), returncode,
+            label(pending_action, 32), bool(self._replaced_entry_ids),
+        )
 
     def start(self, *, cancel_check=None):
         def check_cancelled():
@@ -75,13 +116,19 @@ class MpvIpc:
         from ..services.requirements import require_executable
 
         require_executable("mpv", "Desktop playback")
+        self._played_in_process = False
+        self._active_entry_id = None
+        self._replaced_entry_ids.clear()
+        self._ipc_buffer = ""
         cleanup_mpv_runtime(self.runtime_dir)
         self.runtime_dir, self.socket_path, self.conf_path, self.chapters_path, self.lua_path = create_mpv_runtime()
+        from ..context import FLAGS
+        window = "yes" if FLAGS.mpv_window == "immediate" else "no"
         try:
             self.process = subprocess.Popen([
                 "mpv", "--idle=yes", "--keep-open=no", f"--input-ipc-server={self.socket_path}",
                 f"--input-conf={self.conf_path}", f"--chapters-file={self.chapters_path}",
-                f"--script={self.lua_path}", "--force-window=yes", "--no-ytdl", "--input-terminal=no",
+                f"--script={self.lua_path}", f"--force-window={window}", "--no-ytdl", "--input-terminal=no",
                 "--autoload-files=no", "--osd-shadow-offset=2", "--osd-shadow-color=#B0000000",
             ], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -107,6 +154,8 @@ class MpvIpc:
         self.send_cmd("observe_property", 5, "paused-for-cache")
         self.send_cmd("observe_property", 6, "cache-buffering-state")
         self.send_cmd("observe_property", 7, "demuxer-cache-duration")
+        for observer_id, name in enumerate(('aid', 'mute', 'volume', 'audio-codec', 'audio-params'), 8):
+            self.send_cmd('observe_property', observer_id, name)
 
     def adopt_startup(self, prepared):
         """Move an accepted startup's process/socket into the persistent player."""
@@ -128,7 +177,8 @@ class MpvIpc:
             msg = json.dumps({"command": list(args)}) + "\n"
             self.client.sendall(msg.encode("utf-8"))
             self.running = True
-        except Exception:
+        except Exception as exc:
+            _logger.debug('mpv IPC send failed: exception=%s', type(exc).__name__)
             self.running = False
 
     def load(
@@ -136,14 +186,27 @@ class MpvIpc:
             audio_url="", subtitle_url="", subtitles=None, skip_intervals=None, aniskip_auto=True, audio_tracks=None,
             suppress_chapters=False, skip_lookup=None):
         self.start()
+        self._startup_osd_enabled = self._played_in_process
         self.running = True
         if self.client:
             try:
                 while True:
+                    while "\n" in self._ipc_buffer:
+                        line, self._ipc_buffer = self._ipc_buffer.split("\n", 1)
+                        try:
+                            self._track_file_event(json.loads(line))
+                        except (ValueError, AttributeError):
+                            pass
                     d = self.client.recv(8192)
                     if not d: break
+                    self._ipc_buffer += d.decode("utf-8")
             except (OSError, BlockingIOError):
                 pass
+        self._awaiting_start_file = bool(self._active_entry_id is not None
+                                         or self._replaced_entry_ids or self._awaiting_start_file)
+        if self._active_entry_id is not None:
+            self._replaced_entry_ids.add(self._active_entry_id)
+            self._active_entry_id = None
         self.props["playback-time"] = 0
         self.props["duration"] = 0
         self.props["pause"] = False
@@ -176,7 +239,7 @@ class MpvIpc:
             self.send_cmd("set_property", "referrer", ref)
         hf = [f"{k}: {v}" for k, v in headers_dict.items()]
         if hf:
-            self.send_cmd("set_property", "http-header-fields", ",".join(hf))
+            self.send_cmd("set_property", "http-header-fields", hf)
 
         # Override user's save-position-on-quit config to prevent cache hijacking
         self.send_cmd("set_property", "resume-playback", False)
@@ -208,6 +271,9 @@ class MpvIpc:
             except Exception:
                 pass
 
+        self._load_started_mono = time.monotonic()
+        self._load_serial = getattr(self, '_load_serial', 0) + 1
+        self._load_url = url
         if getattr(self, "resume_time", 0) > 0:
             self.send_cmd("loadfile", url, "replace", -1, f"start={int(self.resume_time)}")
         else:
@@ -251,7 +317,26 @@ class MpvIpc:
                       [(row.get("type"), row.get("start"), row.get("end")) for row in intervals],
                       self.props.get("duration"))
 
+    def queue_subtitles(self, tracks, *, load_serial):
+        """Called only by the playback owner; reject a retired load's result."""
+        if load_serial != self._load_serial:
+            return
+        self._pending_subtitles = list(tracks)
+        self._pending_subtitle_url = next(
+            (s.get('url') or s.get('file') for s in tracks if s.get('default')),
+            (tracks[0].get('url') or tracks[0].get('file') or '') if tracks else '',
+        )
+        if getattr(self, 'file_loaded', False) and not self._awaiting_start_file:
+            self._attach_pending_external_tracks()
+
     def _attach_pending_external_tracks(self):
+        if not any((getattr(self, '_pending_audio_tracks', None), self._pending_audio_url,
+                    getattr(self, '_pending_subtitles', None), self._pending_subtitle_url)):
+            return
+        _logger.debug('mpv external tracks: entry=%r audio_tracks=%d audio_url=%s subtitles=%d subtitle_url=%s',
+                      self._active_entry_id, len(getattr(self, '_pending_audio_tracks', ()) or ()),
+                      bool(self._pending_audio_url), len(getattr(self, '_pending_subtitles', ()) or ()),
+                      bool(self._pending_subtitle_url))
         if getattr(self, "_pending_audio_tracks", None):
             has_selected = False
             for track in self._pending_audio_tracks:
@@ -311,12 +396,18 @@ class MpvIpc:
                         pass
             self.process = None
         self.running = False
+        self._played_in_process = False
+        self._active_entry_id = None
+        self._replaced_entry_ids.clear()
+        self._ipc_buffer = ""
+        self._load_url = None
+        self._awaiting_start_file = False
         cleanup_mpv_runtime(self.runtime_dir)
         self.runtime_dir = None
         self.socket_path = None
         self.conf_path = None
 
-    def wait_for_playback(self, ui_info, current_ep, total_eps, fetch_callback, is_binge=False, *, terminal_managed=False):
+    def wait_for_playback(self, ui_info, current_ep, total_eps, fetch_callback, is_binge=False, *, terminal_managed=False, poll_subtitles=None):
         tty_fd = sys.stdin.fileno()
         if not terminal_managed and os.isatty(tty_fd):
             old_attrs = termios.tcgetattr(tty_fd)
@@ -325,7 +416,7 @@ class MpvIpc:
             old_attrs = None
 
         result = "QUIT"
-        buf = ""
+        buf, self._ipc_buffer = self._ipc_buffer, ""
         want_skip_to = None
         want_skip_ep = None
         notify_prefetched = None
@@ -335,13 +426,69 @@ class MpvIpc:
         last_playback_tick = time.monotonic()
         playback_start_mono = time.monotonic()
         last_time_pos_change = playback_start_mono
-        last_cache_flush = playback_start_mono
         file_loaded = False
         last_observed_playback_time = -1.0
         max_playback_time = float(getattr(self, "resume_time", 0) or 0.0)
-        normal_stall_timeout = float(getattr(self, "normal_stall_timeout", 20.0) or 20.0)
-        seek_stall_timeout = float(getattr(self, "seek_stall_timeout", 30.0) or 30.0)
-        startup_timeout = float(getattr(self, "startup_timeout", 15.0) or 15.0)
+        self.props["_startup_elapsed"] = 0.0
+        self.props['_mirror_wait_message'] = None
+        prompt_active = False
+        prompt_second = None
+        prompt_serial = str(self._load_serial)
+        wait_message = random.choice((
+            'Still loading… Press Enter to try the next mirror.',
+            'Taking a little longer… Press Enter to switch mirrors.',
+            'Still waiting for playback… Press Enter to try another mirror.',
+        ))
+        timing_started = getattr(self, "_load_started_mono", None)
+        if timing_started is None:
+            timing_started = playback_start_mono
+        timing_stages = set()
+        last_startup_osd_second = None
+        event_counts = {}
+        retired_notifications = set()
+        handler_errors = set()
+        probe_requests = {}
+        probe_states = {}
+        next_probe_at = 20.0
+        probe_number = 0
+        next_state_log_at = 10.0
+
+        def clear_mirror_prompt():
+            nonlocal prompt_active, prompt_second
+            if prompt_active:
+                self.send_cmd('script-message', 'set_mirror_prompt', prompt_serial, 'no')
+                self.send_cmd('show-text', '')
+            prompt_active = False
+            prompt_second = None
+            self.props['_mirror_wait_message'] = None
+
+        def clear_startup_osd():
+            nonlocal last_startup_osd_second
+            clear_mirror_prompt()
+            if last_startup_osd_second is not None:
+                self.send_cmd("show-text", "")
+                last_startup_osd_second = None
+
+        def record_startup_timing(stage, event):
+            if stage in timing_stages:
+                return
+            timing_stages.add(stage)
+            if stage == "ready":
+                if not self._played_in_process:
+                    # Videos create their normal output window when initialized;
+                    # audio-only media gets its player window once ready as well.
+                    self.send_cmd("set_property", "force-window", True)
+                self._played_in_process = True
+
+            def label(value, limit):
+                text = str(value or "")
+                return "[URL omitted]" if "://" in text else text[:limit]
+
+            _logger.debug(
+                "mpv startup timing: stage=%s elapsed=%.3fs mirror=%r quality=%r event=%s",
+                stage, max(0.0, time.monotonic() - timing_started),
+                label(ui_info.get("mirror"), 120), label(ui_info.get("quality"), 64), event,
+            )
 
         def do_fetch(ep_target, action):
             nonlocal notify_prefetched
@@ -383,7 +530,13 @@ class MpvIpc:
 
         def redraw():
             if self.redraw_callback:
-                self.redraw_callback(self.props)
+                try:
+                    self.redraw_callback(self.props)
+                except Exception as exc:
+                    error = ('redraw', type(exc).__name__)
+                    if error not in handler_errors:
+                        handler_errors.add(error)
+                        _logger.debug('mpv redraw failed: exception=%s', type(exc).__name__)
 
         def process_exited():
             try:
@@ -395,7 +548,45 @@ class MpvIpc:
             done = False
             pending_action = None
             while self.running and not done:
+                if poll_subtitles is not None:
+                    poll_subtitles()
                 now = time.monotonic()
+                elapsed = max(0.0, now - playback_start_mono)
+                if not file_loaded and elapsed >= next_state_log_at:
+                    next_state_log_at += 10.0
+                    _logger.debug(
+                        'mpv startup state: elapsed=%.2f position=%r duration=%r pause=%r cache_pause=%r '
+                        'buffering=%r events=%r handler_errors=%d buffered_bytes=%d',
+                        elapsed, self.props.get('playback-time'), self.props.get('duration'),
+                        self.props.get('pause'), self.props.get('paused-for-cache'),
+                        self.props.get('cache-buffering-state'), event_counts, len(handler_errors), len(buf),
+                    )
+                if not file_loaded and elapsed >= next_probe_at:
+                    next_probe_at += 5.0
+                    # Waiting is unlimited; retain only the latest probe pair.
+                    probe_number += 1
+                    probe_states.clear()
+                    probe_requests.clear()
+                    probe_states[probe_number] = {}
+                    for property_name in ('path', 'time-pos'):
+                        request_id = f"startup:{getattr(self, '_load_serial', 0)}:{probe_number}:{property_name}"
+                        try:
+                            self.client.sendall((json.dumps({
+                                'command': ['get_property', property_name], 'request_id': request_id,
+                            }) + '\n').encode())
+                            probe_requests[request_id] = (probe_number, property_name)
+                            _logger.debug('mpv readiness query sent: property=%s elapsed=%.2f', property_name, elapsed)
+                        except Exception as exc:
+                            _logger.debug('mpv readiness query send failed: exception=%s', type(exc).__name__)
+                self.props["_startup_elapsed"] = None if file_loaded else max(0.0, now - playback_start_mono)
+                if not file_loaded and not prompt_active and getattr(self, "_startup_osd_enabled", False):
+                    startup_elapsed = self.props["_startup_elapsed"]
+                    if int(startup_elapsed) != last_startup_osd_second:
+                        last_startup_osd_second = int(startup_elapsed)
+                        mirror = str(ui_info.get("mirror") or "mirror").replace("\n", " ").replace("\r", " ")[:120]
+                        self.send_cmd(
+                            "show-text", f"Loading {mirror}\n{startup_loading_status(startup_elapsed)}", 1500,
+                        )
                 elapsed = max(0.0, now - last_playback_tick)
                 last_playback_tick = now
                 self._refresh_remote_skips()
@@ -466,7 +657,6 @@ class MpvIpc:
                             episode_transition_osd(want_skip_to, "starting"),
                             TRANSITION_OSD_MS,
                         )
-                        self.expect_ghost_eof = True
                         result = want_skip_to
                         want_skip_to = None
                         want_skip_ep = None
@@ -489,6 +679,10 @@ class MpvIpc:
                     if key.lower() == 'q':
                         pending_action = "QUIT"
                         self.send_cmd("stop")
+                    elif key in ('\r', '\n') and prompt_active:
+                        result = 'NEXT_MIRROR'
+                        self.send_cmd('stop')
+                        break
                     elif key == '\t' and not self.aniskip_auto and self.skip_intervals:
                         curr_time = self.props.get("playback-time", 0) or 0
                         for s_idx, s_item in enumerate(self.skip_intervals):
@@ -513,9 +707,10 @@ class MpvIpc:
                     try:
                         data = self.client.recv(4096)
                         if not data:
+                            self._record_playback_end('ipc-disconnect', pending_action=pending_action)
                             if pending_action:
                                 result = pending_action
-                            elif not file_loaded and (now - playback_start_mono) < startup_timeout:
+                            elif not file_loaded:
                                 result = "ERROR"
                             else:
                                 result = "QUIT"
@@ -527,11 +722,60 @@ class MpvIpc:
                             try:
                                 msg = json.loads(line)
                                 ev = msg.get("event")
+                                if ev in ('start-file', 'file-loaded', 'playback-restart', 'seek', 'end-file', 'property-change'):
+                                    event_counts[ev] = event_counts.get(ev, 0) + 1
+                                    if ev != 'property-change':
+                                        _logger.debug('mpv lifecycle: event=%s elapsed=%.2f entry=%r',
+                                                      ev, now - playback_start_mono, self._active_entry_id)
+                                query = probe_requests.pop(msg.get('request_id'), None)
+                                if query is not None:
+                                    probe_number, property_name = query
+                                    success = msg.get('error') == 'success'
+                                    state = probe_states[probe_number]
+                                    if success:
+                                        state[property_name] = msg.get('data')
+                                    position = state.get('time-pos')
+                                    current_file = isinstance(state.get('path'), str) and state['path'] == getattr(self, '_load_url', None)
+                                    _logger.debug('mpv readiness query reply: property=%s success=%s current_file=%s',
+                                                  property_name, success, current_file)
+                                    if (not file_loaded and not self._awaiting_start_file and current_file and isinstance(position, (int, float))
+                                            and not isinstance(position, bool) and math.isfinite(position) and position > 0):
+                                        file_loaded = self.file_loaded = True
+                                        self.props['playback-time'] = position
+                                        self.props['_startup_elapsed'] = None
+                                        max_playback_time = max(max_playback_time, position)
+                                        last_observed_playback_time = position
+                                        last_time_pos_change = now
+                                        clear_startup_osd()
+                                        record_startup_timing('ready', 'state-query')
+                                        self._attach_pending_external_tracks()
+                                if ev == "start-file":
+                                    if msg.get('playlist_entry_id') in self._replaced_entry_ids:
+                                        _logger.debug('Ignoring retired mpv notification: event=start-file')
+                                        continue
+                                    self._track_file_event(msg)
+                                    if self._awaiting_start_file and self._active_entry_id is not None:
+                                        _logger.debug('mpv replacement started: entry=%r queued=%.3fs',
+                                                      self._active_entry_id, now - playback_start_mono)
+                                        self._awaiting_start_file = False
+                                        file_loaded = self.file_loaded = False
+                                        playback_start_mono = now
+                                        last_time_pos_change = last_playback_tick = now
+                                        next_probe_at, next_state_log_at = 20.0, 10.0
+                                        probe_requests.clear()
+                                        self.props['_startup_elapsed'] = 0.0
+                                if (self._awaiting_start_file
+                                        and ev in ('file-loaded', 'playback-restart', 'seek', 'property-change')):
+                                    if ev not in retired_notifications:
+                                        retired_notifications.add(ev)
+                                        _logger.debug('Ignoring retired mpv notification: event=%s', ev)
+                                    continue
                                 if ev == "file-loaded":
+                                    clear_startup_osd()
+                                    record_startup_timing("loaded", ev)
                                     file_loaded = True
                                     self.file_loaded = True
-                                    last_time_pos_change = now
-                                    last_cache_flush = now
+                                    self.props["_startup_elapsed"] = None
                                     self._attach_pending_external_tracks()
                                     if self.skip_intervals:
                                         self.send_cmd(
@@ -541,13 +785,25 @@ class MpvIpc:
                                             "yes" if self.aniskip_auto else "no",
                                         )
                                 elif ev in ("playback-restart", "seek"):
+                                    clear_startup_osd()
+                                    if ev == "playback-restart":
+                                        record_startup_timing("ready", ev)
+                                        self._attach_pending_external_tracks()
                                     file_loaded = True
                                     self.file_loaded = True
-                                    last_cache_flush = now
+                                    self.props["_startup_elapsed"] = None
                                     last_time_pos_change = now
                                 elif ev == "end-file":
-                                    if getattr(self, "expect_ghost_eof", False):
-                                        self.expect_ghost_eof = False
+                                    self._record_playback_end(
+                                        'end-file', reason=msg.get('reason'), error=msg.get('error'),
+                                        pending_action=pending_action,
+                                    )
+                                    replaced_entry = self._track_file_event(msg)
+                                    if replaced_entry and not pending_action:
+                                        _logger.debug(
+                                            "Ignoring replaced mpv entry end: playlist_entry_id=%s",
+                                            msg.get("playlist_entry_id"),
+                                        )
                                         continue
 
                                     reason = msg.get("reason")
@@ -606,6 +862,16 @@ class MpvIpc:
                                 elif ev == "property-change":
                                     name = msg.get("name")
                                     val = msg.get("data")
+                                    if name in ('aid', 'mute', 'volume', 'audio-codec', 'audio-params'):
+                                        if name == 'audio-params':
+                                            params = val if isinstance(val, dict) else {}
+                                            _logger.debug('mpv audio state: entry=%r available=%s channels=%r samplerate=%r',
+                                                          self._active_entry_id, bool(params),
+                                                          params.get('channel-count'), params.get('samplerate'))
+                                        else:
+                                            value = val if isinstance(val, (bool, int, float)) else bool(val)
+                                            _logger.debug('mpv audio state: entry=%r property=%s value=%r',
+                                                          self._active_entry_id, name, value)
                                     if name in self.props:
                                         if val is not None:
                                             self.props[name] = val
@@ -616,28 +882,24 @@ class MpvIpc:
                                         if name == "playback-time" and val is not None:
                                             curr_val = float(val or 0)
                                             if curr_val > 0.0:
+                                                record_startup_timing("ready", "first-position")
+                                                self._attach_pending_external_tracks()
                                                 file_loaded = True
                                                 self.file_loaded = True
+                                                self.props["_startup_elapsed"] = None
                                             if last_observed_playback_time < 0 or abs(curr_val - last_observed_playback_time) >= 0.01:
                                                 last_time_pos_change = now
-                                                if last_observed_playback_time >= 0 and abs(curr_val - last_observed_playback_time) > 2.0:
-                                                    last_cache_flush = now
                                                 last_observed_playback_time = curr_val
                                             if curr_val > max_playback_time:
                                                 max_playback_time = curr_val
                                         elif name == "pause":
                                             last_time_pos_change = now
-                                            last_cache_flush = now
-                                        elif name == "paused-for-cache" and val:
-                                            last_cache_flush = now
-                                            last_time_pos_change = now
-                                        elif name == "cache-buffering-state" and float(val or 0) > 0:
-                                            last_cache_flush = now
-                                            last_time_pos_change = now
                                         elif name in ("duration", "percent-pos") and float(val or 0) > 0:
                                             file_loaded = True
                                             self.file_loaded = True
 
+                                        if file_loaded:
+                                            clear_startup_osd()
                                         if name == "playback-time" and val is not None and not initial_osd_shown:
                                             initial_osd_shown = True
                                             r_time = getattr(self, "resume_time", 0) or 0
@@ -717,7 +979,6 @@ class MpvIpc:
                                                         countdown_active = False
 
                                                 if rem_sec <= 5 and self.prefetched_stream:
-                                                    self.expect_ghost_eof = True
                                                     result = "NEXT"
                                                     done = True
                                                     break
@@ -725,7 +986,13 @@ class MpvIpc:
                                 elif ev == "client-message":
                                     args = msg.get("args", [])
                                     if args:
-                                        if args[0] in ("skip_interval", "skip_op", "skip_ed") and self.skip_intervals:
+                                        if (args[0] == 'next_mirror' and prompt_active
+                                                and len(args) > 1 and args[1] == prompt_serial):
+                                            result = 'NEXT_MIRROR'
+                                            self.send_cmd('stop')
+                                            done = True
+                                            break
+                                        elif args[0] in ("skip_interval", "skip_op", "skip_ed") and self.skip_intervals:
                                             curr_time = self.props.get("playback-time", 0) or 0
                                             for s_idx, s_item in enumerate(self.skip_intervals):
                                                 s_start = s_item["start"]
@@ -791,35 +1058,41 @@ class MpvIpc:
                                                         ),
                                                         TRANSITION_OSD_MS,
                                                     )
-                            except Exception: pass
+                            except Exception as exc:
+                                error = ('ipc', type(exc).__name__)
+                                if error not in handler_errors:
+                                    handler_errors.add(error)
+                                    _logger.debug('mpv IPC handler failed: exception=%s', type(exc).__name__)
                     except BlockingIOError: pass
 
-                # 1. Check Startup Timeout (Dead link / network hang during initial connect)
-                if not file_loaded and (now - playback_start_mono) > startup_timeout:
-                    result = "ERROR"
-                    self.send_cmd("show-text", playback_failed_osd("timeout"), 5000)
-                    done = True
-                    break
-
-                # 2. Check Ground Truth Stall Invariant (unpaused & clock frozen)
-                if file_loaded:
-                    is_user_paused = bool(self.props.get("pause", False))
-                    if is_user_paused:
-                        # While paused, keep both timers fresh so we don't fire on resume.
-                        last_time_pos_change = now
-                        last_cache_flush = now
-                    else:
-                        # in_grace: we recently seeked/flushed — give the stream more time.
-                        in_grace = (now - last_cache_flush) < seek_stall_timeout
-                        active_timeout = seek_stall_timeout if in_grace else normal_stall_timeout
-                        if (now - last_time_pos_change) >= active_timeout:
-                            result = "ERROR"
-                            self.send_cmd("show-text", playback_failed_osd("stalled"), 5000)
-                            done = True
-                            break
+                # Silence is not proof of failure. Offer a choice, never expire
+                # a slow startup/buffering attempt or count a user pause as a stall.
+                if self.props.get('pause'):
+                    last_time_pos_change = now
+                if not done and not self.props.get('pause') and now - last_time_pos_change >= 60:
+                    if not prompt_active:
+                        prompt_active = True
+                        self.props['_mirror_wait_message'] = wait_message
+                        self.send_cmd('script-message', 'set_mirror_prompt', prompt_serial, 'yes')
+                        _logger.debug('mpv slow mirror choice: entry=%r idle=%.2fs',
+                                      self._active_entry_id, now - last_time_pos_change)
+                    if prompt_second != int(now):
+                        prompt_second = int(now)
+                        self.send_cmd('show-text', wait_message, 1500)
+                else:
+                    clear_mirror_prompt()
 
                 redraw()
         finally:
+            clear_mirror_prompt()
+            # Idle mode is useful for episode/mirror transitions, but must not
+            # leave an empty window up while the caller saves completion state.
+            if result == "QUIT" or (result == "EOF" and not is_binge):
+                self.send_cmd("quit")
+            if "ready" not in timing_stages:
+                stage = "failed" if result == "ERROR" else "cancelled" if result == "QUIT" else "ended-before-ready"
+                record_startup_timing(stage, result)
+            self._ipc_buffer = buf
             if old_attrs: termios.tcsetattr(tty_fd, termios.TCSADRAIN, old_attrs)
             print()
 

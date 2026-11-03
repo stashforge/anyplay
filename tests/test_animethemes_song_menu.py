@@ -312,7 +312,7 @@ from media_cli.app.animethemes_song_menu import SongMenuController
 requests = []
 def request_play(song, variant):
     requests.append(song['raw']['id'])
-    print('PLAY_REQUEST:' + str(song['raw']['id']), flush=True)
+    terminal_marker('PLAY_REQUEST:' + str(song['raw']['id']))
 menu = SongMenuController(json.loads({payload!r}), request_play, collection_id='anime:10')
 result = run_view_session(flags, ui, menu.session, poster_manager=manager)
 finish(dict(kind=result, requests=requests, selected=menu.selected_index,

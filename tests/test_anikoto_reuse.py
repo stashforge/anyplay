@@ -106,7 +106,7 @@ def test_registry_reuses_only_anikoto_for_same_callback_and_domains(site):
     first = providers.get_provider("anikoto", callback)
     assert providers.get_provider("ANIKOTO", callback) is first
     assert providers.get_provider("anikoto", Mock()) is not first
-    assert providers.get_provider("miruro", callback) is not providers.get_provider("miruro", callback)
+    assert providers.get_provider("anipm", callback) is not providers.get_provider("anipm", callback)
 
     first.search("OSHI NO KO")
     assert first._get_anime_page("150672")[0] == "562"

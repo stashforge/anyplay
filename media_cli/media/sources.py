@@ -151,6 +151,23 @@ def quality_preference_key(res: str, target: str = "best") -> tuple:
 
 
 
+def stream_quality_preference_key(stream: dict, target: str = "best") -> tuple:
+    """Respect requested quality, then prefer original over equal transcodes/masters."""
+    resolution = str(stream.get("resolution") or stream.get("source_name") or stream.get("sourceName") or "")
+    adaptive = resolution.strip().lower() in ("auto", "adaptive", "default")
+    if not adaptive:
+        return (*quality_preference_key(resolution, target), -1 if stream.get('_is_original') else 0)
+    if str(target or "best").strip().lower() in ("auto", "adaptive"):
+        return (0, 0, 1)
+    try:
+        ceiling = int(stream.get("_max_quality_rank") or 0)
+    except (TypeError, ValueError):
+        ceiling = 0
+    if ceiling <= 0:
+        return (5, 0, 1)
+    return (*quality_preference_key(f"{ceiling}p", target), 1)
+
+
 def decrypt_url(hex_string):
     if not isinstance(hex_string, str):
         return ""

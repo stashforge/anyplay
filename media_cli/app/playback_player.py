@@ -409,6 +409,7 @@ def _auto_delete_watched_downloads(show_ctx, episode_ids, ttype, cfg, ms) -> lis
     buf = int(getattr(ms, "auto_delete_buffer", cfg.get("auto_delete_buffer", 1)))
     if buf < 0:
         return []
+    scan_started = time.perf_counter()
 
     folder_name = show_ctx.get("_folder_name", getattr(ms, "show_title", ""))
     watched_list = show_ctx.get("watched_episodes", [])
@@ -430,6 +431,9 @@ def _auto_delete_watched_downloads(show_ctx, episode_ids, ttype, cfg, ms) -> lis
         progress = None
     episode_indexes = {str(eid): index for index, eid in enumerate(episode_ids)}
     dl_files = getattr(ms, "_download_files", {})
+    # Automatic deletion only owns registered files. Never rediscover the whole
+    # library for each watched episode, or reread its registry hundreds of times.
+    downloads_db = app_core.storage.load_downloads_db()
     watched_dl = []
 
     def _episode_is_watched(eid, eid_lbl) -> bool:
@@ -453,8 +457,10 @@ def _auto_delete_watched_downloads(show_ctx, episode_ids, ttype, cfg, ms) -> lis
         is_downloaded = (
             str(eid) in dl_files
             or str(eid_lbl) in dl_files
-            or bool(app_core.find_offline_file_for_episode(folder_name, eid_lbl, cfg))
-            or bool(app_core.find_offline_file_for_episode(folder_name, str(eid), cfg))
+            or bool(app_core.find_offline_file_for_episode(
+                folder_name, eid_lbl, cfg, registered_only=True, downloads_db=downloads_db))
+            or bool(app_core.find_offline_file_for_episode(
+                folder_name, str(eid), cfg, registered_only=True, downloads_db=downloads_db))
         )
         if is_downloaded:
             watched_dl.append((eid, eid_lbl))
@@ -466,8 +472,8 @@ def _auto_delete_watched_downloads(show_ctx, episode_ids, ttype, cfg, ms) -> lis
         for eid in episode_ids
     )
     effective_buf = 0 if is_finished and all_available_watched else buf
-    _logger.debug("Watched-download cleanup: title=%s watched_downloads=%s buffer=%s",
-                  folder_name, len(watched_dl), effective_buf)
+    _logger.debug("Watched-download cleanup: title=%s watched_downloads=%s buffer=%s scan_elapsed=%.3fs",
+                  folder_name, len(watched_dl), effective_buf, time.perf_counter() - scan_started)
 
     if len(watched_dl) <= effective_buf:
         return []
@@ -578,6 +584,7 @@ def _lookup_player_sources(
 
 def _wait_for_player_streams(
     data: dict | None, key: tuple, *, download: bool = False, poster_manager=None, ui=None,
+    exclude_sources: frozenset[str] = frozenset(), require_exhausted: bool = False,
 ) -> list:
     from copy import deepcopy
     from threading import Event
@@ -588,11 +595,42 @@ def _wait_for_player_streams(
     retired = Event()
 
     def wait_for_streams():
-        deadline = time.monotonic() + 5
-        while not retired.is_set() and time.monotonic() < deadline:
+        from ..media.sources import stream_quality_preference_key
+
+        deadline = None
+        waiting_logged = False
+        while not retired.is_set():
             ready = app_core._stream_snapshot(*key, episode_data)
-            if ready:
+            ready = [row for row in ready if not any(
+                row.get(field) in exclude_sources for field in ('link', 'streamUrl', 'source_name', 'source_parent_name')
+            )]
+            # Reuse a matching Mirrors job, but never wait for or restart an
+            # unrelated episode's resolver. Cold playback has no preflight wait.
+            pending = streams_mod.background_resolution_pending(key)
+            if not pending:
+                if require_exhausted:
+                    _logger.debug('Recovery quality wait finished: target=%r ready=%d reason=exhausted', key[4], len(ready))
                 return ready
+            if ready:
+                pref = {} if require_exhausted else app_core.get_preferred_mirror(key[0], key[3])
+                if pref.get('source_name'):
+                    wanted = any(row.get('source_name') == pref['source_name']
+                                 and (not pref.get('resolution') or row.get('resolution') == pref['resolution'])
+                                 for row in ready)
+                else:
+                    wanted = any(stream_quality_preference_key(row, key[4])[0] == 0 for row in ready)
+                if wanted:
+                    if require_exhausted:
+                        _logger.debug('Recovery quality wait finished: target=%r ready=%d reason=requested-quality', key[4], len(ready))
+                    return ready
+                if not require_exhausted:
+                    if deadline is None:
+                        deadline = time.monotonic() + streams_mod._QUALITY_GRACE_SECONDS
+                    if time.monotonic() >= deadline:
+                        return ready
+            if require_exhausted and not waiting_logged:
+                waiting_logged = True
+                _logger.debug('Recovery quality wait started: target=%r ready=%d pending=True', key[4], len(ready))
             retired.wait(0.15)
         return []
 
@@ -617,6 +655,9 @@ def _probe_player_mirrors(
     retired = Event()
 
     def probe() -> tuple[int | None, float | None, tuple]:
+        if recovery:
+            _logger.debug('Mirror recovery selection: candidates=%d probe=skipped', len(snapshot))
+            return (0 if snapshot and not retired.is_set() else None), None, ()
         now = time.time()
         dead_links = []
         for index, candidate in enumerate(snapshot if recovery else snapshot[:3]):
@@ -1101,9 +1142,18 @@ def handle_play_state(
         _cache_key = (ms.show_id, ms.current_ep, ttype, provider_id)
         mal_id_loaded = False
         playback_mal_id: int | None = None
+        # Completed downloads must win before metadata, skip-ID lookup or a
+        # prefetched remote stream can block playback on an unavailable network.
+        local_res = None
+        if ms.selected_stream is None and not is_download_mode and not getattr(args, "sources", False):
+            local_res = _local_stream_for_episode(
+                ui.ui_show_ctx, ms.show_title, ms.current_ep, ttype, cfg, ms,
+            )
 
         def load_mal_id() -> int | None:
             nonlocal mal_id_loaded, playback_mal_id
+            if (ms.selected_stream or {}).get("is_local"):
+                return None
             if not mal_id_loaded:
                 playback_mal_id = _load_player_mal_id(
                     ui.ui_show_ctx, poster_manager=getattr(app_core, "_poster_manager", None), ui=ui,
@@ -1111,12 +1161,13 @@ def handle_play_state(
                 mal_id_loaded = True
             return playback_mal_id
 
-        if is_prefetched:
-            res = _ipc_player.prefetched_res
-            _ipc_player.prefetched_ep = None
-            _ipc_player.prefetched_stream = None
-            _ipc_player.prefetched_res = None
-            _ipc_player.prefetched_ep_id = None
+        if local_res or is_prefetched:
+            res = local_res or _ipc_player.prefetched_res
+            if is_prefetched:
+                _ipc_player.prefetched_ep = None
+                _ipc_player.prefetched_stream = None
+                _ipc_player.prefetched_res = None
+                _ipc_player.prefetched_ep_id = None
             ms.selected_stream, first_source_name, ep_data, resolved_streams = res
             ms.ep_cache_key = _cache_key
             ms.ep_cache_data = ep_data
@@ -1235,26 +1286,15 @@ def handle_play_state(
                     cached_ep_data = app_core._get_cached_ep_data(cur_key)
 
                     try:
-                        if not cached_ep_data:
-                            def fetch_resolver_episode(key=cur_key):
-                                return app_core.get_episode_data(key[0], key[1], key[2], provider_id=key[3])
-
-                            if is_download_mode:
-                                cached_ep_data = fetch_resolver_episode()
-                            else:
-                                from ..ui.player_screen import run_loading_work
-                                cached_ep_data = run_loading_work(
-                                    fetch_resolver_episode,
-                                    poster_manager=getattr(app_core, "_poster_manager", None), ui=ui,
-                                )
-                        cached_ep_data = _with_torrent_sources(cached_ep_data, shared_loading=True)
-
-                        # Only accepted preparation results may start resolution.
-                        streams_mod.start_bg_resolve(cached_ep_data, set(), ms.show_id, ms.current_ep, ttype, provider_id, target_quality)
-                        cached_streams = _wait_for_player_streams(
-                            cached_ep_data, cur_key, download=is_download_mode,
-                            poster_manager=getattr(app_core, "_poster_manager", None), ui=ui,
-                        )
+                        # ep_data was already fetched and augmented above. Cold
+                        # playback goes directly to the foreground resolver;
+                        # starting a background preflight duplicates its jobs.
+                        cached_streams = []
+                        if cached_ep_data:
+                            cached_streams = _wait_for_player_streams(
+                                ep_data, cur_key, download=is_download_mode,
+                                poster_manager=getattr(app_core, "_poster_manager", None), ui=ui,
+                            )
                     except PreparationCancelled:
                         if _skip_pool:
                             _skip_pool.shutdown(wait=False)
@@ -1265,7 +1305,7 @@ def handle_play_state(
                     res = None
 
                     if cached_streams:
-                        pref = app_core.get_preferred_mirror(ms.show_id)
+                        pref = app_core.get_preferred_mirror(ms.show_id, provider_id)
                         pref_name = pref.get("source_name", "")
                         pref_res = pref.get("resolution", "")
                         pref_name_lower = pref_name.lower()
@@ -1292,7 +1332,7 @@ def handle_play_state(
                             reporting.ok(f"Connected: {preferred_stream.get('source_name', src_name)} ({preferred_stream.get('resolution', '?')})")
                         else:
                             # 2. No preferred mirror or not available - fall back to normal logic
-                            from ..media.sources import quality_preference_key
+                            from ..media.sources import stream_quality_preference_key
                             def _cached_sort_key(s):
                                 sname = (s.get("source_name") or "").lower()
                                 res = s.get("resolution") or ""
@@ -1315,7 +1355,7 @@ def handle_play_state(
                                     if src_name.lower().startswith(pref_name_lower) and (not pref_res_lower or res.lower() == pref_res_lower):
                                         pref_boost = -100
 
-                                q_key = quality_preference_key(res, target_quality)
+                                q_key = stream_quality_preference_key(s, target_quality)
                                 return (
                                     pref_boost,
                                     streams_mod.torrent_fallback_sort_value(s),
@@ -1370,7 +1410,7 @@ def handle_play_state(
                     if res is None:
                         try:
                             res = _fetch_player_fallback(
-                                ep_data, (ms.show_id, ms.current_ep, ttype, provider_id, cfg.get("quality", "best")),
+                                ep_data, (ms.show_id, ms.current_ep, ttype, provider_id, target_quality),
                                 download=is_download_mode,
                                 poster_manager=getattr(app_core, "_poster_manager", None), ui=ui,
                             )
@@ -1810,9 +1850,9 @@ def handle_play_state(
 
         if result:
             app_core.touch_history(action_show, ttype)
-            cur_resume = app_core.get_resume_time(ms.show_id, ms.current_ep) or 0
+            cur_resume = app_core.get_resume_time(ms.show_id, ms.current_ep, provider_id) or 0
             if cur_resume <= 0:
-                app_core.save_resume_time(ms.show_id, ms.current_ep, 1)
+                app_core.save_resume_time(ms.show_id, ms.current_ep, 1, provider_id)
 
         app_core._exit_player_screen()
         return "DETAILS"
@@ -1901,10 +1941,11 @@ def handle_play_state(
             # Preserve playback position so fallback mirror resumes right where the stream stalled/switched
             if time_pos > 2:
                 ms.pending_resume_time = max(0.0, time_pos - 1.0)
-                app_core.save_resume_time(ms.show_id, ms.current_ep, int(time_pos))
-                app_core.save_resume_time(ms.show_id, current_ep_label, int(time_pos))
+                app_core.save_resume_time(ms.show_id, ms.current_ep, int(time_pos), provider_id)
+                app_core.save_resume_time(ms.show_id, current_ep_label, int(time_pos), provider_id)
 
-            cur_key = (ms.show_id, ms.current_ep, ttype, provider_id, quality)
+            target_quality = getattr(args, 'quality', None) or cfg.get('quality', quality)
+            cur_key = (ms.show_id, ms.current_ep, ttype, provider_id, target_quality)
             if failed_stream and not is_manual_switch:
                 app_core._prune_dead_stream(cur_key, failed_stream.get("link") or failed_stream.get("streamUrl"))
 
@@ -1939,13 +1980,17 @@ def handle_play_state(
                     and (s.get("source_name") or "") not in failed_mirrors
                     and (s.get("source_parent_name") or "") not in failed_mirrors
                 ]
+                from ..media.sources import stream_quality_preference_key
+                if (streams_mod.background_resolution_pending(cur_key)
+                        and not any(stream_quality_preference_key(row, target_quality)[0] == 0 for row in remaining)):
+                    remaining = _wait_for_player_streams(
+                        cached_ep_data, cur_key, exclude_sources=frozenset(failed_mirrors), require_exhausted=True,
+                        poster_manager=getattr(app_core, '_poster_manager', None), ui=ui,
+                    )
                 if remaining:
-                    from ..media.sources import quality_preference_key
-                    target_quality = getattr(args, "quality", None) or cfg.get("quality", "best")
 
                     def _failover_sort_key(s):
                         sname = (s.get("source_name") or "").lower()
-                        res = s.get("resolution") or sname
                         is_hard = "hardsub" in sname or "hard-sub" in sname or "hard sub" in sname
                         is_soft = "softsub" in sname or "all sub" in sname or "multi sub" in sname
                         is_donghua = str(provider_id or "").lower() in {"animexin", "lucifer", "animekhor"}
@@ -1953,16 +1998,19 @@ def handle_play_state(
                             sub_rank = 0 if is_hard else (2 if is_soft else 1)
                         else:
                             sub_rank = 0 if is_soft else (2 if is_hard else 1)
-                        q_key = quality_preference_key(res, target_quality)
+                        q_key = stream_quality_preference_key(s, target_quality)
                         return (
                             streams_mod.torrent_fallback_sort_value(s),
-                            sub_rank,
                             q_key,
+                            sub_rank,
                             s.get("source_priority", 4),
                             streams_mod.torrent_size_sort_value(s),
                         )
 
                     sorted_remaining = sorted(remaining, key=_failover_sort_key)
+                    _logger.debug('Recovery quality selection: target=%r candidates=%d requested_quality=%d',
+                                  target_quality, len(sorted_remaining),
+                                  sum(stream_quality_preference_key(row, target_quality)[0] == 0 for row in sorted_remaining))
                     next_stream = _probe_player_mirrors(
                         tuple(sorted_remaining), cur_key, recovery=True,
                         poster_manager=getattr(app_core, "_poster_manager", None), ui=ui,
@@ -1972,7 +2020,7 @@ def handle_play_state(
                     if not ep_data:
                         ep_data = app_core._get_cached_ep_data(cur_key)
                     fallback_res = _fetch_player_fallback(
-                        ep_data, (ms.show_id, ms.current_ep, ttype, provider_id, cfg.get("quality", "best")),
+                        ep_data, cur_key,
                         exclude_sources=frozenset(failed_mirrors),
                         poster_manager=getattr(app_core, "_poster_manager", None), ui=ui,
                     )
@@ -2021,7 +2069,7 @@ def handle_play_state(
         auto_scrobbled = playback_looks_complete(
             result, percent, time_pos, duration, played_seconds, start_time=start_time
         )
-        pending_completion = app_core.get_pending_completion(ms.show_id)
+        pending_completion = app_core.get_pending_completion(ms.show_id, provider_id)
 
         if (pending_completion
                 and str(pending_completion.get("next_episode")) == str(ms.current_ep)
@@ -2049,6 +2097,7 @@ def handle_play_state(
                         on_failure=_pending_sync_failure,
                         pending_completion={
                             "show_id": str(ms.show_id),
+                            "provider_id": provider_id,
                             "episode": str(pending_ep),
                         },
                     )
@@ -2058,8 +2107,8 @@ def handle_play_state(
                     sync_pending = False
 
             if not sync_pending:
-                app_core.save_resume_time(ms.show_id, pending_ep, 0)
-                app_core.clear_pending_completion(ms.show_id)
+                app_core.save_resume_time(ms.show_id, pending_ep, 0, provider_id)
+                app_core.clear_pending_completion(ms.show_id, provider_id)
 
         completed_for_history = playback_updates_history(
             result, percent, time_pos, duration, played_seconds, start_time=start_time
@@ -2094,11 +2143,11 @@ def handle_play_state(
                 _logger.exception("Automatic watched-download cleanup failed")
 
         if auto_scrobbled or (duration > 0 and time_pos >= duration - 30):
-            app_core.save_resume_time(ms.show_id, ms.current_ep, 0)
+            app_core.save_resume_time(ms.show_id, ms.current_ep, 0, provider_id)
         elif time_pos > 30:
-            app_core.save_resume_time(ms.show_id, ms.current_ep, time_pos)
+            app_core.save_resume_time(ms.show_id, ms.current_ep, time_pos, provider_id)
         else:
-            app_core.save_resume_time(ms.show_id, ms.current_ep, 0)
+            app_core.save_resume_time(ms.show_id, ms.current_ep, 0, provider_id)
 
         if result == "QUIT" or result == "EOF":
             if auto_scrobbled and resolve_tracking_fn(ui.search_prev_state, args, cfg, ui.ui_show_ctx):
@@ -2187,9 +2236,10 @@ def handle_play_state(
                         progress_ep = episode_progress_number(ms.current_ep, (ms.current_ep_index or 0) + 1)
                         app_core.save_pending_completion(
                             ms.show_id, ms.current_ep, progress_ep,
-                            next_ep, time_pos, duration
+                            next_ep, time_pos, duration,
+                            provider_id,
                         )
-                        app_core.save_resume_time(ms.show_id, ms.current_ep, time_pos)
+                        app_core.save_resume_time(ms.show_id, ms.current_ep, time_pos, provider_id)
                 if auto_scrobbled:
                     ms.current_ep_index = None
                     ms.current_ep = None
@@ -2220,9 +2270,9 @@ def handle_play_state(
                         )
                 elif not auto_scrobbled:
                     progress_ep = episode_progress_number(ms.current_ep, ms.current_ep_index + 1)
-                    app_core.save_pending_completion(ms.show_id, ms.current_ep, progress_ep, next_ep, time_pos, duration)
+                    app_core.save_pending_completion(ms.show_id, ms.current_ep, progress_ep, next_ep, time_pos, duration, provider_id)
                     if time_pos > 0:
-                        app_core.save_resume_time(ms.show_id, ms.current_ep, time_pos)
+                        app_core.save_resume_time(ms.show_id, ms.current_ep, time_pos, provider_id)
                     ms.pending_osd_msg = pending_completion_osd(ms.current_ep, next_ep)
 
                 ms.current_ep_index += 1

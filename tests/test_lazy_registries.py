@@ -15,7 +15,7 @@ PROVIDERS = {
 }
 EXTRACTORS = {
     "dailymotion", "doodstream", "filemoon", "kwik", "misterdonghua", "mixdrop",
-    "mp4upload", "okru", "streamtape", "streamwish", "uni", "vidnest", "voe",
+    "mp4upload", "okru", "odysee", "streamtape", "streamwish", "uni", "vidnest", "voe",
 }
 
 
@@ -49,7 +49,7 @@ assert 'anipm' in set(p.available_providers())
 assert p.provider_display_name('senshi') == 'Senshi'
 assert p.is_provider_active('anipm')
 assert p.provider_key('anidbapp') == 'anidb'
-assert p.provider_key('allanime') == 'mkissa'
+assert not p.is_provider_active('allanime')
 assert p.get_provider_registry()['anipm']['name'] == 'AniPM'
 assert not attempted, attempted
 """, tmp_path)
@@ -69,14 +69,14 @@ assert not attempted, attempted
 """, tmp_path, providers={"anipm"})
 
 
-def test_aliases_and_legacy_export_share_canonical_instance(tmp_path):
+def test_active_alias_shares_canonical_instance(tmp_path):
     fresh("""
 import media_cli.providers as p
-provider = p.get_provider('allanime')
-assert provider is p.get_provider('mkissa') is p.ALLANIME
-assert p.PROVIDER_FACTORIES['allanime'] is p.PROVIDER_FACTORIES['mkissa']
+provider = p.get_provider('anidbapp')
+assert provider is p.get_provider('anidb')
+assert p.PROVIDER_FACTORIES['anidbapp'] is p.PROVIDER_FACTORIES['anidb']
 assert not attempted, attempted
-""", tmp_path, providers={"allanime"})
+""", tmp_path, providers={"anidbapp"})
 
 
 def test_concurrent_first_access_constructs_one_default_instance(tmp_path):
@@ -121,7 +121,7 @@ assert attempted == ['media_cli.providers.animepahe'], attempted
 def test_importing_extractor_registry_and_unknown_url_are_lightweight(tmp_path):
     fresh("""
 import media_cli.extractors as e
-assert len(e.EXTRACTORS) == 13
+assert len(e.EXTRACTORS) == 14
 assert e.find_extractor('https://unknown.example/e/123') is None
 assert e.find_extractor('') is None
 assert not attempted, attempted
@@ -131,6 +131,7 @@ assert 'media_cli.extractors.base' not in sys.modules
 
 @pytest.mark.parametrize(("url", "module", "class_name"), [
     ("https://dai.ly/x123", "dailymotion", "DailymotionExtractor"),
+    ("https://odysee.com/@channel:1/video:4", "odysee", "OdyseeExtractor"),
     ("https://ok.ru/videoembed/123", "okru", "OkruExtractor"),
     ("https://watchanime.uns.bio/#123", "uni", "UniExtractor"),
     ("https://vidnest.io/e/123", "vidnest", "VidnestExtractor"),
@@ -178,8 +179,8 @@ p.disabled_providers_from_config = lambda: {'mkissa', 'anipm'}
 assert not p.is_provider_active('allanime')
 assert 'mkissa' not in p.available_providers()
 assert 'anipm' not in p.available_providers()
-assert p.provider_key('allanime') == 'miruro'
-assert p.provider_key('unknown') == 'miruro'
+assert p.provider_key('allanime') == 'allanime'
+assert p.provider_key('unknown') == 'anikoto'
 assert p.discover_provider_factories() is p.PROVIDER_FACTORIES
 assert not attempted, attempted
 """, tmp_path)

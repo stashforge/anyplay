@@ -1,0 +1,175 @@
+{
+  "version": "1.0",
+  "providers": {
+    "anikoto": {
+      "module": "anikoto",
+      "python_requirements": {"import": ["bs4"]},
+      "name": "Anikoto",
+      "domains": ["https://megaplay.buzz", "https://anikoto.com"],
+      "type": "anime",
+      "languages": ["sub", "dub"],
+      "status": "active",
+      "engine": "hybrid",
+      "features": ["search"]
+    },
+    "anipm": {
+      "module": "anipm",
+      "name": "AniPM",
+      "domains": ["https://ani.pm"],
+      "type": "anime",
+      "languages": ["sub", "dub"],
+      "status": "active",
+      "engine": "api",
+      "features": ["search"]
+    },
+    "animepahe": {
+      "module": "animepahe",
+      "python_requirements": {"import": ["bs4"]},
+      "name": "AnimePahe",
+      "domains": ["https://animepahe.pw", "https://animepahe.org", "https://animepahe.com", "https://animepahe.ru"],
+      "type": "anime",
+      "languages": ["sub"],
+      "status": "active",
+      "engine": "hybrid",
+      "features": ["search"]
+    },
+    "reanime": {
+      "module": "reanime",
+      "name": "Re:ANIME",
+      "domains": ["https://reanime.to", "https://reanime.cz", "https://reanime.wtf"],
+      "type": "anime",
+      "languages": ["sub", "dub"],
+      "status": "active",
+      "engine": "api",
+      "features": ["anilist_sync", "search", "fallback_servers"]
+    },
+    "miruro": {
+      "module": "miruro",
+      "python_requirements": {"episodes": ["curl_cffi.requests"], "sources": ["curl_cffi.requests"]},
+      "name": "Miruro",
+      "domains": ["https://www.miruro.tv", "https://www.miruro.to", "https://www.miruro.ru", "https://www.miruro.bz"],
+      "type": "anime",
+      "languages": ["sub", "dub"],
+      "status": "active",
+      "engine": "hybrid",
+      "features": ["anilist_sync", "search", "fallback_servers"]
+    },
+    "mkissa": {
+      "module": "allanime",
+      "python_requirements": {"sources": [["cryptography.hazmat.primitives.ciphers.aead", "Cryptodome.Cipher.AES", "Crypto.Cipher.AES"]]},
+      "name": "Mkissa",
+      "domains": ["https://mkissa.to", "https://allanime.to"],
+      "type": "anime",
+      "languages": ["sub", "dub"],
+      "status": "active",
+      "engine": "hybrid",
+      "features": ["anilist_sync", "search", "fallback_servers"]
+    },
+    "anizone": {
+      "module": "anizone",
+      "python_requirements": {"import": ["bs4"]},
+      "name": "AniZone",
+      "domains": ["https://anizone.to"],
+      "type": "anime",
+      "languages": ["sub", "dub"],
+      "status": "active",
+      "engine": "scraper",
+      "features": ["search"]
+    },
+    "animegg": {
+      "module": "animegg",
+      "python_requirements": {"sources": ["bs4"]},
+      "name": "AnimeGG",
+      "domains": ["https://animegg.org"],
+      "type": "anime",
+      "languages": ["sub", "dub"],
+      "status": "active",
+      "engine": "scraper",
+      "features": ["search"]
+    },
+    "anidb": {
+      "module": "anidbapp",
+      "name": "AniDB",
+      "domains": ["https://anilab2.amdapi.click"],
+      "type": "anime",
+      "languages": ["sub", "dub"],
+      "status": "active",
+      "engine": "api",
+      "features": ["anilist_sync", "search"]
+    },
+    "senshi": {
+      "module": "senshi",
+      "python_requirements": {"remote_sources": ["curl_cffi.requests", "m3u8"]},
+      "name": "Senshi",
+      "domains": ["https://senshi.to"],
+      "type": "anime",
+      "languages": ["sub", "dub"],
+      "status": "active",
+      "engine": "api",
+      "features": ["search"]
+    },
+    "animethemes": {
+      "name": "AnimeThemes",
+      "domains": ["https://animethemes.moe", "https://api.animethemes.moe"],
+      "type": "songs",
+      "languages": ["video"],
+      "status": "active",
+      "engine": "api",
+      "source": true,
+      "features": ["search", "opening_ending_videos"]
+    },
+    "animekhor": {
+      "module": "animekhor",
+      "python_requirements": {"import": ["bs4"]},
+      "name": "AnimeKhor",
+      "domains": ["https://animekhor.org", "https://animekhor.xyz"],
+      "type": "donghua",
+      "languages": ["sub"],
+      "status": "active",
+      "engine": "scraper",
+      "features": ["search"]
+    },
+    "animexin": {
+      "module": "animexin",
+      "python_requirements": {"import": ["bs4"]},
+      "name": "AnimeXin",
+      "domains": ["https://animexin.dev", "https://animexin.vip"],
+      "type": "donghua",
+      "languages": ["sub"],
+      "status": "active",
+      "engine": "scraper",
+      "features": ["search"]
+    },
+    "lucifer": {
+      "module": "lucifer",
+      "python_requirements": {"import": ["bs4"]},
+      "name": "Lucifer",
+      "domains": ["https://luciferdonghua.in"],
+      "type": "donghua",
+      "languages": ["sub"],
+      "status": "active",
+      "engine": "scraper",
+      "features": ["search"]
+    },
+    "movies": {
+      "module": "movies",
+      "name": "Movies",
+      "domains": ["https://vidsrc.me"],
+      "type": "movie",
+      "languages": ["sub", "dub"],
+      "status": "active",
+      "engine": "api",
+      "features": ["search"]
+    },
+    "torrent": {
+      "module": "torrent",
+      "name": "Torrents",
+      "domains": ["https://tsukihime.org", "https://nyaa.si", "https://torrents-csv.com"],
+      "type": "torrent",
+      "languages": ["sub", "dub", "raw"],
+      "status": "active",
+      "engine": "api",
+      "features": ["search", "torrent_streaming"]
+    }
+  }
+}

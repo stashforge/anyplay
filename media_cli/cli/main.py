@@ -12,6 +12,10 @@ def run():
 
         parsed = parse_cli_args()
         args, _ = parsed
+        if args.command == "health":
+            from .health import handle_health_command
+
+            return handle_health_command(args.health_action, args.health_report_id, plain=args.plain, delete=args.health_delete, seed=args.health_seed, verify=args.health_verify, translation=args.health_translation or "sub")
         if args.command == "companion":
             from .companion import handle_companion_command
 

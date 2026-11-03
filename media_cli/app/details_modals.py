@@ -6,8 +6,9 @@ import os
 from typing import Any
 
 from .. import app_core
+from ..domain.titles import title_provider_key
 from ..context import CliFlags, MachineState, UiState
-from ..domain.episodes import highest_episode_number
+from ..domain.episodes import episode_id_at, episode_index_for_id, highest_episode_number
 from ..domain.tracking import (
     apply_tracking_progress_local,
     completed_media_total,
@@ -237,11 +238,18 @@ def handle_update_progress_state(
             from .playback_player import _auto_delete_watched_downloads
             _auto_delete_watched_downloads(s, episode_ids, ttype_local, cfg, ms)
 
-        if s.get("_id") and target_ep_id and str(target_ep_id) != "0":
-            app_core.save_resume_time(s.get("_id"), target_ep_id, 0)
+        if progress_saved and s.get("_id") and target_ep_id and str(target_ep_id) != "0":
+            app_core.save_resume_time(s.get("_id"), target_ep_id, 0, title_provider_key(s))
 
-        ms.current_ep_index = None
-        ms.current_ep = None
+        if progress_saved:
+            ms._android_pending_watched_ep = None
+            ms._android_pending_watched_idx = None
+            target_index = episode_index_for_id(episode_ids, target_ep_id, labels=s.get("_episode_labels"))
+            if str(target_ep_id) == "0":
+                target_index = 0 if episode_ids else None
+            ms.current_ep_index = target_index
+            ms.current_ep = (episode_id_at(episode_ids, target_index) if target_index is not None
+                             else target_ep_id if str(target_ep_id) != "0" else None)
 
     return "DETAILS"
 

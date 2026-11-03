@@ -84,7 +84,8 @@ def test_details_recognizes_saved_named_movie_as_watched(request, monkeypatch):
     r.show.update(_episode_ids=[episode], _episode_ids_ttype="sub", _episode_labels={episode: "Movie"},
                   _local_episode_label="Movie", availableEpisodes={"sub": 1}, episodeCount=1)
     r.ms.current_ep, r.ms.current_ep_index, r.ms.total_eps = episode, 0, 1
-    entry = dict(show={"_id": "one"}, episode=episode, translation_type="sub")
+    entry = dict(show={"_id": "one", "_provider": r.show["_provider"]},
+                 episode=episode, translation_type="sub")
     monkeypatch.setattr(app_core, "ensure_episode_ids", lambda *a, **kw: [episode])
     monkeypatch.setattr(app_core, "get_local_progress", lambda show, ttype: local_progress([entry], show, ttype))
     assert playback_menu.handle_action_menu_state(r.flags, r.ui, r.ms, {}, r.args, "sub", lambda *a: False) == "HISTORY"

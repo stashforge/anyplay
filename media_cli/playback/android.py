@@ -100,6 +100,9 @@ def play_android(
 
         require_executable("am", "Android playback")
 
+    from ..domain.titles import title_provider_key
+    resume_provider_id = title_provider_key(action_show, default="")
+
     start_time = 0
     if show_id and player != "vlc":
         try:
@@ -107,8 +110,8 @@ def play_android(
             from ..domain.episodes import clean_episode_identifier
             cleaned_ep = clean_episode_identifier(str(episode))
             start_time = (
-                get_resume_time(show_id, episode)
-                or (get_resume_time(show_id, cleaned_ep) if cleaned_ep else 0)
+                get_resume_time(show_id, episode, resume_provider_id)
+                or (get_resume_time(show_id, cleaned_ep, resume_provider_id) if cleaned_ep else 0)
             ) or 0
             if start_time > 35:
                 start_time = max(0, start_time - 30)
@@ -125,7 +128,7 @@ def play_android(
         try:
             from ..core.storage import save_resume_time
             if is_complete:
-                save_resume_time(sid, ep, 0)
+                save_resume_time(sid, ep, 0, resume_provider_id)
                 if action_show:
                     from ..domain.episodes import episode_progress_number
                     try:
@@ -206,7 +209,7 @@ def play_android(
                         except Exception:
                             pass
             else:
-                save_resume_time(sid, ep, t_pos)
+                save_resume_time(sid, ep, t_pos, resume_provider_id)
         except Exception:
             pass
 

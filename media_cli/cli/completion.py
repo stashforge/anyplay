@@ -8,7 +8,7 @@ from ..provider_manifest import available_provider_metadata
 
 BASE_COMMANDS = (
     "search", "downloads", "anilist", "history", "continue",
-    "auth", "companion", "providers", "completion", "config", "logs",
+    "auth", "companion", "providers", "completion", "config", "logs", "health",
 )
 ANILIST_LISTS = (
     "airing", "watching", "planning", "completed", "dropped", "paused", "rewatching",
@@ -245,6 +245,9 @@ def bash_completion():
                 COMPREPLY=( $(compgen -W "{_words(COMPANION_OPTIONS)}" -- "$cur") )
             fi
             ;;
+        health)
+            COMPREPLY=( $(compgen -W "reports report latest all senshi anipm reanime anikoto animepahe anidb anizone animegg animexin lucifer animekhor movies torrent animethemes --seed --verify catalogue extraction http mpv --translation sub dub both --delete --help --debug --plain" -- "$cur") )
+            ;;
         providers)
             COMPREPLY=( $(compgen -W "{_words(PROVIDERS_OPTIONS)}" -- "$cur") )
             ;;
@@ -275,6 +278,7 @@ commands=(
   'continue:Continue the last watched title'
   'auth:Login or logout from AniList'
   'companion:Pair or check the Android WebView companion'
+  'health:List saved provider health reports'
   'providers:List available providers'
   'completion:Generate shell completion'
   'config:Manage or open configuration'
@@ -282,6 +286,9 @@ commands=(
 )
 
 case $words[2] in
+  health)
+    _arguments '*:: :((reports report latest all senshi anipm reanime anikoto animepahe anidb anizone animegg animexin lucifer animekhor movies torrent animethemes --seed --verify catalogue extraction http mpv --translation sub dub both --delete --help --debug --plain))'
+    ;;
   anilist)
     _arguments '*:: :(({_words(ANILIST_LISTS)} {_words(ANILIST_OPTIONS)}))'
     ;;
@@ -353,6 +360,9 @@ def fish_completion():
             "'__fish_seen_subcommand_from companion; and not __fish_seen_subcommand_from pair status' -a "
             f"{item}"
         )
+    lines.append(
+        f"complete -c {APP_NAME} -n '__fish_seen_subcommand_from health' -a 'reports report latest all senshi anipm reanime anikoto animepahe anidb anizone animegg animexin lucifer animekhor movies torrent animethemes --seed --verify catalogue extraction http mpv --translation sub dub both --delete'"
+    )
     for item in SHELLS:
         lines.append(
             f"complete -c {APP_NAME} -n "

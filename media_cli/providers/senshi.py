@@ -474,20 +474,52 @@ class Senshi(Provider):
             all_sources = [add_dependency_hints(source, [dependency_failure_hint(dependency_error)]) for source in all_sources]
         return all_sources
 
+    def _episode_embeds(self, provider_id: str, episode: str, ttype: str):
+        """Fetch/filter descriptors without resolving any remote embed."""
+        embeds = self._fetch_json(f"{self.base_url}/episode-embeds/{provider_id}/{episode}")
+        if not isinstance(embeds, list):
+            return None
+        want_dub = str(ttype).lower() == "dub"
+        return [
+            emb for emb in embeds if isinstance(emb, dict)
+            and (str(emb.get("status") or "").lower() == "dub") == want_dub
+        ]
+
+    @staticmethod
+    def _source_embed_routes(emb):
+        routes = []
+        remote = emb.get("remote_source_id") or emb.get("remoteSourceId")
+        direct = emb.get("url") or emb.get("embed_url") or emb.get("embedUrl")
+        if remote:
+            routes.append(("Vidcloud", {"remote_source_id": remote}))
+        elif direct:
+            routes.append(("Direct link", {"url": direct}))
+        for field, name in (("server2", "StreamNin"), ("serverFM", "FileMoon")):
+            if emb.get(field):
+                routes.append((name, {field: emb[field]}))
+        return routes
+
+    def discover_episode_sources(self, provider_id: str, episode: str, ttype: str = "sub") -> list[str]:
+        """Describe available source routes; do not extract or probe media."""
+        return [name for emb in self._episode_embeds(provider_id, episode, ttype) or ()
+                for name, _ in self._source_embed_routes(emb)]
+
+    def extract_discovered_source(self, provider_id: str, episode: str, source: str, ttype: str = "sub") -> list[dict]:
+        """Reuse native resolution for just the selected named source route."""
+        selected = [route for emb in self._episode_embeds(provider_id, episode, ttype) or ()
+                    for name, route in self._source_embed_routes(emb) if name == source]
+        return self._extract_embed_sources(selected, is_dub=str(ttype).lower() == "dub") if selected else []
+
     def episode_sources(self, provider_id: str, episode: str, ttype: str = "sub") -> dict[str, Any] | None:
         language = str(ttype).lower()
         cache_key = (self.base_url, str(provider_id), str(episode), language)
         cached = self._cache_get(self._sources_cache, cache_key)
         if cached is not None:
             return cached
-        embeds = self._fetch_json(f"{self.base_url}/episode-embeds/{provider_id}/{episode}")
-        if not isinstance(embeds, list):
+        target_embeds = self._episode_embeds(provider_id, episode, language)
+        if target_embeds is None:
             return None
         want_dub = language == "dub"
-        target_embeds = [
-            emb for emb in embeds if isinstance(emb, dict)
-            and (str(emb.get("status") or "").lower() == "dub") == want_dub
-        ]
         sources = self._extract_embed_sources(target_embeds, is_dub=want_dub)
         if not sources:
             return None

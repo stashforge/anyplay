@@ -179,6 +179,27 @@ def _extract_item_part(item, titles):
     return None
 
 
+def tracker_id_contradiction(left, right):
+    """Return an explicit tracker conflict without interpreting local IDs."""
+    # Only explicit tracker fields share an identity namespace across providers.
+    # A provider's numeric local ID is not necessarily an AniList or MAL ID.
+    for fields, reason in (
+        (("aniListId", "_anilist_id"), "anilist_id"),
+        (("malId", "myanimelist_id"), "mal_id"),
+    ):
+        identities = []
+        for item in (left, right):
+            ids = set()
+            for field in fields:
+                value = str(item.get(field) or "").strip()
+                if value.isascii() and value.isdigit() and int(value) > 0:
+                    ids.add(int(value))
+            identities.append(ids)
+        if all(identities) and len(identities[0] | identities[1]) > 1:
+            return reason
+    return ""
+
+
 def match_score_details(anilist, allmanga):
     anilist_titles = _cached_match_titles(anilist)
     allmanga_titles = _cached_match_titles(allmanga)
@@ -189,8 +210,10 @@ def match_score_details(anilist, allmanga):
         "score": title_score,
         "title_score": title_score,
         "exact_title": exact_title,
-        "contradiction": "",
+        "contradiction": tracker_id_contradiction(anilist, allmanga),
     }
+    if details["contradiction"]:
+        return details
 
     # Signal 1: Native Title match
     al_nat = normalized_match_title(anilist.get("nativeName"))
@@ -293,6 +316,14 @@ def match_score_details(anilist, allmanga):
     return details
 
 
+def anilist_match_contradiction(provider_show, anilist_show):
+    """Check IDs in a normalized AniList result against provider metadata."""
+    return tracker_id_contradiction(provider_show, {
+        "aniListId": anilist_show.get("_id"),
+        "malId": anilist_show.get("malId"),
+    })
+
+
 def score_match(anilist, allmanga):
     return match_score_details(anilist, allmanga)["score"]
 
@@ -312,8 +343,7 @@ def choose_confident_match(reference, candidates):
     minimum = 30 if exact_title else 42
     if best_score < minimum:
         return None
-    if exact_title:
-        return best
+    # Exact aliases still need a clear winner after all metadata is scored.
     if len(ranked) > 1 and best_score - ranked[1][0] < 8:
         return None
     return best
@@ -333,13 +363,15 @@ def is_same_show(show1, show2, strict=False):
     if not show1 or not show2:
         return False
 
+    from .titles import title_provider_key
+
+    p1 = title_provider_key(show1).casefold()
+    p2 = title_provider_key(show2).casefold()
     id1 = str(show1.get("_id") or show1.get("id") or "")
     id2 = str(show2.get("_id") or show2.get("id") or "")
-    if id1 and id1 == id2:
+    if id1 and id1 == id2 and p1 == p2:
         return True
 
-    p1 = str(show1.get("_provider") or show1.get("provider") or "").casefold()
-    p2 = str(show2.get("_provider") or show2.get("provider") or "").casefold()
     if "torrent" in {p1, p2}:
         return False
 
@@ -718,29 +750,33 @@ def _run_manual_anilist_match(flags, ui, provider_show, token, initial_error="")
 
 
 def match_provider_show_to_anilist(flags, ui, provider_show, token, manual_on_fail=False):
-    from ..core.anilist import fetch_anilist_media, search_anilist
+    from ..core.anilist import fetch_anilist_by_ids, fetch_anilist_media, search_anilist
     from ..core.enrichment import _merge_anilist_into_provider
     from ..core.storage import get_source_anilist_match, save_source_anilist_match
     from ..services import normalize as anilist_normalize
     from ..state.preferences import set_action_feedback
 
     show_id = str(provider_show.get("_id") or provider_show.get("id") or "")
-    stored = get_source_anilist_match(show_id) if show_id else {}
+    from .titles import title_provider_key
+    stored = get_source_anilist_match(show_id, title_provider_key(provider_show)) if show_id else {}
     stored_id = str(stored.get("_id") or "")
     provider_al_id = str(provider_show.get("aniListId") or "")
+    manual_stored = stored.get("match_source") == "manual"
+    stored_conflict = tracker_id_contradiction(provider_show, {"aniListId": stored_id})
 
-    # Priority 1: Stored 1:1 match from local storage
-    if stored_id:
+    # Priority 1: Preserve manual choices; validate automatic links against IDs.
+    if stored_id and (manual_stored or not stored_conflict):
         try:
             media = fetch_anilist_media(token, stored_id)
             if media:
-                match_source = stored.get("match_source") or "stored"
-                provider_show["_match_source"] = match_source
                 normalized_media = anilist_normalize.normalize_media(media)
-                save_source_anilist_match(provider_show, normalized_media)
-                merged = _merge_anilist_into_provider(provider_show, normalized_media)
-                set_action_feedback(merged, "✔ Found saved match")
-                return merged
+                conflict = anilist_match_contradiction(provider_show, normalized_media)
+                if manual_stored or not conflict:
+                    provider_show["_match_source"] = stored.get("match_source") or "stored"
+                    save_source_anilist_match(provider_show, normalized_media)
+                    merged = _merge_anilist_into_provider(provider_show, normalized_media)
+                    set_action_feedback(merged, "✔ Found saved match")
+                    return merged
         except Exception:
             pass
 
@@ -758,7 +794,30 @@ def match_provider_show_to_anilist(flags, ui, provider_show, token, manual_on_fa
         except Exception:
             pass
 
-    # Priority 3: Title search & fuzzy match
+    # Priority 3: Exact MAL lookup through AniList, not an ID-number conversion.
+    mal_value = str(provider_show.get("malId") or provider_show.get("myanimelist_id") or "").strip()
+    if mal_value.isascii() and mal_value.isdigit() and int(mal_value) > 0:
+        mal_id = int(mal_value)
+        try:
+            candidates = fetch_anilist_by_ids(token, mal_ids=[mal_id])
+            verified = [
+                candidate for candidate in candidates
+                if _positive_int(candidate.get("malId")) == mal_id
+                and _positive_int(candidate.get("_id"))
+                and (not provider_al_id or
+                     _positive_int(candidate.get("_id")) == _positive_int(provider_al_id))
+            ]
+            if len(verified) == 1:
+                matched = verified[0]
+                provider_show["_match_source"] = "id"
+                save_source_anilist_match(provider_show, matched)
+                merged = _merge_anilist_into_provider(provider_show, matched)
+                set_action_feedback(merged, "✔ Matched by ID")
+                return merged
+        except Exception:
+            pass
+
+    # Priority 4: Title search & fuzzy match
     queries = [
         provider_show.get("name"),
         provider_show.get("englishName"),
@@ -778,7 +837,7 @@ def match_provider_show_to_anilist(flags, ui, provider_show, token, manual_on_fa
             set_action_feedback(merged, "✔ Suggested match")
             return merged
 
-    # Priority 4: Manual Picker
+    # Priority 5: Manual Picker
     if manual_on_fail:
         return _run_manual_anilist_match(flags, ui, provider_show, token)
     return None

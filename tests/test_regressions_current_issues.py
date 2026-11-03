@@ -747,8 +747,10 @@ def test_skip_settings_status_rows_are_actionable(monkeypatch):
     ms.current_ep = "1"
     ms.current_ep_index = 0
     ms.total_eps = 2
+    from media_cli.media.custom_skips import stable_title_keys
+    title_key = stable_title_keys(show, "show-1")[0]
     ms.custom_skip_sessions = {
-        "show-1": [
+        title_key: [
             {
                 "providers": ["all"],
                 "exclude_providers": [],
@@ -760,12 +762,12 @@ def test_skip_settings_status_rows_are_actionable(monkeypatch):
     playback_calls = []
     skip_done = False
 
-    def choose_playback_settings(flags, ui, *, read_view, switch_translation, information, activate=None):
+    def choose_playback_settings(flags, ui, *, read_view, switch_translation, information, activate=None, ready=None, can_activate=None):
         view = read_view()
         if activate is not None:
             controller = DetailsMenuController(
                 ui=ui, read_view=read_view, switch_translation=switch_translation,
-                information=information, activate=activate,
+                information=information, activate=activate, ready=ready, can_activate=can_activate,
             )
             return run_view_session(flags, ui, controller.session, picker=fake_pick, updates_fn=controller.updates)
         action_id = next(item.reference for item in view.items if item.label == "Playback")
@@ -811,7 +813,7 @@ def test_skip_settings_status_rows_are_actionable(monkeypatch):
     assert state == "DETAILS"
     assert args.aniskip is False
     assert args.auto_skip is False
-    assert "show-1" in ms.custom_skip_disabled_titles
+    assert title_key in ms.custom_skip_disabled_titles
     assert any("AniSkip: OFF" in opt for opt in playback_calls[-1])
     assert any("Auto-Skip: OFF" in opt for opt in playback_calls[-1])
     assert any("Custom Skips: OFF" in opt for opt in playback_calls[-1])

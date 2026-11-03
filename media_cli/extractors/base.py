@@ -79,6 +79,8 @@ class BaseExtractor:
         priority: int = 2,
         headers: dict[str, str] | None = None,
         subtitles: list[dict] | None = None,
+        manifest_content: str | None = None,
+        quality_labeler=None,
     ) -> list[dict]:
         """Parse master HLS playlist into quality streams or return master stream."""
         req_headers = headers.copy() if headers else {}
@@ -89,11 +91,13 @@ class BaseExtractor:
         if "User-Agent" not in req_headers:
             req_headers["User-Agent"] = UA
 
-        try:
-            content = self.fetch_page(master_url, headers=req_headers, referer=referer, timeout=8)
-        except Exception:
-            # If fetching manifest fails, return master stream directly
-            content = ""
+        content = manifest_content
+        if content is None:
+            try:
+                content = self.fetch_page(master_url, headers=req_headers, referer=referer, timeout=8)
+            except Exception:
+                # If fetching manifest fails, return master stream directly
+                content = ""
 
         prefix = name or self.name
         parsed_subs = list(subtitles or [])
@@ -150,7 +154,7 @@ class BaseExtractor:
                     height = int(res_match.group(2)) if res_match else 0
                     bitrate = int(bandwidth_match.group(1)) if bandwidth_match else 0
                     audio_gid = audio_match.group(1) if audio_match else ""
-                    quality_str, rank = quality_from_dimensions(width, height)
+                    quality_str, rank = (quality_labeler or quality_from_dimensions)(width, height)
 
                     matching_audios = parsed_audios.get(audio_gid) or all_audio_tracks
                     def_audio = None

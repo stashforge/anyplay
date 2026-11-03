@@ -19,8 +19,11 @@ def _cleanup():
     except Exception:
         pass
     try:
-        from ..services.browser_access.integration import close_browser_sessions
-        close_browser_sessions(shutdown=True)
+        from ..services.browser_access.operation import shutdown_event
+        shutdown_event.set()
+        if "media_cli.services.browser_access.integration" in sys.modules:
+            from ..services.browser_access.integration import close_browser_sessions
+            close_browser_sessions(shutdown=True)
     except Exception:
         pass
     try:

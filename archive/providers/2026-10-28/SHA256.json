@@ -1,0 +1,14 @@
+{
+  "media_cli/providers/miruro.py": "1101172b9fdacf6bbcd3f19b686087c1a88b0958471ff33e31cc33826d6d3d00",
+  "media_cli/providers/allanime.py": "31d7d30ef3bb3be16cbab42b5daf476b6d179f08175600607e30b4ad87d29513",
+  "tests/test_miruro_provider.py": "3cf45a75a4e9754f21e047cb037ff457f073a6eee8782cef62ae30a6de210ba2",
+  "tests/test_mkissa_provider.py": "b165d95810c99cb27398ef1917c63d1eac4674a742d272c3c95e7fd05861d044",
+  "media_cli/media/decryption.py": "e371bb084d02e846ee0a4063415d374942c17bbaab8481f5ad70fff8cfd8cdf2",
+  "media_cli/services/http.py": "921cefab474a6bf3ca1e29f50357b379678e20633d978435d2dca981ff0f1dd0",
+  "media_cli/services/catalog.py": "5641ddff26a5ad92a4ad272cfe139c0fdd74333c3a5a9679eeb055fe0004221b",
+  "media_cli/media/resolver.py": "205c8e6fdd75b5805bfd798c5c22d0e1b2218460d603bfbffcd42cc46909bbec",
+  "media_cli/provider_manifest.py": "4bc725743016edc6adc4abf26ce37cb722b85d2e533f569b4c7c0c05f74aa51f",
+  "media_cli/providers/registry.json": "21255fb8a420b0de1b6965b8e744d5552e35029626c6bdc2a351079070b19d67",
+  "media_cli/providers/__init__.py": "2e73a2a8edb784076d2944ba5899f5349a04b2e5a3112e36ea0bd2beb49b25f4",
+  "pyproject.toml": "4fe6014db6f13f4f0049e2b3826b4ed89fddebfc815b19c22e12e18a5dc54316"
+}

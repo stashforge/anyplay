@@ -400,6 +400,7 @@ class TestAndroidResume(unittest.TestCase):
 
         action_show = {
             "_id": "show_123",
+            "_provider": "anipm",
             "_anilist_progress": 3,
             "_local_progress": 3,
             "_local_episode_label": "3",
@@ -445,7 +446,7 @@ class TestAndroidResume(unittest.TestCase):
             # Simulate 23:14 / 23:59 completion
             captured_progress_cb("show_123", "4", 0, 1439, True)
 
-            mock_save_resume.assert_called_with("show_123", "4", 0)
+            mock_save_resume.assert_called_with("show_123", "4", 0, "anipm")
             mock_save_hist.assert_called_once_with(action_show, "4", "sub")
             self.assertEqual(action_show["_local_progress"], 4)
             self.assertEqual(action_show["_local_episode_label"], "4")
@@ -491,7 +492,7 @@ class TestAndroidResume(unittest.TestCase):
         # Simulate resume_time = 440 (07:20) initially
         resume_dict = {("show_123", "4"): 440}
 
-        def mock_get_resume(sid, ep):
+        def mock_get_resume(sid, ep, provider_id=None):
             return resume_dict.get((sid, str(ep)), 0)
 
         with patch("media_cli.app_core.get_resume_time", side_effect=mock_get_resume), \
