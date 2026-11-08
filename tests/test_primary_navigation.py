@@ -152,7 +152,7 @@ def test_title_menu_back_skips_only_an_auto_single_results_screen(monkeypatch, c
     monkeypatch.setattr(
         playback_menu,
         "run_details_menu",
-        lambda flags, ui, *, read_view, switch_translation, information: (
+        lambda flags, ui, *, read_view, switch_translation, information, ready=None, can_activate=None: (
             read_view(), DetailsMenuResult("back")
         )[1],
     )

@@ -165,6 +165,8 @@ def _open_anilist_show_from_picker(
     parent_state,
     cfg=None,
 ):
+    from ..providers import is_provider_active
+
     p_id = getattr(args, "provider", None) or (cfg or {}).get("provider")
 
     # Check if a previous provider link exists for this AniList ID
@@ -172,7 +174,7 @@ def _open_anilist_show_from_picker(
     if al_id:
         stored = app_core.get_al_match(al_id)
         stored_pid = stored.get("_provider") or stored.get("provider")
-        if stored_pid:
+        if stored_pid and is_provider_active(stored_pid):
             p_id = stored_pid
 
     p_name = app_core.provider_display_name(p_id)
@@ -184,7 +186,7 @@ def _open_anilist_show_from_picker(
         provider_id=p_id,
     )
 
-    if not matched:
+    if not matched or not str(matched.get("_id") or "").strip():
         # Non-intrusive entry: open directly into Details view without forced prompt
         unlinked = dict(source_show)
         unlinked["_has_provider_link"] = False

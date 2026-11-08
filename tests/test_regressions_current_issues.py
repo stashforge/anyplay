@@ -163,8 +163,13 @@ def test_background_auto_download_uses_provider_key(monkeypatch, tmp_path):
     def fake_fetch(show_id, ep, ttype, quality="best", provider_id=None, ep_data=None, **kwargs):
         captured["show_id"] = show_id
         captured["provider_id"] = provider_id
-        return ({"link": "https://example.test/video.m3u8"}, "Mirror", {}, [])
+        return ({"link": "https://example.test/video.m3u8", "type": "hls", "requires_proxy": True}, "Mirror", {}, [])
 
+    def start_proxy(url, **kwargs):
+        captured["proxy_type"] = kwargs.get("stream_type")
+        return "http://127.0.0.1/video.m3u8", object()
+
+    monkeypatch.setattr("media_cli.media.local_proxy.start_local_proxy", start_proxy)
     fake_worker = FakeWorker()
     monkeypatch.setattr(playback_player.app_core, "is_online", lambda: True)
     monkeypatch.setattr(playback_player.app_core, "is_termux", lambda: False)
@@ -178,6 +183,7 @@ def test_background_auto_download_uses_provider_key(monkeypatch, tmp_path):
 
     assert captured["show_id"] == "provider-title-456"
     assert captured["provider_id"] == "anikoto"
+    assert captured["proxy_type"] == "hls"
     assert fake_worker.items[0].automatic is True
 
 

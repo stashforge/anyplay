@@ -220,9 +220,14 @@ def play_android(
         from ..media.aniskip import fetch_skip_times, generate_chapters_file
         from ..media.provider_skips import merge_skip_intervals, needs_skip_fallback, normalize_provider_skips
         skip_intervals = []
-        if aniskip_enabled:
+        local = not url.startswith(("https://", "http://"))
+        if aniskip_enabled and local:
+            from ..media.episode_identity import read_episode_skips
+
+            skip_intervals = read_episode_skips(url)
+        elif aniskip_enabled:
             skip_intervals = normalize_provider_skips(stream.get("skip_intervals"))
-        if aniskip_enabled and mal_id and needs_skip_fallback(skip_intervals):
+        if aniskip_enabled and not local and mal_id and needs_skip_fallback(skip_intervals):
             ep_num = episode_progress_number(episode)
             fetch = fetch_skip_times_fn or fetch_skip_times
             skip_intervals = merge_skip_intervals(skip_intervals, fetch(mal_id, ep_num, episode_length=0.0))

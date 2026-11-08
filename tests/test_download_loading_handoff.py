@@ -93,17 +93,25 @@ def test_download_resolution_runs_from_queued_item_after_manager_opens(monkeypat
     queued = []
     monkeypatch.setattr(download_worker, 'get_global_worker', lambda *a: SimpleNamespace(add_item=queued.append))
 
+    proxy_server = object()
+
+    def start_proxy(url, **kwargs):
+        proxy_type = kwargs.get("stream_type", "mp4")
+        return f"http://127.0.0.1/video.{ 'm3u8' if proxy_type == 'hls' else 'mp4' }", proxy_server
+
+    monkeypatch.setattr("media_cli.media.local_proxy.start_local_proxy", start_proxy)
+
     def resolve(*args, **kwargs):
         assert attempt.events[-1] == 'manager'
         assert args[:3] == ('one', '1', 'sub')
-        return {'link': 'https://example.test/video.m3u8'}, 'Example', attempt.data, []
+        return {'link': 'https://example.test/video.m3u8', 'type': 'hls', 'requires_proxy': True}, 'Example', attempt.data, []
 
     def manager(worker, **kwargs):
         attempt.events.append('manager')
         assert queued and kwargs['standalone']
         with ThreadPoolExecutor(max_workers=1) as pool:
             url, headers, proxy = pool.submit(queued[0].resolve_fn, queued[0]).result(timeout=1)
-        assert url == 'https://example.test/video.m3u8' and proxy is None
+        assert url == 'http://127.0.0.1/video.m3u8' and proxy is proxy_server
         assert queued[0].current_mirror_name == 'Example'
         assert any('Testing mirror' in line for line in queued[0].logs)
         return 'BACK'

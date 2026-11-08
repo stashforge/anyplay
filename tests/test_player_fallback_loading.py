@@ -97,3 +97,51 @@ def test_download_fallback_does_not_borrow_player_ui(monkeypatch):
     monkeypatch.setattr(player_screen, "run_loading_work", lambda *a, **kw: pytest.fail("Download entered player UI"))
     monkeypatch.setattr(playback_player.app_core, "fetch_episode_stream", lambda *a, **kw: None)
     assert playback_player._fetch_player_fallback({}, KEY, download=True) is None
+
+
+def test_queued_extraction_does_not_start_after_cancellation(monkeypatch):
+    from concurrent.futures import CancelledError
+    from media_cli.core import source_batch
+
+    started, release, cancelled = (threading.Event() for _ in range(3))
+    calls = []
+
+    def resolve(source):
+        calls.append(source['sourceName'])
+        started.set()
+        assert release.wait(2)
+        return []
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        monkeypatch.setattr(source_batch, '_executor', lambda: pool)
+        batch = source_batch.SourceBatch(resolve, cancel_check=cancelled.is_set)
+        try:
+            batch.poll([{'sourceName': 'native'}, {'sourceName': 'yt-dlp'}], set(), timeout=0)
+            assert started.wait(1)
+            cancelled.set()
+            release.set()
+            futures = list(batch.futures.values())
+            assert futures[0].result(timeout=1) == []
+            with pytest.raises(CancelledError):
+                futures[1].result(timeout=1)
+            assert calls == ['native']
+        finally:
+            release.set()
+            batch.close()
+
+
+def test_accepted_batch_survives_foreground_owner_retirement(monkeypatch):
+    from media_cli.core import source_batch
+
+    cancelled = threading.Event()
+    calls = []
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        monkeypatch.setattr(source_batch, '_executor', lambda: pool)
+        batch = source_batch.SourceBatch(lambda source: calls.append(source) or [], cancel_check=cancelled.is_set)
+        try:
+            batch.detach_cancel_check()
+            cancelled.set()
+            assert batch.get({'sourceName': 'background'}) == []
+            assert calls == [{'sourceName': 'background'}]
+        finally:
+            batch.close()

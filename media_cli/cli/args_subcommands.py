@@ -107,6 +107,8 @@ def add_anilist_subcommand(commands):
         ),
         description=(
             "Browse your AniList library.\n\n"
+            "Commands:\n"
+            "  search <query> Search the AniList catalogue\n\n"
             "Lists:\n"
             "  airing         Upcoming episodes from your lists\n"
             "  watching       Currently watching\n"

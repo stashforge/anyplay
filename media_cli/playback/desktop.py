@@ -217,6 +217,10 @@ def play_desktop(
     skip_lookup = None
     if custom_skip_intervals is not None:
         skip_intervals = list(custom_skip_intervals or [])
+    elif aniskip_enabled and not url.startswith(("https://", "http://")):
+        from ..media.episode_identity import read_episode_skips
+
+        skip_intervals = read_episode_skips(url)
     elif aniskip_enabled:
         from ..media.aniskip import cached_skip_times
         from ..media.provider_skips import normalize_provider_skips

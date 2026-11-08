@@ -18,6 +18,7 @@ from .shared.hls import parse_master_playlist_variants
 from .shared.models import (
     normalize_episode_catalog,
     normalize_episode_sources,
+    normalize_title,
     normalize_titles,
 )
 
@@ -236,14 +237,14 @@ class ReAnimeProvider(Provider):
             "title": display_title,
         }
 
-        return {
+        return normalize_title({
             "_id": provider_id,
             "name": display_title,
             "thumbnail": poster,
             "banner": banner,
             "description": data.get("description"),
             "anilist_id": anilist_id,
-        }
+        }, provider_id=self.id, provider_name=self.name)
 
     def episode_catalog(self, provider_id: str, ttype: str = "sub") -> dict[str, Any]:
         path = f"/api/v1/anime/{provider_id}/episodes?limit=2000"

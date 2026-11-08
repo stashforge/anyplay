@@ -152,3 +152,49 @@ def test_flixcloud_proxy_helpers_strip_token_and_xor_segments():
     payload = bytes([0x47 ^ 1, 0x41 ^ 2, 0x42 ^ 3])
     assert _xor_bytes(payload, [1, 2, 3]) == b"GAB"
     assert _detect_fake_media_header(b"RIFFxxxxWEBP" + payload) == 12
+
+
+def test_reanime_title_details_keep_provider_and_tracker_identity(monkeypatch):
+    from media_cli.domain.titles import title_provider_key
+    provider = ReAnimeProvider()
+    monkeypatch.setattr(provider, '_fetch_json', lambda *args, **kwargs: {
+        'title': {'english': 'Example'}, 'anilist_id': 123,
+        'cover_image': {'large': 'https://example.test/cover.jpg'},
+        'description': 'Description',
+    })
+    title = provider.get_title('example-slug')
+    assert title_provider_key(title) == 'reanime'
+    assert title['_provider_id'] == 'example-slug'
+    assert title['aniListId'] == '123'
+    assert title['name'] == 'Example'
+    assert title['description'] == 'Description'
+
+
+def test_saved_anilist_link_routes_real_reanime_details_to_reanime_catalogue(monkeypatch):
+    from media_cli.core import storage
+    from media_cli.domain import matching
+    from media_cli.services import catalog
+    provider = ReAnimeProvider()
+    requests = []
+
+    def fetch(path, **kwargs):
+        requests.append(path)
+        if '/episodes?' in path:
+            return {'data': [{'episode_number': 1}]}
+        return {'title': {'english': 'Example'}, 'anilist_id': 123}
+
+    monkeypatch.setattr(provider, '_fetch_json', fetch)
+    monkeypatch.setattr(storage, 'get_al_match', lambda key: {
+        '_provider': 'reanime', '_id': 'example-slug', 'match_source': 'id',
+    })
+    monkeypatch.setattr(catalog, 'require_provider_operation', lambda *args: None)
+
+    def get_provider(key, *args):
+        assert key == 'reanime', 'Saved link lost its provider before catalogue fetch'
+        return provider
+
+    monkeypatch.setattr(catalog, 'get_provider', get_provider)
+    show = matching.match_anilist_show_to_provider({'_id': '123', 'name': 'Example'}, provider_id='reanime')
+    result = catalog._perform_catalog_fetch(show, 'sub', None, '')
+    assert result == ['1']
+    assert requests == ['/api/v1/anime/example-slug', '/api/v1/anime/example-slug/episodes?limit=2000']

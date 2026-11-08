@@ -239,7 +239,7 @@ def trigger_background_auto_download(show_ctx, current_ep_index, episode_ids, tt
         return
 
     from media_cli.media.download import sanitize_filename
-    from media_cli.media.download_worker import DownloadItem, DownloadStatus, get_global_worker
+    from media_cli.media.download_worker import DownloadItem, DownloadStatus, get_global_worker, prepare_download_proxy
 
     bg_tasks.add(task_key)
     provider_title_id = title_provider_id(show_ctx)
@@ -301,7 +301,11 @@ def trigger_background_auto_download(show_ctx, current_ep_index, episode_ids, tt
         item.ip_version = selected_stream.get("ip_version")
         item.subtitles = list(selected_stream.get("subtitles") or selected_stream.get("vtt") or [])
         item.subtitle_url = selected_stream.get("subtitle_url", "")
-        return raw_url, headers, None
+        item.provider_skips = selected_stream.get("skip_intervals") or []
+        proxy_srv = None
+        if item.ip_version != 4:
+            raw_url, proxy_srv = prepare_download_proxy(selected_stream, raw_url, headers, referer)
+        return raw_url, headers, proxy_srv
 
     def _on_complete(item):
         try:
@@ -649,6 +653,8 @@ def _probe_player_mirrors(
     from copy import deepcopy
     from threading import Event
 
+    from ..media.sources import probe_stream_liveness
+    from ..services.media_probe import MediaProbeOutcome
     from ..ui.player_screen import run_loading_work
 
     snapshot = deepcopy(candidates)
@@ -665,8 +671,10 @@ def _probe_player_mirrors(
                 return None, None, ()
             if not recovery and now - float(candidate.get("validated_at") or 0) < 30:
                 return index, None, tuple(dead_links)
-            if app_core.ping_stream_liveness(candidate, timeout=0.8):
-                return index, None if recovery else now, tuple(dead_links)
+            outcome = probe_stream_liveness(candidate, timeout=0.8)
+            _logger.debug('Mirror selection probe: candidate=%d outcome=%s', index + 1, outcome.value)
+            if outcome is not MediaProbeOutcome.MISSING:
+                return index, now if outcome is MediaProbeOutcome.AVAILABLE else None, tuple(dead_links)
             if not recovery:
                 dead_links.append(candidate.get("link") or candidate.get("streamUrl"))
         return (0 if snapshot else None), None, tuple(dead_links)
@@ -951,7 +959,7 @@ def handle_play_state(
         provider_id = title_provider_key(s_ctx)
         downloader_choice = getattr(args, "downloader", cfg.get("downloader", "auto"))
         download_dir = cfg.get("download_dir", "")
-        from media_cli.media.download_worker import DownloadItem, get_global_worker
+        from media_cli.media.download_worker import DownloadItem, get_global_worker, prepare_download_proxy
         from media_cli.ui.download_manager import run_download_manager
         from media_cli.media.download import sanitize_filename
 
@@ -1003,24 +1011,14 @@ def handle_play_state(
                 if referer and "Referer" not in headers:
                     headers["Referer"] = referer
                 proxy_srv = None
-                if stream.get("ip_version") != 4 and (
-                    stream.get("requires_proxy")
-                    or "uwucdn.top" in raw_url
-                    or "owocdn.top" in raw_url
-                    or "kwik." in referer
-                    or "megap." in raw_url
-                    or "akirax.buzz" in raw_url
-                ):
-                    try:
-                        from media_cli.media.local_proxy import start_local_proxy
-                        raw_url, proxy_srv = start_local_proxy(raw_url, headers=headers, referer=referer)
-                    except Exception:
-                        pass
+                if stream.get("ip_version") != 4:
+                    raw_url, proxy_srv = prepare_download_proxy(stream, raw_url, headers, referer)
                 item.audio_tracks = list(stream.get("audio_tracks") or [])
                 item.audio_url = stream.get("audio_url", "")
                 item.ip_version = stream.get("ip_version")
                 item.subtitles = list(stream.get("subtitles") or stream.get("vtt") or [])
                 item.subtitle_url = stream.get("subtitle_url", "")
+                item.provider_skips = stream.get("skip_intervals") or []
                 return raw_url, headers, proxy_srv
             return _res
 
@@ -1613,6 +1611,7 @@ def handle_play_state(
                 download_sub_langs=getattr(args, "download_sub_langs", None),
                 download_audio_langs=getattr(args, "download_audio_langs", None),
                 subtitle_mode=getattr(args, "subtitle_mode", None),
+                mal_id=(ui.ui_show_ctx or {}).get("malId"),
             )
             if download_ok:
                 try:
@@ -2243,6 +2242,7 @@ def handle_play_state(
                 if auto_scrobbled:
                     ms.current_ep_index = None
                     ms.current_ep = None
+                ui.details_focus_primary = True
                 return "DETAILS"
 
         elif result == "NEXT":

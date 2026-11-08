@@ -24,13 +24,22 @@ def source_identity(source):
 
 
 class SourceBatch:
-    def __init__(self, resolve):
+    def __init__(self, resolve, *, cancel_check=None):
         self.resolve = resolve
         self.futures = {}
         self.closed = threading.Event()
+        self._cancel_check = cancel_check
+
+    def _cancelled(self):
+        check = self._cancel_check
+        return self.closed.is_set() or bool(check and check())
+
+    def detach_cancel_check(self):
+        """An accepted batch is now owned by background extraction, not its caller."""
+        self._cancel_check = None
 
     def _run(self, source):
-        if self.closed.is_set():
+        if self._cancelled():
             raise CancelledError
         # A retired job must never print or report into a later screen. The
         # coordinator owns visible progress; normal diagnostic logging remains.
@@ -40,7 +49,7 @@ class SourceBatch:
     def _fill(self, sources):
         active = sum(not future.done() for future in self.futures.values())
         for source in sources:
-            if self.closed.is_set() or active >= 3:
+            if self._cancelled() or active >= 3:
                 break
             key = source_identity(source)
             if key not in self.futures:
@@ -62,7 +71,7 @@ class SourceBatch:
         key = source_identity(source)
         if retry:
             self.futures.pop(key, None)
-        while not self.closed.is_set() and not (cancel_check and cancel_check()):
+        while not self._cancelled() and not (cancel_check and cancel_check()):
             self._fill([source])
             future = self.futures.get(key)
             if future is not None and future.done():

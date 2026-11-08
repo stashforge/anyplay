@@ -525,9 +525,16 @@ def render(
 
     # Target episode: e.g. "EP 1" or "EP 1/12"
     target_ep = s.get("current_ep_label") or str(s.get("current_ep", "") or "")
-    from ..domain.episodes import clean_episode_identifier
+    from ..domain.episodes import clean_episode_identifier, episode_index_for_id
     clean_target_ep = clean_episode_identifier(target_ep) if target_ep else ""
     total = _positive_int(show.get("episodeCount")) if isinstance(show, dict) else None
+    if clean_target_ep and not re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", clean_target_ep) and isinstance(show, dict):
+        position = episode_index_for_id(show.get("_episode_ids") or [], target_ep,
+                                        labels=show.get("_episode_labels"))
+        if position is not None:
+            clean_target_ep = str(position + 1)
+        elif total == 1:
+            clean_target_ep = "1"
 
     if clean_target_ep:
         target_ep_str = f"EP {clean_target_ep}/{total}" if total else f"EP {clean_target_ep}"

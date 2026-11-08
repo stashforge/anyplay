@@ -85,7 +85,7 @@ def test_plain_helpers_do_not_create_loading_driver(monkeypatch, loader):
     assert getattr(display, loader)(*args) == 42
 
 
-@pytest.mark.parametrize("loader", ("with_loading", "with_anilist_menu_loading"))
+@pytest.mark.parametrize("loader", ("with_loading",))
 def test_nested_helper_updates_existing_scope_without_second_driver(monkeypatch, loader):
     statuses = []
     monkeypatch.setattr(transition, "in_preparation", lambda: True)

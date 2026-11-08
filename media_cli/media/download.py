@@ -1,5 +1,6 @@
 """Episode download execution with multi-audio and subtitle preservation."""
 
+import logging
 import os
 import shutil
 import subprocess
@@ -56,18 +57,61 @@ def sanitize_filename(title: str) -> str:
     ).strip()
 
 
-def anyplay_metadata_args(title: str = "", episode: str = "", title_id: str = "", episode_id: str = "") -> list[str]:
+def resolve_download_skips(stream, mal_id, episode):
+    from ..domain.episodes import episode_progress_number
+    from .aniskip import fetch_skip_times
+    from .provider_skips import normalize_provider_skips
+
+    native = normalize_provider_skips(stream.get("skip_intervals"))
+    if native:
+        return native
+    episode_number = episode_progress_number(episode)
+    if mal_id and episode_number:
+        try:
+            return fetch_skip_times(mal_id, episode_number)
+        except (OSError, ValueError, TypeError, AttributeError):
+            logging.getLogger(__name__).debug("Could not fetch skip timings for download", exc_info=True)
+    return []
+
+
+def anyplay_metadata_args(title: str = "", episode: str = "", title_id: str = "", episode_id: str = "", *, skip_intervals=None) -> list[str]:
     tags = {
         "anyplay_title": str(title or "").strip(),
         "anyplay_episode": str(episode or "").strip(),
         "anyplay_title_id": str(title_id or "").strip(),
         "anyplay_episode_id": str(episode_id or "").strip(),
     }
+    if skip_intervals:
+        import json
+
+        tags["anyplay_skip_intervals"] = json.dumps(skip_intervals, separators=(",", ":"))
     args: list[str] = []
     for key, value in tags.items():
         if value:
             args.extend(["-metadata", f"{key}={value}"])
     return args
+
+
+def embed_download_metadata(path, metadata_args, *, cancel_check=None):
+    """Best-effort stream-copy remux for engines that cannot write Anyplay tags."""
+    import tempfile
+
+    if (cancel_check and cancel_check()) or not shutil.which("ffmpeg"):
+        return False
+    try:
+        with tempfile.TemporaryDirectory(prefix=".anyplay-remux-", dir=os.path.dirname(os.path.abspath(path))) as work:
+            output = os.path.join(work, "episode.mkv")
+            result = subprocess.run(
+                ["ffmpeg", "-nostdin", "-v", "error", "-protocol_whitelist", "file",
+                 "-i", os.fspath(path), "-map", "0", "-c", "copy", *metadata_args, output],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120,
+            )
+            if result.returncode or not os.path.getsize(output) or (cancel_check and cancel_check()):
+                return False
+            os.replace(output, path)
+            return True
+    except (OSError, subprocess.TimeoutExpired):
+        return False
 
 
 def download_episode(
@@ -81,6 +125,7 @@ def download_episode(
     download_sub_langs=None,
     download_audio_langs=None,
     subtitle_mode=None,
+    mal_id=None,
 ):
     extra_args = extra_args or []
 
@@ -213,6 +258,9 @@ def download_episode(
             if not quiet:
                 console_status(f"Could not download subtitles: {sub_exc}", kind='warning')
 
+    skip_intervals = resolve_download_skips(stream, mal_id, episode)
+    metadata_args = anyplay_metadata_args(title=title, episode=str(episode), skip_intervals=skip_intervals)
+
     if downloader == "ffmpeg":
         command = [
             "ffmpeg",
@@ -286,7 +334,7 @@ def download_episode(
 
         os.makedirs(os.path.dirname(ffmpeg_partial_filename), exist_ok=True)
 
-        command.extend(anyplay_metadata_args(title=title, episode=str(episode)))
+        command.extend(metadata_args)
 
         # Stream copy without re-encoding
         command.extend(["-c", "copy", ffmpeg_partial_filename])
@@ -359,7 +407,7 @@ def download_episode(
                     actual_download_path,
                     downloaded_sidecars,
                     final_filename,
-                    metadata_args=anyplay_metadata_args(title=title, episode=str(episode)),
+                    metadata_args=metadata_args,
                     quiet=quiet,
                 )
                 if remux_ok:
@@ -390,6 +438,10 @@ def download_episode(
                 if not quiet:
                     _error("yt-dlp did not produce a remuxable subtitle download.")
                 return False
+
+        if downloader == "yt-dlp" and not yt_dlp_remux and skip_intervals:
+            if not embed_download_metadata(final_filename, metadata_args) and not quiet:
+                console_status("Download saved without skip timings. FFmpeg remux unavailable.", kind="warning")
 
         if downloader == "ffmpeg" and downloaded_sidecars:
             for s_path in downloaded_sidecars:

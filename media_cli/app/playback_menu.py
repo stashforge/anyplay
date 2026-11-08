@@ -42,6 +42,18 @@ from .footer import context_footer, mode_label, provider_label
 _torrent_mirror_augmenting: set[tuple] = set()
 _torrent_mirror_augment_lock = threading.RLock()
 
+# Logical bottom-up order: playback, tracking, then supporting actions.
+# The primary action stays closest to the footer, followed by episode navigation.
+_DETAILS_ACTION_PRIORITY = {
+    "NEXT": 1, "PREV": 2, "REPLAY": 3,
+    "BINGE": 10, "EPISODES": 20,
+    "TRACK_ONLY": 30, "UNTRACK": 30, "PROGRESS": 40,
+    "STATUS": 50, "RATE": 60, "DOWNLOAD_MENU": 70,
+    "PLAYBACK_SETTINGS": 80, "MIRRORS": 90, "ANIME_SONGS": 115,
+    "CHANGE_MATCH": 110, "CHANGE_PROVIDER": 110, "LINK_ANILIST": 110,
+    "RETRY_CATALOG": 120,
+}
+
 
 def _load_provider_episode_data_for_mirrors(show_id, episode_id, ttype, provider_id):
     return app_core.get_episode_data(
@@ -590,6 +602,13 @@ def handle_action_menu_state(
             acts.append("RETRY_CATALOG")
             action_hints["Retry Episodes"] = "try loading episodes again"
 
+        primary_action = acts[0]
+        ordered = sorted(zip(opts, acts, strict=True),
+                         key=lambda item: 0 if item[1] == primary_action
+                         else _DETAILS_ACTION_PRIORITY.get(item[1], 0))
+        opts = [label for label, _ in ordered]
+        acts = [action for _, action in ordered]
+
     action_hints = {}
     _build_menu()
 
@@ -1051,6 +1070,10 @@ def handle_action_menu_state(
                                      else 'Episodes unavailable. Use Retry Episodes.')
         return False
 
+    if getattr(ui, "details_focus_primary", False):
+        ui._view_positions.pop((_action_view().id,), None)
+        ui.details_focus_primary = False
+
     outcome = run_details_menu(
         flags, ui, read_view=_action_view, switch_translation=_action_tab_fn,
         information=lambda: information(0),
@@ -1065,7 +1088,8 @@ def handle_action_menu_state(
         return 'DETAILS'
     if outcome.kind == "back":
         previous = ui.action_prev_state or "DETAILS"
-        if should_clear_query_on_child_left(previous, len(ms.shows) <= 1):
+        source_shows = (getattr(ms, "last_al_shows", None) or ms.shows) if previous == "ANILIST_SEARCH" else ms.shows
+        if should_clear_query_on_child_left(previous, len(source_shows) <= 1):
             ms.query_str = ""
         return previous
 
@@ -1736,7 +1760,7 @@ def _execute_batch_download(flags, ui, ms, cfg, args, ttype, action_show, queued
     provider_id = title_provider_key(action_show)
 
     if not getattr(args, "no_tui", False) and not getattr(flags, "plain_mode", False) and sys.stdin.isatty() and sys.stdout.isatty():
-        from media_cli.media.download_worker import DownloadItem, get_global_worker
+        from media_cli.media.download_worker import DownloadItem, get_global_worker, prepare_download_proxy
         from media_cli.ui.download_manager import run_download_manager
         from media_cli.media.download import sanitize_filename
 
@@ -1773,23 +1797,12 @@ def _execute_batch_download(flags, ui, ms, cfg, args, ttype, action_show, queued
                 if referer and "Referer" not in headers:
                     headers["Referer"] = referer
                 proxy_srv = None
-                if (
-                    stream.get("requires_proxy")
-                    or "uwucdn.top" in raw_url
-                    or "owocdn.top" in raw_url
-                    or "kwik." in referer
-                    or "megap." in raw_url
-                    or "akirax.buzz" in raw_url
-                ):
-                    try:
-                        from media_cli.media.local_proxy import start_local_proxy
-                        raw_url, proxy_srv = start_local_proxy(raw_url, headers=headers, referer=referer)
-                    except Exception:
-                        pass
+                raw_url, proxy_srv = prepare_download_proxy(stream, raw_url, headers, referer)
                 item.audio_tracks = list(stream.get("audio_tracks") or [])
                 item.audio_url = stream.get("audio_url", "")
                 item.subtitles = list(stream.get("subtitles") or stream.get("vtt") or [])
                 item.subtitle_url = stream.get("subtitle_url", "")
+                item.provider_skips = stream.get("skip_intervals") or []
                 return raw_url, headers, proxy_srv
             return _res
 
@@ -1873,6 +1886,7 @@ def _execute_batch_download(flags, ui, ms, cfg, args, ttype, action_show, queued
             download_sub_langs=getattr(args, "download_sub_langs", None),
             download_audio_langs=getattr(args, "download_audio_langs", None),
             subtitle_mode=getattr(args, "subtitle_mode", None),
+            mal_id=action_show.get("malId"),
         )
         if dl_ok:
             success_count += 1

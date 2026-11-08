@@ -450,6 +450,9 @@ def with_loading(msg, fn, *args, **kwargs):
 
 def render_anilist_menu_loading(status, loading_text=""):
     enter_alt_screen()
+    from .picker import invalidate_screen_buffer
+    # This renderer replaces the entire frame outside the picker's row cache.
+    invalidate_screen_buffer()
     try:
         size = os.get_terminal_size()
         columns, rows = size.columns, size.lines
@@ -465,6 +468,15 @@ def render_anilist_menu_loading(status, loading_text=""):
 
 
 def with_anilist_menu_loading(status, msg, fn, *args, **kwargs):
+    from .transition import call_on_ui_thread, in_preparation
+
+    if in_preparation():
+        # This loader owns an existing menu frame, not a generic footer overlay.
+        # Marshal to the terminal owner; its loading driver still runs work off UI.
+        return call_on_ui_thread(
+            lambda: with_anilist_menu_loading(status, msg, fn, *args, **kwargs)
+        )
+
     def paint(snapshot, fd, spinner_style):
         try:
             width = os.get_terminal_size(fd).columns

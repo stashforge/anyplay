@@ -305,3 +305,63 @@ finish(picker_module.tui_pick(flags, ui, 'Details', ['Play', 'Episodes'],
         terminal.until(b"DETAILS FOOTER")
         os.write(terminal.master, b"\x03")
         assert terminal.result() == -5
+
+
+def test_nested_anilist_loading_preserves_existing_menu_frame(tmp_path):
+    script = '''
+from media_cli.app.terminal_controller import run_screen_controller
+from media_cli.context import MachineState
+from media_cli.ui.terminal_runtime import terminal_application
+from media_cli.ui import display
+
+def controller(flags, ui, ms, cfg, args):
+    result = display.with_anilist_menu_loading('CURRENT', 'Loading Watching list', lambda: time.sleep(0.35))
+    terminal_marker('LIST FETCH COMPLETED')
+    return picker_module.tui_pick(flags, ui, 'Watching', ['Fetched title'],
+        header='READY LIST DETAILS', return_on_quit=True)
+
+@terminal_application
+def application():
+    return run_screen_controller(controller, flags, ui, MachineState(), {}, SimpleNamespace(), fallback='ANILIST_BROWSE')
+
+result = application()
+display.restore_terminal()
+finish(result)
+'''
+    with Terminal(tmp_path, script) as terminal:
+        terminal.until(b'READY LIST DETAILS')
+        before_ready = bytes(terminal.output).split(b'LIST FETCH COMPLETED')[0]
+        os.write(terminal.master, b'\x03')
+        assert terminal.result() == -5
+        assert b'Loading Watching list' in before_ready
+        assert b'AniList Lists' in before_ready
+        assert b'Plan to Watch' in before_ready
+
+
+def test_anilist_loading_does_not_hide_cached_destination_rows(tmp_path):
+    script = '''
+from media_cli.app.terminal_controller import run_screen_controller
+from media_cli.context import MachineState
+from media_cli.ui.terminal_runtime import terminal_application
+from media_cli.ui import display
+
+def controller(flags, ui, ms, cfg, args):
+    picker_module.tui_pick(flags, ui, 'Same list', ['Same title'],
+        header='PRESERVED DETAILS', return_on_quit=True)
+    display.with_anilist_menu_loading('CURRENT', 'Loading Watching list', lambda: time.sleep(0.35))
+    terminal_marker('FETCH FINISHED')
+    return picker_module.tui_pick(flags, ui, 'Same list', ['Same title'],
+        header='PRESERVED DETAILS', return_on_quit=True)
+
+@terminal_application
+def application():
+    return run_screen_controller(controller, flags, ui, MachineState(), {}, SimpleNamespace(), fallback='ANILIST_BROWSE')
+finish(application())
+'''
+    with Terminal(tmp_path, script) as terminal:
+        terminal.send_after(b'PRESERVED DETAILS', b'\r')
+        terminal.until(b'FETCH FINISHED')
+        destination = terminal.until(b'\x1b[35;100H')
+        os.write(terminal.master, b'\x03')
+        assert terminal.result() == -5
+        assert b'PRESERVED DETAILS' in destination

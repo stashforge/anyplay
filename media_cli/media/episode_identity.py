@@ -16,6 +16,7 @@ from ..core.processes import read_bounded_process_stdout
 
 _LOG = logging.getLogger(__name__)
 _TAG_NAMES = ("anyplay_title", "anyplay_episode", "anyplay_title_id", "anyplay_episode_id")
+_SKIP_TAG = "anyplay_skip_intervals"
 _Fingerprint = tuple[int, int, int, int, int]
 
 
@@ -25,6 +26,7 @@ class EmbeddedEpisodeIdentity:
     episode: str
     title_id: str
     episode_id: str
+    skip_intervals: tuple[dict, ...] = ()
 
 
 def _fingerprint(info: os.stat_result) -> _Fingerprint:
@@ -59,14 +61,27 @@ def _decode_identity(data: object) -> EmbeddedEpisodeIdentity | None:
         values[key] = value
     if not any(values.values()):
         return None
-    return EmbeddedEpisodeIdentity(*(values.get(key, "") for key in _TAG_NAMES))
+    skip_intervals = ()
+    raw_skips = next((value for key, value in tags.items() if key.casefold() == _SKIP_TAG), None)
+    if isinstance(raw_skips, str) and len(raw_skips) <= 8192:
+        try:
+            rows = json.loads(raw_skips)
+            if isinstance(rows, list):
+                from .provider_skips import playback_skip_intervals
+
+                skip_intervals = tuple(playback_skip_intervals(
+                    [row for row in rows if isinstance(row, dict)], data["format"].get("duration"),
+                ))
+        except (ValueError, RecursionError):
+            pass
+    return EmbeddedEpisodeIdentity(*(values.get(key, "") for key in _TAG_NAMES), skip_intervals)
 
 
 @lru_cache(maxsize=512)
 def _probe_identity(path: str, executable: str, fingerprint: _Fingerprint) -> EmbeddedEpisodeIdentity | None:
     process = subprocess.Popen(
         [executable, "-v", "error", "-protocol_whitelist", "file",
-         "-show_entries", "format_tags=" + ",".join(_TAG_NAMES), "-of", "json", "-i", path],
+         "-show_entries", "format=duration:format_tags=" + ",".join((*_TAG_NAMES, _SKIP_TAG)), "-of", "json", "-i", path],
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
     )
     output = read_bounded_process_stdout(process, timeout=3, max_bytes=65536)
@@ -98,6 +113,11 @@ def read_episode_identity(path: str | os.PathLike[str]) -> EmbeddedEpisodeIdenti
     except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
         _LOG.debug("Embedded episode identity unavailable: path=%r", local_path, exc_info=True)
         return None
+
+
+def read_episode_skips(path: str | os.PathLike[str]) -> list[dict]:
+    identity = read_episode_identity(path)
+    return [dict(row) for row in identity.skip_intervals] if identity else []
 
 
 def clear_identity_cache() -> None:

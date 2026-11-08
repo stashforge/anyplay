@@ -293,10 +293,10 @@ def calculate_stream_expiry(stream: dict, resolved_at: float | None = None) -> f
 
 def ping_stream_liveness(stream: dict, timeout: float = 1.5) -> bool:
     """Compatibility retention check: uncertainty must not destroy a mirror."""
-    return _probe_stream_liveness(stream, timeout) is not MediaProbeOutcome.MISSING
+    return probe_stream_liveness(stream, timeout) is not MediaProbeOutcome.MISSING
 
 
-def _probe_stream_liveness(stream: dict, timeout: float = 1.5) -> MediaProbeOutcome:
+def probe_stream_liveness(stream: dict, timeout: float = 1.5) -> MediaProbeOutcome:
     """Separate positive HTTP evidence, confirmed missing content and uncertainty."""
     if not isinstance(stream, dict):
         return MediaProbeOutcome.MISSING
@@ -385,7 +385,7 @@ def check_stream_health_and_refresh(stream: dict, now: float | None = None) -> b
         return True
 
     # 3. Stale Revalidation Probe
-    outcome = _probe_stream_liveness(stream, timeout=1.5)
+    outcome = probe_stream_liveness(stream, timeout=1.5)
     if outcome is MediaProbeOutcome.AVAILABLE:
         stream["validated_at"] = current_time
     return outcome is not MediaProbeOutcome.MISSING

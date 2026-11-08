@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 from media_cli.context import FLAGS
 from media_cli.core.terminal import strip_ansi
 from media_cli.ui import player_screen
@@ -34,3 +36,27 @@ def test_loading_frame_shows_progress_history_below_cancel_hint(monkeypatch):
     assert '\033[94mFound servers\033[0m' in frame
     assert '\033[92mResolved stream\033[0m' in frame
     assert '\033[40;1H' not in frame
+
+
+@pytest.mark.parametrize('label,total,ids,labels,expected', [
+    ('MOVIE', 1, ['opaque'], {'opaque': 'MOVIE'}, 'EP 1/1'),
+    ('MOVIE', 1, [], {}, 'EP 1/1'),
+    ('Finale', 12, ['first', 'last'], {'last': 'Finale'}, 'EP 2/12'),
+    ('12.5', 24, [], {}, 'EP 12.5/24'),
+])
+def test_player_metadata_separates_named_entry_from_numeric_position(monkeypatch, label, total, ids, labels, expected):
+    monkeypatch.setattr(player_screen, '_player_ui_state', dict(player_screen._player_ui_state))
+    monkeypatch.setattr(FLAGS, 'plain_mode', False)
+    monkeypatch.setattr(player_screen, 'sys', SimpleNamespace(stdin=SimpleNamespace(isatty=lambda: True, fileno=lambda: 0)))
+    monkeypatch.setattr(player_screen.os, 'get_terminal_size', lambda fd: SimpleNamespace(columns=100, lines=45))
+    monkeypatch.setattr(player_screen.terminal_images, 'replace_for_frame', lambda **kw: '')
+    frames = []
+    monkeypatch.setattr(player_screen, '_safe_stdout_write', lambda text, **kw: frames.append(text) or True)
+    show = {'name': 'Example', 'episodeCount': total, '_episode_ids': ids, '_episode_labels': labels}
+    player_screen.activate(show, label, len(ids) or total)
+    player_screen._player_ui_state.update(current_ep_label=label, mpv_props={'playback-time': 7, 'duration': 90})
+    player_screen.render()
+    text = strip_ansi(frames[-1])
+    assert expected in text
+    assert 'EP MOVIE/1' not in text
+    assert 'Currently Playing' in text and label in text

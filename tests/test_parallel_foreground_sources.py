@@ -249,9 +249,12 @@ def test_requested_quality_waits_past_old_three_second_cutoff(monkeypatch, confi
     clock = [0.0]
 
     class TimedBatch:
-        def __init__(self, resolve):
+        def __init__(self, resolve, *, cancel_check=None):
             self.futures = {}
             self.polls = 0
+
+        def detach_cancel_check(self):
+            pass
 
         def poll(self, sources, seen):
             self.polls += 1

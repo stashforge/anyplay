@@ -914,7 +914,7 @@ def fetch_episode_stream(show_id, ep_number, ttype="sub", quality="best", provid
 
     from .source_batch import SourceBatch, source_identity
 
-    batch = SourceBatch(resolve_source)
+    batch = SourceBatch(resolve_source, cancel_check=cancelled)
     errors = []
     candidates = []
     deadline = None
@@ -941,6 +941,7 @@ def fetch_episode_stream(show_id, ep_number, ttype="sub", quality="best", provid
             previous = _foreground_batches.pop(batch_key, None)
             if previous:
                 previous.close()
+            batch.detach_cancel_check()
             _foreground_batches[batch_key] = batch
             while len(_foreground_batches) > 8:
                 _foreground_batches.pop(next(iter(_foreground_batches))).close()

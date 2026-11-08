@@ -164,3 +164,49 @@ def test_synced_progress_changes_context_only_after_success(episode_context, mon
     )
     assert c.r.ms.current_ep == ("2" if saved else "3")
     assert c.r.ms.current_ep_index == (1 if saved else 2)
+
+
+def test_completed_anilist_details_groups_tracking_above_playback(episode_context, monkeypatch):
+    c = episode_context
+    c.r.flags.incognito_mode = False
+    c.selected[0] = None
+    c.r.ui.search_prev_state = 'ANILIST_SEARCH'
+    c.r.show.update(_anilist_context=True, _anilist_progress=3, _anilist_list='COMPLETED')
+    monkeypatch.setattr(app_core, 'get_show_anilist_id', lambda *a: '123')
+    playback_menu.handle_action_menu_state(
+        c.r.flags, c.r.ui, c.r.ms, {'anilist_token': 'fixture'}, c.r.args, 'sub', lambda *a: True,
+    )
+    # View items are logical bottom-up order; the terminal displays their reverse.
+    visible = list(reversed(c.views[-1].items))
+    assert [item.label for item in visible] == [
+        'OP/ED Songs', 'Change Match', 'Mirrors', 'Playback', 'Download',
+        'Rate', 'Status', 'Progress', 'Mark Unwatched', 'Episodes', 'Binge', 'Start Rewatch',
+    ]
+    assert next(item for item in visible if item.label == 'Episodes').reference == 'EPISODES'
+    assert next(item for item in visible if item.label == 'Mirrors').hint == 'source & quality'
+
+
+@pytest.mark.parametrize('result_count', [1, 2])
+def test_anilist_details_back_uses_original_results_not_matched_title_count(episode_context, result_count):
+    c = episode_context
+    c.selected[0] = None
+    c.r.ui.search_prev_state = 'ANILIST_SEARCH'
+    c.r.ui.action_prev_state = 'ANILIST_SEARCH'
+    c.r.ms.query_str = 'original query'
+    c.r.ms.last_al_shows = [{'_id': str(i), 'name': 'Result'} for i in range(result_count)]
+    c.r.ms.shows = [c.r.show]
+    assert run_menu(c) == 'ANILIST_SEARCH'
+    assert c.r.ms.query_str == ('' if result_count == 1 else 'original query')
+    assert len(c.r.ms.last_al_shows) == result_count
+
+
+def test_active_details_keep_episode_navigation_nearest_continue(episode_context, monkeypatch):
+    c = episode_context
+    c.selected[0] = None
+    c.r.ms.current_ep, c.r.ms.current_ep_index = '2', 1
+    monkeypatch.setattr(app_core, 'get_resume_time', lambda *a: 90)
+    run_menu(c)
+    assert [item.label for item in reversed(c.views[-1].items)] == [
+        'OP/ED Songs', 'Change Provider', 'Mirrors', 'Playback', 'Download',
+        'Progress', 'Mark Watched', 'Episodes', 'Binge', 'Replay', 'Previous', 'Next', 'Continue',
+    ]

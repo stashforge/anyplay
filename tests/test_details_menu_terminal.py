@@ -154,3 +154,26 @@ def test_skip_toggle_arrows_preserve_filter_and_reopened_position(tmp_path):
         assert result["state"] == "DETAILS"
         assert result["aniskip"] is True
         assert result["query"] == "Skip Settings"
+
+
+@pytest.mark.parametrize('playback_return', [False, True])
+def test_only_playback_return_focuses_continue_instead_of_saved_next(tmp_path, playback_return):
+    script = menu_script().replace(
+        'app_core.get_resume_time = lambda *a: 0',
+        'app_core.get_resume_time = lambda *a: 90',
+    ).replace(
+        'state = handle_action_menu_state(',
+        "from media_cli.ui.view_position_memory import SavedViewPosition\n"
+        "ui._view_positions[('details:example:one',)] = SavedViewPosition('action:NEXT', 'Next', 0, 4, None)\n"
+        f"ui.details_focus_primary = {playback_return!r}\n"
+        'state = handle_action_menu_state(',
+    ).replace(
+        'finish(dict(',
+        'assert ui.details_focus_primary is False\nfinish(dict(',
+    )
+    with Terminal(tmp_path, script) as terminal:
+        terminal.send_after(b'Esc=back', b'\r')
+        result = terminal.result()
+        assert result['state'] == 'PLAY'
+        assert result['episode'] == ('1' if playback_return else '2')
+        assert result['query'] == ('' if playback_return else 'Next')

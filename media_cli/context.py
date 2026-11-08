@@ -119,6 +119,9 @@ class UiState:
     action_prev_state: str = "SEARCH"
     """State to return to when pressing Esc/Left from ACTION_MENU."""
 
+    details_focus_primary: bool = False
+    """Focus the current play/resume action once when returning from playback."""
+
     # Current show / translation type context shown in the picker header
     ui_show_ctx: dict = field(default_factory=dict)
     """The show dict currently displayed in info panels."""

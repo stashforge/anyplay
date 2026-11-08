@@ -159,10 +159,12 @@ class Senshi(Provider):
         return []
 
     def get_title(self, provider_id: str) -> dict[str, Any]:
-        return {
+        return normalize_title({
+            "_id": str(provider_id),
+            "malId": str(provider_id),
             "name": f"MAL ID: {provider_id}",
             "url": f"https://myanimelist.net/anime/{provider_id}",
-        }
+        }, provider_id=self.id, provider_name=self.name)
 
     def episode_catalog(self, provider_id: str, ttype: str = "sub") -> dict[str, Any]:
         episodes_data = self._fetch_json(f"{self.base_url}/episodes/{provider_id}")

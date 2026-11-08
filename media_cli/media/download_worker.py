@@ -31,7 +31,7 @@ from media_cli.core.api import ProviderDependencyError
 from media_cli.media.download_requirements import plan_download
 from media_cli.media.languages import filter_tracks_by_language, normalize_lang_code
 from media_cli.media.subtitles import download_sidecar_subtitles
-from media_cli.media.download import anyplay_metadata_args
+from media_cli.media.download import anyplay_metadata_args, embed_download_metadata, resolve_download_skips
 from media_cli.media.urls import validate_stream_url
 
 TEST_URL = "https://raw.githubusercontent.com/bower-media-samples/big-buck-bunny-1080p-30s/master/video.mp4"
@@ -193,6 +193,7 @@ class DownloadItem:
     audio_url: str = ""
     subtitles: list[dict] = field(default_factory=list)
     subtitle_url: str = ""
+    provider_skips: list[dict] = field(default_factory=list)
     download_sub_langs: str | None = None
     download_audio_langs: str | None = None
     subtitle_mode: str | None = None
@@ -200,6 +201,28 @@ class DownloadItem:
     automatic: bool = False
     ip_version: int | None = None
     _network_source: dict = field(default_factory=dict, repr=False)
+
+
+def prepare_download_proxy(stream, url, headers, referer):
+    """Prepare a proxy for queued downloads that need one."""
+    if not (
+        stream.get("requires_proxy")
+        or "uwucdn.top" in url
+        or "owocdn.top" in url
+        or "kwik." in referer
+        or "megap." in url
+        or "akirax.buzz" in url
+    ):
+        return url, None
+
+    from .local_proxy import start_local_proxy
+
+    return start_local_proxy(
+        url, referer=referer, headers=headers,
+        stream_type=stream.get("type", "mp4"),
+        flixcloud_w_payload=stream.get("flixcloud_w_payload"),
+        flixcloud_xor_mask=stream.get("flixcloud_xor_mask"),
+    )
 
 
 def _prepare_bound_network(item: DownloadItem) -> None:
@@ -789,6 +812,32 @@ class DownloadWorker:
                 self.active_items.pop(item.id, None)
                 self._wake_event.set()
 
+    def _episode_metadata_args(self, item):
+        metadata = item.show_metadata or {}
+        skips = resolve_download_skips(
+            {"skip_intervals": item.provider_skips},
+            metadata.get("malId") or metadata.get("myanimelist_id"),
+            item.episode,
+        )
+        return anyplay_metadata_args(
+            title=item.title,
+            episode=str(item.episode).removeprefix("Episode ").strip(),
+            title_id=str(metadata.get("_id") or metadata.get("id") or ""),
+            episode_id=str(item.ep_id or ""),
+            skip_intervals=skips,
+        ), bool(skips)
+
+    def _embed_download_skips(self, item):
+        def cancelled():
+            return self._stop_event.is_set() or item.status == DownloadStatus.CANCELLED
+
+        if cancelled() or not is_valid_download_video(item.destination_path):
+            return
+        metadata_args, has_skips = self._episode_metadata_args(item)
+        if has_skips and not embed_download_metadata(item.destination_path, metadata_args, cancel_check=cancelled):
+            if not cancelled():
+                item.logs.append("Download saved without skip timings. FFmpeg remux unavailable.")
+
     def _download_ytdlp(self, item: DownloadItem):
         cmd = [
             "yt-dlp",
@@ -847,6 +896,8 @@ class DownloadWorker:
                             tot_str = format_bytes(item.total_bytes) if item.total_bytes > 0 else format_bytes(item.downloaded_bytes)
                             _append_progress_log(item, f"yt-dlp: {item.progress:.1f}% | {tot_str} | {item.speed_str} | ETA: {item.eta_str}")
             proc.wait()
+            if proc.returncode == 0:
+                self._embed_download_skips(item)
             with self.lock:
                 if item.status != DownloadStatus.CANCELLED:
                     if proc.returncode == 0 and _reject_playlist_output(item, "yt-dlp"):
@@ -914,6 +965,8 @@ class DownloadWorker:
                             last_log_t = now_t
                             _append_progress_log(item, f"aria2c: {pct_str}% | {downloaded_total} | {item.speed_str} | ETA: {item.eta_str}")
             proc.wait()
+            if proc.returncode == 0:
+                self._embed_download_skips(item)
             with self.lock:
                 if item.status != DownloadStatus.CANCELLED:
                     if proc.returncode == 0 and _reject_playlist_output(item, "aria2c"):
@@ -972,6 +1025,7 @@ class DownloadWorker:
                 item.logs.append(f"⚠ Could not download subtitles: {exc}")
                 embed_subs = False
 
+        metadata_args, _ = self._episode_metadata_args(item) if not subtitles_cancelled() else ([], False)
         if subtitles_cancelled():
             for sub_path in downloaded_sidecars:
                 try:
@@ -1054,13 +1108,7 @@ class DownloadWorker:
                 cmd.extend([f"-metadata:s:s:{out_idx}", f"title={title}"])
         elif embed_subs:
             cmd.extend(["-map", "0:s?"])
-        title_id = str((item.show_metadata or {}).get("_id") or (item.show_metadata or {}).get("id") or "")
-        cmd.extend(anyplay_metadata_args(
-            title=item.title,
-            episode=str(item.episode).removeprefix("Episode ").strip(),
-            title_id=title_id,
-            episode_id=str(getattr(item, "ep_id", "") or ""),
-        ))
+        cmd.extend(metadata_args)
         cmd.extend(["-c", "copy", partial_path])
 
         # Probe duration dynamically for accurate progress & ETA calculation
