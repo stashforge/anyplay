@@ -12,6 +12,7 @@ Features:
 - Stderr isolation (no terminal pollution)
 """
 
+from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
 import logging
@@ -33,11 +34,22 @@ from media_cli.media.languages import filter_tracks_by_language, normalize_lang_
 from media_cli.media.subtitles import download_sidecar_subtitles
 from media_cli.media.download import anyplay_metadata_args, embed_download_metadata, resolve_download_skips
 from media_cli.media.urls import validate_stream_url
+from media_cli.media.hls import ffmpeg_hls_input_args
 
 TEST_URL = "https://raw.githubusercontent.com/bower-media-samples/big-buck-bunny-1080p-30s/master/video.mp4"
 TMP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tmp_worker")
 os.makedirs(TMP_DIR, exist_ok=True)
 _logger = logging.getLogger(__name__)
+
+
+def _safe_ffmpeg_error(line: str) -> str:
+    line = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", line)
+    line = re.sub(r"https?://\S+", "[URL]", line, flags=re.I)
+    line = re.sub(
+        r"(authorization|cookie|set-cookie|token|password|secret|api[-_]?key)\s*[:=].*",
+        r"\1=[redacted]", line, flags=re.I,
+    )
+    return " ".join("".join(char for char in line if char >= " " and char != "\x7f").split())[:300]
 
 
 class _DownloadAttemptFailed(RuntimeError):
@@ -1036,6 +1048,7 @@ class DownloadWorker:
 
         cmd = [
             "ffmpeg",
+            "-loglevel", "error",
             "-nostdin",
             "-y",
             "-nostats",
@@ -1045,7 +1058,7 @@ class DownloadWorker:
             header_str = "".join(f"{k}: {v}\r\n" for k, v in item.headers.items())
             if header_str:
                 cmd.extend(["-headers", header_str])
-        cmd.extend(["-i", item.url])
+        cmd.extend([*ffmpeg_hls_input_args(item.url), "-i", item.url])
 
         input_idx = 1
         audio_maps: list[tuple[int, str, str]] = []
@@ -1062,7 +1075,7 @@ class DownloadWorker:
                     header_str = "".join(f"{k}: {v}\r\n" for k, v in item.headers.items())
                     if header_str:
                         cmd.extend(["-headers", header_str])
-                cmd.extend(["-i", track_url])
+                cmd.extend([*ffmpeg_hls_input_args(track_url), "-i", track_url])
                 lang = normalize_lang_code(track.get("language") or track.get("label"), target="alpha3")
                 title = track.get("label") or "Audio"
                 audio_maps.append((input_idx, lang, title))
@@ -1077,7 +1090,7 @@ class DownloadWorker:
                     header_str = "".join(f"{k}: {v}\r\n" for k, v in item.headers.items())
                     if header_str:
                         cmd.extend(["-headers", header_str])
-                cmd.extend(["-i", audio_url])
+                cmd.extend([*ffmpeg_hls_input_args(audio_url), "-i", audio_url])
                 audio_maps.append((input_idx, "und", "Audio"))
                 input_idx += 1
 
@@ -1115,11 +1128,12 @@ class DownloadWorker:
         duration_sec = probe_stream_duration(item.url, default_duration=1440.0)
         duration_us = int(duration_sec * 1_000_000)
 
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
         with self.lock:
             item.process = proc
             item.logs.append("Starting ffmpeg stream downloader…")
 
+        errors = deque(maxlen=12)
         current_block = {}
         last_time = time.time()
         last_log_t = 0.0
@@ -1131,6 +1145,10 @@ class DownloadWorker:
                 if self._stop_event.is_set() or item.status == DownloadStatus.CANCELLED:
                     break
                 line_str = line.strip()
+                if line_str and not re.match(r"^[a-zA-Z0-9_]+=", line_str):
+                    diagnostic = _safe_ffmpeg_error(line_str)
+                    if diagnostic:
+                        errors.append(diagnostic)
                 if "=" in line_str:
                     k, v = line_str.split("=", 1)
                     current_block[k.strip()] = v.strip()
@@ -1223,6 +1241,11 @@ class DownloadWorker:
                         _discard_partial_output(partial_path)
                         item.status = DownloadStatus.FAILED
                         item.error = f"ffmpeg exited with code {proc.returncode}"
+                        if errors:
+                            item.error += ": " + errors[-1]
+                            for diagnostic in errors:
+                                item.logs.append("FFmpeg: " + diagnostic)
+                                _logger.debug("Download FFmpeg error: item=%s detail=%s", item.id, diagnostic)
                         item.completed_at = time.time()
         finally:
             if proc.poll() is None:

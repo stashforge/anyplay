@@ -1,8 +1,10 @@
 import subprocess
 from types import SimpleNamespace
+import pytest
 
 
-def test_ipc_player_cannot_compete_for_tui_keyboard_input(monkeypatch):
+@pytest.mark.parametrize("audio_only", [False, True])
+def test_ipc_player_cannot_compete_for_tui_keyboard_input(monkeypatch, audio_only):
     from media_cli.playback import mpv
 
     launches = []
@@ -24,9 +26,13 @@ def test_ipc_player_cannot_compete_for_tui_keyboard_input(monkeypatch):
         ),
     )
     player = mpv.MpvIpc()
+    player.audio_only = audio_only
     player.start()
     command, kwargs = launches[0]
     assert "--input-terminal=no" in command
     assert "--force-window=no" in command
     assert "--force-window=yes" not in command
     assert kwargs["stdin"] == subprocess.DEVNULL
+    assert ("--load-scripts=no" in command) is audio_only
+    assert ("--vo=null" in command) is audio_only
+    assert "--script=lua" in command

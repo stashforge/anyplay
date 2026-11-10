@@ -10,6 +10,8 @@ It is built for people who like a fast keyboard-first workflow. Search a title, 
 - Play episodes with `mpv` on desktop.
 - Launch Android players from Termux, including Next Player, VLC, MPV Android, MPV-Rex, and related players.
 - Pick mirrors and qualities when a provider has more than one source.
+- Browse AnimeThemes songs, artists, series, studios, and public playlists.
+- Play AnimeThemes audio in the terminal on desktop or Termux without a video window.
 - Resume the last watched episode and timestamp.
 - Download episodes with `aria2c`, `yt-dlp`, `ffmpeg`, or the built-in HLS downloader.
 - Browse downloaded episodes offline.
@@ -62,8 +64,7 @@ supported. Shared Linux verification uses installed Chromium and does not requir
 Playwright; the Android companion is a separate APK.
 
 See [installation dependencies](docs/installation-dependencies.md) for the group
-and system-tool distinctions. These instructions describe this checkout; the
-published package may not yet include these changes.
+and system-tool distinctions. These instructions describe the current GitHub source.
 
 Senshi on Termux additionally needs the paired Anyplay WebView companion (version
 8 or newer). It starts the service only when source extraction needs it; it does
@@ -77,8 +78,7 @@ after its existing idle timeout; Linux continues to use its isolated Node worker
 Get the companion APK from
 [Anyplay WebView releases](https://github.com/stashforge/anyplay-webview/releases).
 AnimePahe/Kwik website access requires companion versionCode 10 or newer.
-Use a companion-enabled Anyplay build; older public CLI releases do not contain
-this integration yet.
+The current CLI includes companion integration; older builds may need an update.
 
 ```bash
 anyplay companion pair
@@ -212,6 +212,57 @@ Print recent diagnostic logs:
 anyplay logs --tail 80
 ```
 
+## AnimeThemes
+
+```bash
+anyplay search animethemes:"oshi no ko"
+```
+
+Use Tab to switch between Anime, Theme, Artist, Series, Studio, and Playlist
+results. Songs share the same details, versions, quality, playback, and download
+menus. Anime metadata and covers come from AnimeThemes' GraphQL API.
+
+In a song's **Playback** settings, **Audio only: On** plays through command-line
+mpv and keeps the terminal player screen visible. On Termux, install the terminal
+player with `pkg install mpv`; audio mode does not launch an Android video app.
+The mode applies on the next playback and lasts for the current song collection.
+It disables video output and automatic user-script loading for that mpv process,
+so visualizers cannot open a window. Normal video playback keeps your mpv scripts.
+The source remains a video file; this is not an audio download or a bandwidth guarantee.
+
+Player-screen keys:
+
+| Key | Action |
+| --- | --- |
+| Q | Quit playback and return to song details |
+| M | Open qualities for the current version |
+| V | Open versions, when multiple versions exist |
+| R | Cycle Repeat: Off, Once, Song, Collection |
+| Shift+Left / Shift+Right | Previous / next song |
+| Left / Right | Seek backward / forward 5 seconds in audio mode |
+| Space | Pause / resume in audio mode |
+
+Repeat, Auto-Play Next, and resume positions are collection-session settings;
+listening to songs does not mark anime episodes watched. Downloads can include
+the current song, selected songs, or all songs; available local copies are reused
+for playback.
+
+## Playback Settings And Menus
+
+On desktop, **M** opens the current episode's Mirrors menu without quitting
+playback. AnimeThemes uses the same shortcut for Quality and adds **V** for
+Versions. The existing menus remain usable while playback continues. Esc returns
+to the player screen; 30 seconds without input also returns there. If playback
+ends while a menu is open, it returns to Details. Changing quality or mirror
+preserves the position; changing a song version starts from the beginning.
+
+Desktop **Playback → Fullscreen** overrides fullscreen for the current CLI
+session. Before changing it, Anyplay follows your normal mpv configuration.
+For a persistent default, set `fullscreen=yes` or `fullscreen=no` in `mpv.conf`.
+
+The terminal player screen adapts to resizing. Short terminals hide the cover
+and reduce optional details to keep playback status and controls visible.
+
 ## Providers
 
 Run this command to see the providers available in your build:
@@ -231,6 +282,7 @@ Current provider IDs include:
 - `animexin`
 - `lucifer`
 - `anipm`
+- `animethemes`
 - `reanime`
 - `senshi`
 - `torrent`
@@ -320,6 +372,16 @@ Inside the downloads screen you can:
 - Play downloaded episodes.
 - Turn session auto-download and auto-delete options on or off.
 
+New episode MKV downloads retain opening/ending skip timings for offline playback.
+Provider timings take priority; AniSkip is used only when no provider timings
+are available and the episode has a known MAL identity. Existing downloads are
+not automatically backfilled. Video, selected separate audio, and subtitles are
+combined in the final MKV when available.
+
+HLS downloads handle extensionless subtitle segments. When FFmpeg fails, the
+item's Logs and debug log retain bounded, sanitized error details rather than
+only its exit code.
+
 ## AniList
 
 Log in:
@@ -346,8 +408,9 @@ AniList sync is optional. You can keep Anyplay fully local if you prefer.
 
 ## Skips
 
-Anyplay supports two kinds of skips:
+Anyplay supports three sources of skips:
 
+- Provider-supplied timings, when available.
 - AniSkip data, when the title has matching public skip data.
 - Custom skips, when you want to add your own opening or ending ranges.
 

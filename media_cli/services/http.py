@@ -154,6 +154,8 @@ def request_json(url, data=None, extra_hdrs=None, timeout=8):
         headers["Content-Type"] = "application/json"
     method = "POST" if data else "GET"
     status, resp_hdrs, body_bytes = _GLOBAL_POOL.request(method, url, data=data, headers=headers, timeout=timeout)
+    if not 200 <= status < 300:
+        raise urllib.error.HTTPError(url, status, http.client.responses.get(status, "Request failed"), resp_hdrs, None)
     resp = _PooledHTTPResponse(status, resp_hdrs, body_bytes)
     return read_json_response(resp)
 

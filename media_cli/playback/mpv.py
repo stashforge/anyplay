@@ -39,6 +39,11 @@ class MpvStartupCancelled(Exception):
 
 class MpvIpc:
     def __init__(self, redraw_callback=None):
+        self.playback_menu = None
+        self.menu_selection = None
+        self.fullscreen_override = None
+        self.audio_only = False
+        self.repeat_control = None
         self.redraw_callback = redraw_callback
         self.runtime_dir = None
         self.socket_path = None
@@ -129,7 +134,7 @@ class MpvIpc:
             return
         from ..services.requirements import require_executable
 
-        require_executable("mpv", "Desktop playback")
+        require_executable("mpv", "Audio-only playback" if self.audio_only else "Desktop playback")
         self._played_in_process = False
         self._active_entry_id = None
         self._replaced_entry_ids.clear()
@@ -138,12 +143,18 @@ class MpvIpc:
         self.runtime_dir, self.socket_path, self.conf_path, self.chapters_path, self.lua_path = create_mpv_runtime()
         from ..context import FLAGS
         window = "yes" if FLAGS.mpv_window == "immediate" else "no"
+        if self.audio_only:
+            window = "no"
         try:
             self.process = subprocess.Popen([
                 "mpv", "--idle=yes", "--keep-open=no", f"--input-ipc-server={self.socket_path}",
                 f"--input-conf={self.conf_path}", f"--chapters-file={self.chapters_path}",
                 f"--script={self.lua_path}", f"--force-window={window}", "--no-ytdl", "--input-terminal=no",
                 "--autoload-files=no", "--osd-shadow-offset=2", "--osd-shadow-color=#B0000000",
+                # User visualizers can synthesize video despite vid=no.
+                # Keep our explicit IPC script, but skip script autoload in audio mode.
+                *(["--vid=no", "--audio-display=no", "--vo=null", "--load-scripts=no"]
+                  if self.audio_only else []),
             ], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
             for _ in range(20):
@@ -168,6 +179,7 @@ class MpvIpc:
         self.send_cmd("observe_property", 5, "paused-for-cache")
         self.send_cmd("observe_property", 6, "cache-buffering-state")
         self.send_cmd("observe_property", 7, "demuxer-cache-duration")
+        self.send_cmd("observe_property", 50, "fullscreen")
         for observer_id, name in enumerate(('aid', 'mute', 'volume', 'audio-codec', 'audio-params'), 8):
             self.send_cmd('observe_property', observer_id, name)
 
@@ -200,6 +212,13 @@ class MpvIpc:
             audio_url="", subtitle_url="", subtitles=None, skip_intervals=None, aniskip_auto=True, audio_tracks=None,
             suppress_chapters=False, skip_lookup=None):
         self.start()
+        from ..app.fullscreen_setting import apply_fullscreen
+
+        if self.audio_only:
+            self.send_cmd("set_property", "force-window", False)
+            self.send_cmd("set_property", "vid", "no")
+        else:
+            apply_fullscreen(self)
         self._startup_osd_enabled = self._played_in_process
         self.running = True
         if self.client:
@@ -403,6 +422,25 @@ class MpvIpc:
             self._pending_subtitle_url = ""
 
 
+    def song_key(self, key):
+        """Player-screen controls scoped to the active song collection."""
+        if self.repeat_control is None:
+            return None
+        if key.lower() == "r":
+            label = self.repeat_control()
+            self.send_cmd("show-text", f"Repeat: {label}", 2000)
+            return "HANDLED"
+        if self.audio_only:
+            if key in ("LEFT", "RIGHT"):
+                self.send_cmd("seek", -5 if key == "LEFT" else 5, "relative")
+                return "HANDLED"
+            if key == " ":
+                self.send_cmd("cycle", "pause")
+                return "HANDLED"
+        if key in ("SHIFT_LEFT", "SHIFT_RIGHT"):
+            return "PREV" if key == "SHIFT_LEFT" else "NEXT"
+        return None
+
     def quit(self):
         if self._remote_skip_lookup is not None:
             self._remote_skip_lookup.close()
@@ -505,7 +543,7 @@ class MpvIpc:
                 return
             timing_stages.add(stage)
             if stage == "ready":
-                if not self._played_in_process:
+                if not self._played_in_process and not self.audio_only:
                     # Videos create their normal output window when initialized;
                     # audio-only media gets its player window once ready as well.
                     self.send_cmd("set_property", "force-window", True)
@@ -531,6 +569,22 @@ class MpvIpc:
             except Exception: pass
             self.is_fetching = False
             notify_prefetched = action
+
+        def open_playback_menu(kind):
+            nonlocal buf
+            if self.playback_menu is None:
+                return None
+            self._ipc_buffer = buf + self._ipc_buffer
+            buf = ""
+            outcome, selection = self.playback_menu(kind)
+            buf += self._ipc_buffer
+            self._ipc_buffer = ""
+            if outcome == "SELECT":
+                self.menu_selection = selection
+                return "MENU_SELECTION"
+            if outcome == "ENDED":
+                return "MENU_ENDED" if self.props.pop("_menu_end_reason", "quit") == "eof" else "QUIT"
+            return None
 
         def trigger_fetch(ep_target, action="NEXT"):
             if self.is_fetching: return
@@ -704,12 +758,34 @@ class MpvIpc:
                         )
 
                 if sys.stdin in r:
-                    key = sys.stdin.read(1)
+                    if self.repeat_control is not None:
+                        from ..ui.picker_render import get_key
+                        key = get_key(tty_fd)
+                    else:
+                        key = sys.stdin.read(1)
+                    song_action = self.song_key(key)
+                    if song_action == "HANDLED":
+                        redraw()
+                        key = ""
+                    if song_action in ("NEXT", "PREV"):
+                        index = ui_info.get("episode_index", 0)
+                        if ((song_action == "NEXT" and index + 1 < total_eps)
+                                or (song_action == "PREV" and index > 0)):
+                            result = song_action
+                            self.send_cmd("stop")
+                            break
+                        continue
+                    key = {"CTRL_C": "\x03", "ENTER": "\r", "TAB": "\t"}.get(key, key)
                     if key == "\x03":
                         raise KeyboardInterrupt
                     if key.lower() == 'q':
                         pending_action = "QUIT"
                         self.send_cmd("stop")
+                    elif key.lower() in ("m", "v") and self.playback_menu is not None:
+                        menu_result = open_playback_menu(key.lower())
+                        if menu_result:
+                            result = menu_result
+                            break
                     elif key in ('\r', '\n') and prompt_active:
                         result = 'NEXT_MIRROR'
                         self.send_cmd('stop')
@@ -1018,7 +1094,13 @@ class MpvIpc:
                                 elif ev == "client-message":
                                     args = msg.get("args", [])
                                     if args:
-                                        if (args[0] == 'next_mirror' and prompt_active
+                                        if args[0] in ("playback_mirrors", "playback_versions") and self.playback_menu is not None:
+                                            menu_result = open_playback_menu("m" if args[0] == "playback_mirrors" else "v")
+                                            if menu_result:
+                                                result = menu_result
+                                                done = True
+                                                break
+                                        elif (args[0] == 'next_mirror' and prompt_active
                                                 and len(args) > 1 and args[1] == prompt_serial):
                                             result = 'NEXT_MIRROR'
                                             self.send_cmd('stop')
@@ -1119,7 +1201,7 @@ class MpvIpc:
             clear_mirror_prompt()
             # Idle mode is useful for episode/mirror transitions, but must not
             # leave an empty window up while the caller saves completion state.
-            if result == "QUIT" or (result == "EOF" and not is_binge):
+            if result in ("QUIT", "MENU_ENDED") or (result == "EOF" and not is_binge):
                 self.send_cmd("quit")
             if "ready" not in timing_stages:
                 stage = "failed" if result == "ERROR" else "cancelled" if result == "QUIT" else "ended-before-ready"

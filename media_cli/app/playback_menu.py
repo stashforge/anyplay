@@ -857,7 +857,11 @@ def handle_action_menu_state(
             app_core.set_action_feedback(action_show, f"Auto-Delete: {status}")
 
         def controls():
-            return playback_toggle_controls(cfg, ms, on_download=download_changed, on_delete=delete_changed)
+            from .fullscreen_setting import fullscreen_control
+            controls = playback_toggle_controls(cfg, ms, on_download=download_changed, on_delete=delete_changed)
+            if not app_core.is_termux():
+                controls += (fullscreen_control(app_core._ipc_player, "action:FULLSCREEN"),)
+            return controls
 
         def activate(selected, direction):
             control = next((control for control in controls() if control.id == f"action:{selected}"), None)
@@ -1929,6 +1933,7 @@ def handle_mirrors_state(
     args: Any,
     ttype: str,
     resolve_tracking_fn,
+    *, picker_override=None,
 ) -> str:
     target_pid = (ui.ui_show_ctx or {}).get("_provider") or getattr(
         args, "provider", None
@@ -2324,7 +2329,7 @@ def handle_mirrors_state(
     ui.pref_toast = ""
 
     try:
-        midx = tui_pick(
+        midx = (picker_override or tui_pick)(
             flags,
             ui,
             "Select mirror",

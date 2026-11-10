@@ -12,7 +12,7 @@ from ..ui.transition import PreparationCancelled, call_on_ui_thread
 from ..ui.view_model import visible_items
 from ..ui.view_picker import run_view_session
 from ..ui.view_session import ReplaceView
-from .animethemes import _play_row, _row_show, _search_view
+from .animethemes import _play_row, _row_show, _search_view, _season_year
 from .animethemes_song_files import find_song_file, local_song_row
 from .animethemes_song_menu import SongMenuController
 from .animethemes_song_title import song_credit, song_player_lines
@@ -54,22 +54,37 @@ def play_variant(row, flags, cfg, args, show, ui=None, collection=None):
 
         app_core.enter_alt_screen()
         activate(show, row.get("theme") or "Song", 1)
+        identity = show.get("_id") or show.get("id")
+        app_core._hovered_show_id = identity
+        if ui is not None:
+            ui.hovered_show_id = identity
+            ui.hovered_show_obj = show
         metadata, stream_line = song_player_lines(row)
         credit = song_credit(row.get("song"), row.get("artists"))
+        alternate = show.get("englishName") or ""
+        if alternate.casefold() == str(show.get("name") or "").casefold():
+            alternate = ""
+        season = _season_year({"season": show.get("season"),
+                               "year": (show.get("airedStart") or {}).get("year")})
+        anime_metadata = " • ".join(part for part in (show.get("type"), season) if part)
         _player_ui_state.update({
             "ttype": "", "current_ep_label": row.get("theme") or "Song",
             "_poster_manager": app_core._poster_manager, "_ui": ui,
+            "versions_available": bool(row.get("versions_available")),
+            "audio_only": bool(row.get("audio_only")),
             "content_title": row.get("anime") or credit,
-            "content_secondary": credit if row.get("anime") else "",
+            "content_secondary": alternate,
             "content_label": row.get("theme"),
-            "content_metadata": metadata, "content_stream": stream_line,
+            "content_metadata": anime_metadata,
+            "content_stream": " • ".join(part for part in (credit, metadata, stream_line) if part),
         })
     try:
         return _play_row(row, cfg, args, collection=collection)
     finally:
         if not getattr(flags, "plain_mode", False):
             _player_ui_state.update({"content_title": None, "content_secondary": None, "content_label": None,
-                                     "content_metadata": None, "content_stream": None})
+                                     "content_metadata": None, "content_stream": None,
+                                     "audio_only": False, "repeat_mode": None})
 
 
 def create_song_menu(flags, ui, cfg, args, songs, selected, *, collection_id, session=None, play_callback=None):
@@ -98,6 +113,10 @@ def create_song_menu(flags, ui, cfg, args, songs, selected, *, collection_id, se
     def play_collection(song, variant):
         while True:
             row = local_song_row(variant if variant is not None else default_variant(song, quality), cfg)
+            from .animethemes_song_variants import version_number
+
+            row = {**row, "audio_only": controller.audio_only,
+                   "versions_available": len({version_number(item) for item in song["variants"]}) > 1}
             anime = song["raw"].get("anime") or {}
             show = _row_show({"kind": "anime", "raw": anime, "label": song.get("anime")})
             index = controller.selected_index
@@ -111,9 +130,49 @@ def create_song_menu(flags, ui, cfg, args, songs, selected, *, collection_id, se
             collection = {"total_eps": len(controller.songs), "episode_index": index, "fetch_callback": fetch,
                           "start_time_override": controller.start_time,
                           "next_episode": controller.songs[index + 1]["song"] if index + 1 < len(controller.songs) else None}
+            from ..playback.menu import run_playback_view
+            from .animethemes_song_variants import version_number
+
+            def playback_menu(kind):
+                current = variant if variant is not None else default_variant(song, quality)
+                if kind == "v" and len({version_number(item) for item in song["variants"]}) < 2:
+                    return "RETURN", None
+                view = controller.choices_view("version" if kind == "v" else "quality")
+                focused = (f"version:{version_number(current)}" if kind == "v"
+                           else f"quality:{song['variants'].index(current)}")
+                outcome, selected = run_playback_view(
+                    app_core._ipc_player, view, flags, ui, selected_id=focused,
+                )
+                if selected is None:
+                    return outcome, None
+                chosen = (best_variant(song["variants"], controller._quality_preferences.get(index, quality), selected)
+                          if kind == "v" else song["variants"][selected])
+                return outcome, (kind, chosen)
+
+            player = app_core._ipc_player
+            previous_menu = getattr(player, "playback_menu", None)
+            previous_audio = getattr(player, "audio_only", False)
+            previous_repeat = getattr(player, "repeat_control", None)
+            player.audio_only = controller.audio_only
+
+            def repeat_control():
+                controller._repeat_setting().change()
+                from ..ui.player_screen import _player_ui_state
+                _player_ui_state.update(repeat_mode=controller.repeat_mode.title(), _cached_w=0)
+                return controller.repeat_mode.title()
+
+            from ..ui.player_screen import _player_ui_state
+            _player_ui_state["repeat_mode"] = controller.repeat_mode.title()
+            player.repeat_control = repeat_control
+            player.playback_menu = playback_menu
             try:
-                result = (play_callback(row) if play_callback is not None
-                          else play_variant(row, flags, cfg, args, show, ui, collection))
+                try:
+                    result = (play_callback(row) if play_callback is not None
+                              else play_variant(row, flags, cfg, args, show, ui, collection))
+                finally:
+                    player.playback_menu = previous_menu
+                    player.audio_only = previous_audio
+                    player.repeat_control = previous_repeat
             except ProviderDependencyError:
                 raise
             except Exception:
@@ -125,6 +184,16 @@ def create_song_menu(flags, ui, cfg, args, songs, selected, *, collection_id, se
             action = result[0] if isinstance(result, tuple) else None
             position = result[2] if isinstance(result, tuple) and len(result) > 2 else 0
             duration = result[3] if isinstance(result, tuple) and len(result) > 3 else 0
+            if action == "MENU_SELECTION":
+                kind, variant = player.menu_selection
+                controller._variants[index] = song["variants"].index(variant)
+                if kind == "m":
+                    controller._quality_preferences[index] = variant["stream"].get("resolution")
+                controller.start_time = position if kind == "m" else 0
+                continue
+            if action == "MENU_ENDED":
+                controller.record_playback("EOF", position=position, duration=duration)
+                return
             controller.record_playback(action, position=position, duration=duration)
             if action == "EOF":
                 target = controller.next_after_completion()
@@ -141,7 +210,7 @@ def create_song_menu(flags, ui, cfg, args, songs, selected, *, collection_id, se
         try:
             return play_collection(song, variant)
         finally:
-            if not app_core.is_termux():
+            if not app_core.is_termux() or controller.audio_only:
                 player = app_core._ipc_player
                 if player.process is not None or player.client is not None:
                     try:
@@ -171,6 +240,25 @@ def open_anime_collection(flags, ui, cfg, args, anime):
     identity = f"animethemes:anime:{anime.get('slug') or anime.get('id')}"
     return call_on_ui_thread(lambda: run_song_collection(flags, ui, cfg, args, songs, 0,
                                                         autoplay=False, collection_id=identity))
+
+
+def open_playlist(flags, ui, cfg, args, playlist_id):
+    try:
+        playlist = app_core.with_loading("Loading playlist…", service.get_playlist, playlist_id)
+        songs = service.playlist_song_rows(playlist)
+    except PreparationCancelled:
+        return None
+    except Exception:
+        _LOG.exception("AnimeThemes playlist loading failed")
+        app_core.set_action_feedback({}, "Could not load playlist. Try again.")
+        return None
+    if not songs:
+        app_core.set_action_feedback({}, "No playable songs in this playlist.")
+        return None
+    return call_on_ui_thread(lambda: run_song_collection(
+        flags, ui, cfg, args, songs, 0, autoplay=False,
+        collection_id=f"animethemes:playlist:{playlist_id}",
+    ))
 
 
 def open_theme_results(flags, ui, ms, cfg, args, rows, selected, query, position):

@@ -331,6 +331,7 @@ def _start_player_for_playback(ipc_player):
 
     def prepare(cancelled):
         candidate = MpvIpc()
+        candidate.audio_only = getattr(ipc_player, "audio_only", False)
         try:
             candidate.start(cancel_check=cancelled)
             return candidate

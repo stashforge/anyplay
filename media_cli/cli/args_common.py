@@ -15,7 +15,7 @@ except Exception:
 
         __version__ = importlib.metadata.version(APP_NAME)
     except Exception:
-        __version__ = "0.9.2"
+        __version__ = "0.10.0"
 
 from ..provider_manifest import available_provider_metadata
 

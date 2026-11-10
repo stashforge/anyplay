@@ -37,7 +37,7 @@ def _details(song):
 
 def _image(song, key):
     url = _image_url(song.get("raw") or {})
-    return ImageSpec(key, "available", url) if url else None
+    return ImageSpec(key, "available", url) if url else ImageSpec(key, "unavailable")
 
 
 class SongMenuController:
@@ -67,6 +67,7 @@ class SongMenuController:
         self._resume = {}
         self.start_time = 0
         self.auto_play_next = False
+        self.audio_only = False
         self.repeat_mode = "off"
         self._once_repeated = False
         self.session = session if session is not None else ViewSession(self.details_view(), self.handle_event)
@@ -201,11 +202,24 @@ class SongMenuController:
             return self.selected_index + 1
         return None
 
+    def _playback_controls(self):
+        from .. import app_core
+        from .fullscreen_setting import fullscreen_control
+
+        controls = (self._auto_next_setting(), self._repeat_setting(),
+                    toggle_setting("setting:audio-only", "Audio only", self.audio_only,
+                                   lambda enabled: setattr(self, "audio_only", enabled),
+                                   hint="no video window; applies on next playback; session only"))
+        if not app_core.is_termux():
+            controls += (fullscreen_control(app_core._ipc_player, "setting:fullscreen"),)
+        return controls
+
     def playback_view(self):
         song = self.songs[self.selected_index]
+        settings = tuple(control.item() for control in self._playback_controls())
         return ViewSpec(
             f"{self.root_id}:playback", "Playback",
-            (self._auto_next_setting().item(), self._repeat_setting().item()),
+            settings,
             details=_details(song), image=_image(song, f"{self.root_id}:song:{self.selected_index}"),
             context=("AnimeThemes",), actions=_ACTIONS + (
                 ViewAction("increase", "Next value", footer=False),
@@ -274,7 +288,7 @@ class SongMenuController:
         if item is None or not item.selectable:
             return None
         if event.view_id == f"{self.root_id}:playback":
-            setting = next((setting for setting in (self._auto_next_setting(), self._repeat_setting())
+            setting = next((setting for setting in self._playback_controls()
                             if setting.id == event.item_id), None)
             if setting is not None and setting.handle_event(event):
                 self.session.apply(ReplaceView(event.view_id, self.session.generation, self.playback_view()))

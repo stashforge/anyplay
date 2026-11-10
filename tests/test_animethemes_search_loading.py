@@ -45,7 +45,7 @@ def test_animethemes_search_status_uses_shared_adapter_and_retires(monkeypatch, 
         assert reads == [True]
         if outcome in ("complete", "search-error"):
             workers[0]()
-            assert kwargs["header_fn"](0) == ("Search unavailable" if outcome == "search-error" else "")
+            assert kwargs["header_fn"](0) == ("AnimeThemes search failed." if outcome == "search-error" else "")
             assert reads == [True, False]
             assert kwargs["live_fn"]()[2] is True
         if outcome == "picker-error":

@@ -9,6 +9,7 @@ from ..core.processes import diagnostic_subprocess_output
 from ..core.reporting import console_status
 from ..services.network_affinity import bound_proxy_options
 from .download_requirements import plan_download
+from .hls import ffmpeg_hls_input_args
 from .languages import filter_tracks_by_language, normalize_lang_code
 from .subtitles import download_sidecar_subtitles, remux_subtitles_into_mkv
 from .urls import validate_optional_referer, validate_stream_url
@@ -272,7 +273,7 @@ def download_episode(
             command.extend(["-headers", header_str])
 
         # Input 0: Primary video stream
-        command.extend(["-i", url])
+        command.extend([*ffmpeg_hls_input_args(url), "-i", url])
 
         # Additional audio inputs
         input_idx = 1
@@ -288,7 +289,7 @@ def download_episode(
                     continue
                 if header_str:
                     command.extend(["-headers", header_str])
-                command.extend(["-i", v_url])
+                command.extend([*ffmpeg_hls_input_args(v_url), "-i", v_url])
                 a_lang = normalize_lang_code(t.get("language") or t.get("label"), target="alpha3")
                 a_title = t.get("label") or "Audio"
                 audio_maps.append((input_idx, a_lang, a_title))
@@ -296,7 +297,7 @@ def download_episode(
         elif audio_url and audio_url != url:
             if header_str:
                 command.extend(["-headers", header_str])
-            command.extend(["-i", audio_url])
+            command.extend([*ffmpeg_hls_input_args(audio_url), "-i", audio_url])
             audio_maps.append((input_idx, "und", "Audio"))
             input_idx += 1
 

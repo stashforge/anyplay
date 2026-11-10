@@ -52,6 +52,8 @@ def _write_mpv_input_config(config):
     config.write("SHIFT+RIGHT script-message next_ep\n")
     config.write("SHIFT+LEFT script-message prev_ep\n")
     config.write("TAB script-message skip_interval\n")
+    config.write("m script-message playback_mirrors\n")
+    config.write("v script-message playback_versions\n")
 
 
 ANISKIP_LUA_SCRIPT = """

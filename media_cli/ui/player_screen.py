@@ -471,6 +471,24 @@ def _playback_episode_summary(show: dict | None, player_state: dict, ttype: str 
     return ""
 
 
+def _player_shortcuts(show, state, width):
+    groups = ["Q Quit", "M Quality/Mirrors"]
+    if show.get("_provider") == "animethemes":
+        if state.get("versions_available"):
+            groups.append("V Versions")
+        groups.append(f"R Repeat: {state.get('repeat_mode') or 'Off'}")
+        if state.get("audio_only"):
+            groups.extend(["Space Pause", "Left/Right Seek 5s"])
+    groups.append("Shift+Left/Right Previous/Next")
+    lines = []
+    for group in groups:
+        if lines and len(lines[-1]) + len(group) + 3 <= max(1, width - 4):
+            lines[-1] += "   " + group
+        else:
+            lines.append(group)
+    return lines
+
+
 def render(
     poster_manager: PosterManager | None = None,
     ui: UiState | None = None,
@@ -608,12 +626,14 @@ def render(
         w, h = os.get_terminal_size(sys.stdin.fileno())
     except Exception:
         w, h = 80, 24
-    if w != s.get("_cached_w") or h != s.get("_cached_h"):
+    resized = w != s.get("_cached_w") or h != s.get("_cached_h")
+    if resized:
         s["_row_state"] = None  # force full render
+    compact = h < 24
 
     # --- Poster ---
     poster_raw = ""
-    if poster_manager is not None and show and getattr(poster_manager, "enabled", lambda: True)():
+    if h >= 32 and w >= 40 and poster_manager is not None and show and getattr(poster_manager, "enabled", lambda: True)():
         if ui is not None:
             ui.hovered_show_id = show.get("_id") or show.get("id")
             ui.hovered_show_obj = show
@@ -625,7 +645,7 @@ def render(
         if poster_raw
         else None
     )
-    poster_changed = poster_key != s.get("_last_poster_key")
+    poster_changed = resized or poster_key != s.get("_last_poster_key")
 
     content = []
 
@@ -638,15 +658,16 @@ def render(
         pass
 
     # ── Unified Header ──
-    content.append("")
-    for tl in _wrap_title(title, w - 4, 2).splitlines():
+    if not compact:
+        content.append("")
+    for tl in _wrap_title(title, max(1, w - 4), 1 if compact else 2).splitlines():
         content.append(f"{TITLE_COLOR}{tl}{RESET}")
-    if alt_title:
+    if alt_title and not compact:
         for atl in _wrap_title(alt_title, w - 4, 2).splitlines():
             content.append(f"{TEXT_COLOR}{atl}\033[0m")
-    if meta_line:
+    if meta_line and h >= 14:
         content.append(f"{TEXT_COLOR}{meta_line}\033[0m")
-    if next_air_line:
+    if next_air_line and not compact:
         content.append(next_air_line)
 
     if is_playing:
@@ -660,8 +681,9 @@ def render(
         if dur_sec > 0:
             time_line += f"  •  -{_fmt_time(rem_sec)}"
 
-        content.append("")
-        content.append(f"{SECTION_LABEL}Currently Playing{RESET}")
+        if not compact:
+            content.append("")
+            content.append(f"{SECTION_LABEL}Currently Playing{RESET}")
         label = s.get("current_ep_label") or str(s["current_ep"])
         from media_cli.domain.episodes import episode_label
         ep_str = episode_label(label)
@@ -672,13 +694,18 @@ def render(
             content.append(f"{TEXT_COLOR}{ep_str} • {stream_str}\033[0m")
         else:
             content.append(f"{TEXT_COLOR}{ep_str}\033[0m")
-        content.append("")
+        if not compact:
+            content.append("")
         _idx_state = len(content)
         content.append(f"\033[1;36m{state_str}\033[0m")
         _idx_bar = len(content)
         content.append(bar)
         _idx_time = len(content)
         content.append(f"{TEXT_COLOR}{time_line}\033[0m")
+        shortcut_lines = _player_shortcuts(show, s, w)
+        poster_rows = POSTER_HEIGHT if poster_raw else 0
+        # Leave the final terminal row unused: writing there can scroll the frame.
+        detail_budget = max(0, h - 1 - poster_rows - len(content) - len(shortcut_lines) - 1)
         detail_lines = []
         genres = show.get("genres") if isinstance(show, dict) else None
         if not genres and isinstance(show, dict):
@@ -687,7 +714,7 @@ def render(
             genre_text = ", ".join(str(item) for item in genres[:5] if item)
         else:
             genre_text = str(genres or "").strip()
-        if genre_text:
+        if genre_text and detail_budget >= 3:
             detail_lines.append(f"{SECTION_LABEL}Genres{RESET}")
             detail_lines.append(f"{TEXT_COLOR}" + genre_text.replace(", ", " • ") + "\033[0m")
         description = str(show.get("description") or "").strip() if isinstance(show, dict) else ""
@@ -697,10 +724,7 @@ def render(
             description = re.sub(r"<[^>]+>", " ", description)
             description = re.sub(r"\s+", " ", description).strip()
 
-            poster_rows = POSTER_HEIGHT if poster_raw else 0
-            extra_padding = 5 if detail_lines else 4
-            used_lines = poster_rows + len(content) + len(detail_lines) + extra_padding
-            max_desc_lines = max(1, h - used_lines)
+            max_desc_lines = detail_budget - len(detail_lines) - (2 if detail_lines else 1) - 1
 
             if max_desc_lines > 0:
                 if detail_lines:
@@ -708,13 +732,14 @@ def render(
                 detail_lines.append(f"{SECTION_LABEL}Description{RESET}")
                 detail_lines.extend(
                     f"{TEXT_COLOR}{line}\033[0m"
-                    for line in _wrap_title(description, w - 4, max_desc_lines).splitlines()
+                    for line in _wrap_title(description, max(1, w - 4), max_desc_lines).splitlines()
                 )
         if detail_lines:
             content.append("")
             content.extend(detail_lines)
-        content.append("")
-        content.append("\033[38;5;244mQ Quit   Shift+Left Previous   Shift+Right Next\033[0m")
+        if len(content) + len(shortcut_lines) < h - 1 - poster_rows:
+            content.append("")
+        content.extend(f"\033[38;5;244m{line}\033[0m" for line in shortcut_lines)
     else:
         content.append("")
         content.append(f"{SECTION_LABEL}Status{RESET}")
@@ -737,7 +762,7 @@ def render(
             else:
                 out.append("")
 
-    for line in content:
+    for line in content[:max(0, h - 1 - len(out))]:
         out.append(f"\033[2K{_fit_terminal_line(line, w)}")
 
     if out:
@@ -748,7 +773,7 @@ def render(
         s["_last_poster_key"] = poster_key
         overlay = f"\033[1;1H{native_poster}" if native_poster and poster_changed else ""
         _safe_stdout_write(
-            clear_images + "\033[H" + "\r\n".join(out) + "\033[J"
+            clear_images + ("\033[H\033[2J" if resized else "\033[H") + "\r\n".join(out) + "\033[J"
             + overlay + "\033[1;1H\033[?25l"
         )
 
@@ -757,7 +782,7 @@ def render(
     s["_cached_h"] = h
     poster_row_count = POSTER_HEIGHT if poster_raw else 0
     content_start = poster_row_count + 1
-    if is_playing:
+    if is_playing and content_start + _idx_time < h:
         s["_row_state"] = content_start + _idx_state
         s["_row_bar"]   = content_start + _idx_bar
         s["_row_time"]  = content_start + _idx_time

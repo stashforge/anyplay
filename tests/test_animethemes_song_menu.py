@@ -249,7 +249,8 @@ def test_auto_next_uses_shared_control_for_rendering_and_owner_callback(monkeypa
     menu, _ = controller()
 
     def build(*args, **kwargs):
-        snapshots.append(args[2])
+        if args[0] == "setting:auto-next":
+            snapshots.append(args[2])
         return toggle_setting(*args, **kwargs, on_label="Enabled")
 
     def apply(value):
@@ -396,3 +397,11 @@ finish(dict(result=result, repeat=menu.repeat_mode))
         terminal.send_after(b"replay once, then follow Auto-Play Next", b"\x1b")
         terminal.send_after(b"Select action", b"\x1b")
         assert terminal.result() == {"result": "back", "repeat": "once"}
+
+
+def test_missing_song_cover_is_explicitly_unavailable():
+    from media_cli.app.animethemes_song_menu import _image
+
+    image = _image({"raw": {}}, "song")
+    assert image.state == "unavailable"
+    assert image.url is None

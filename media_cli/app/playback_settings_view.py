@@ -102,6 +102,9 @@ def build_playback_settings_view(
     controlled = {control.id: control.item() for control in controls}
     items = tuple(replace(controlled[item.id], reference=item.reference) if item.id in controlled
                   else replace(item, adjustable=item.kind != "submenu") for item in view.items)
+    existing_ids = {item.id for item in items}
+    items += tuple(replace(control.item(), reference=control.id.removeprefix("action:"))
+                   for control in controls if control.id not in existing_ids)
     return replace(
         view,
         prompt="Playback",

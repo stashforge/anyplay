@@ -25,6 +25,8 @@ _KEYS = MappingProxyType(
         b"\x1bOC": "RIGHT",
         b"\x1b[D": "LEFT",
         b"\x1bOD": "LEFT",
+        b"\x1b[1;2C": "SHIFT_RIGHT",
+        b"\x1b[1;2D": "SHIFT_LEFT",
         b"\x1b[Z": "SHIFT_TAB",
         b"\x1b[H": "HOME",
         b"\x1bOH": "HOME",

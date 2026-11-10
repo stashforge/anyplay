@@ -6,27 +6,24 @@ from media_cli.app.animethemes import (
     _search_prompt,
 )
 from media_cli.core.terminal import strip_ansi
-from urllib.parse import parse_qs, urlparse
 from media_cli.services.animethemes import (
     ANIMETHEMES_SEARCH_TABS,
-    anime_lookup_url,
     flatten_anime_videos,
     flatten_search_bucket,
     theme_video_rows,
 )
 
 
-def test_animethemes_anime_lookup_prefers_external_ids():
+def test_animethemes_anime_lookup_prefers_external_ids(monkeypatch):
+    from media_cli.services import animethemes as service
+
+    calls = []
+    monkeypatch.setattr(service, "_graphql", lambda query, variables: calls.append(variables) or {"filterAnimeByExternalSite": []})
     show = {"aniListId": "150672", "malId": "52034", "name": "[Oshi no Ko]"}
-
-    params = parse_qs(urlparse(anime_lookup_url(show)).query)
-    assert params["filter[site]"] == ["AniList"]
-    assert params["filter[external_id]"] == ["150672"]
-
+    assert service.get_anime_for_show(show) is None
     show.pop("aniListId")
-    params = parse_qs(urlparse(anime_lookup_url(show)).query)
-    assert params["filter[site]"] == ["MyAnimeList"]
-    assert params["filter[external_id]"] == ["52034"]
+    assert service.get_anime_for_show(show) is None
+    assert calls == [{"site": "ANILIST", "ids": [150672]}, {"site": "MAL", "ids": [52034]}]
 
 
 def test_animethemes_flattens_anime_theme_videos():
@@ -251,3 +248,17 @@ def test_animethemes_theme_result_can_open_its_videos():
     assert rows[0]["label"] == "ED  Mephisto  Ziyouu-vachi  720 WEB"
     assert rows[0]["anime"] == "[Oshi no Ko]"
     assert rows[0]["stream"]["link"] == "https://v.animethemes.moe/OshiNoKo-ED.webm"
+
+
+def test_search_cover_status_uses_same_projection_for_probe_and_footer(monkeypatch):
+    from media_cli.app import animethemes as flow
+
+    probed = []
+    monkeypatch.setattr(flow.app_core, "_get_poster", lambda show: probed.append(show) or "")
+    def footer(show, text, width):
+        assert probed and probed[-1] is show
+        return "Cover unavailable"
+    monkeypatch.setattr(flow.app_core, "_poster_footer_line", footer)
+    for kind in ("theme", "artist", "studio", "playlist"):
+        row = {"kind": kind, "label": "Example", "raw": {"id": 1, "name": "Example"}}
+        assert "Cover unavailable" in flow._search_header("query", kind, [row])

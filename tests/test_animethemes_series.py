@@ -1,5 +1,5 @@
 from threading import Event
-from urllib.parse import parse_qs, urlsplit
+import json
 
 import pytest
 
@@ -10,15 +10,21 @@ from media_cli.ui.picker_state import PickerState
 from media_cli.ui.view_session import UiEvent
 
 
-def test_series_request_uses_encoded_identity_and_anime_relation(monkeypatch):
-    urls = []
-    def request(url, **kwargs):
-        urls.append(url)
-        return {"series": {"slug": "a/b", "anime": [{"slug": "first"}]}}
+def test_series_request_uses_graphql_identity_and_anime_relation(monkeypatch):
+    def request(url, data=None, **kwargs):
+        assert url == service.GRAPHQL_URL
+        assert json.loads(data)["variables"] == {"slug": "a/b"}
+        return {"data": {"series": {
+            "slug": "a/b", "title": {"romaji": "Collection"},
+            "anime": {"nodes": [{"slug": "first", "title": {"romaji": "First"},
+                                 "images": {"nodes": [{"link": "https://example.test/cover.jpg"}]},
+                                 "themes": []}]},
+        }}}
     monkeypatch.setattr(service, "request_json", request)
-    assert service.get_series("a/b")["anime"] == [{"slug": "first"}]
-    assert urlsplit(urls[0]).path == "/series/a%2Fb"
-    assert parse_qs(urlsplit(urls[0]).query) == {"include": ["anime.images,anime.animethemes"]}
+    series = service.get_series("a/b")
+    assert series["name"] == "Collection"
+    assert series["anime"][0]["name"] == "First"
+    assert series["anime"][0]["images"][0]["link"].endswith("cover.jpg")
 
 
 def make_controller():
@@ -218,3 +224,30 @@ finish(dict(kind=result.kind, query=position.query, selected=position.selected_i
         terminal.send_after(b"Select anime", b"\x1b[D")
         terminal.send_after(b"Search AnimeThemes", b"\x1b")
         assert terminal.result() == {"kind": "back", "query": "coll", "selected": 0}
+
+
+def test_studio_reuses_collection_navigation_with_studio_context(monkeypatch):
+    raw = {"slug": "studio", "name": "Studio"}
+    source = _search_view("studio", "studios", ["studios"], [{"kind": "studio", "raw": raw, "label": "Studio"}])
+    monkeypatch.setattr(service, "get_studio", lambda slug: {"name": "Studio", "anime": [
+        {"slug": "anime", "name": "Anime", "images": []}]})
+    controller = flow.SeriesController(raw, lambda row: None, source_view=source,
+                                      source_position=PickerState(), collection_kind="studio")
+    view = controller._titles()
+    assert view.context == ("AnimeThemes", "Studio")
+    assert view.id == "studio:studio"
+    assert len(view.items) == 1
+    controller.close()
+
+
+def test_complete_collection_anime_does_not_fetch_again(monkeypatch):
+    anime = {"slug": "second", "name": "Second", "animethemes": [{
+        "slug": "OP1", "song": {"title": "Song"}, "animethemeentries": [{
+            "videos": [{"link": "https://example.test/song.webm", "resolution": 720}]}]}]}
+    monkeypatch.setattr(service, "get_anime_for_show", lambda *a: pytest.fail("Redundant anime request"))
+    controller, _ = make_controller()
+    try:
+        assert controller._videos(anime).prompt == "Select action"
+        assert controller._cache[("anime", "second")] is anime
+    finally:
+        controller.close()

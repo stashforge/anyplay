@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import os
+import json
+import urllib.error
 import logging
 import threading
 from typing import Any
 
+from ..core.api import SearchFailure
 from .. import app_core
 from ..services import animethemes as animethemes_service
 from ..ui.help import picker_help
@@ -160,9 +163,11 @@ def _row_show(row: dict) -> dict:
             **provider_bits,
             "_id": raw.get("id") or raw.get("slug") or row.get("label"),
             "name": _first_text(raw.get("name"), row.get("label"), "Unknown"),
-            "englishName": _first_text(raw.get("english_name"), raw.get("title")),
+            "englishName": _first_text(raw.get("englishName"), raw.get("english_name"), raw.get("title")),
             "romajiName": _first_text(raw.get("name")),
-            "nativeName": _first_text(raw.get("native_name")),
+            "nativeName": _first_text(raw.get("nativeName"), raw.get("native_name")),
+            "description": raw.get("synopsis") or "",
+            "season": raw.get("season"),
             "altNames": raw.get("synonyms") or raw.get("aliases") or [],
             "type": _first_text(raw.get("media_format"), raw.get("type"), "ANIME").upper(),
             "status": _first_text(raw.get("status")),
@@ -254,6 +259,14 @@ def _show_poster(show, ui):
     return poster
 
 
+def _search_row_show(row):
+    show = row.get("_search_cover_show")
+    if show is None:
+        show = _row_show(row)
+        row["_search_cover_show"] = show
+    return show
+
+
 def _search_header(
     query: str,
     tab: str,
@@ -276,7 +289,8 @@ def _search_header(
         )
 
     title, alt, metadata = _row_detail_values(rows[selected_idx])
-    show = _row_show(rows[selected_idx])
+    show = _search_row_show(rows[selected_idx])
+    app_core._get_poster(show)
     select_label = "play" if rows[selected_idx].get("kind") == "theme" else "open"
     footer = f'AnimeThemes • "{query}" • Tab=switch • Enter={select_label} • Esc=search'
     try:
@@ -321,7 +335,7 @@ def _search_view(query, tab, tabs, rows):
     items = tuple(ViewItem(
         f"result:{index}", row["label"], kind="submenu",
         details=DetailLines(*(Content(value) if value else Blank for value in _row_detail_values(row))),
-        image=ImageSpec(f"result:{index}", "available", url) if (url := _image_url(row.get("raw") or {})) else None,
+        image=ImageSpec(f"result:{index}", "available", url) if (url := _image_url(row.get("raw") or {})) else ImageSpec(f"result:{index}", "unavailable"),
         reference=index,
     ) for index, row in enumerate(rows))
     return ViewSpec("animethemes:search", "Search AnimeThemes", items,
@@ -341,7 +355,7 @@ def _play_row(row: dict, cfg: dict, args: Any, *, collection=None):
     ep = row.get("theme") or "Video"
     player = args.player or cfg.get("player", "mpv")
     try:
-        if app_core.is_termux():
+        if app_core.is_termux() and not row.get("audio_only"):
             if stream.get("is_local"):
                 from ..playback.engine import play_local_video
                 return play_local_video(stream["link"], player)
@@ -376,12 +390,19 @@ def _play_row(row: dict, cfg: dict, args: Any, *, collection=None):
 def open_anime_songs(flags, ui, ms, cfg, args, show: dict, ttype: str = "sub") -> str:
     from .animethemes_song_playback import open_anime_collection
 
-    anime = app_core.with_loading(
-        "Loading AnimeThemes…",
-        animethemes_service.get_anime_for_show,
-        show,
-    )
-    result = open_anime_collection(flags, ui, cfg, args, anime)
+    try:
+        anime = app_core.with_loading(
+            "Loading AnimeThemes…",
+            animethemes_service.get_anime_for_show,
+            show,
+        )
+        result = open_anime_collection(flags, ui, cfg, args, anime)
+    except (SearchFailure, json.JSONDecodeError, UnicodeError, urllib.error.URLError, TimeoutError) as exc:
+        logging.getLogger(__name__).debug("AnimeThemes songs request failed", exc_info=True)
+        from ..core.api import search_failure_message
+
+        app_core.set_action_feedback(show, search_failure_message("AnimeThemes", exc))
+        return "DETAILS"
     if result is None:
         app_core.set_action_feedback(show, "No AnimeThemes videos found.")
     return "QUIT" if result == "quit" else "DETAILS"
@@ -432,7 +453,9 @@ def handle_animethemes_search_state(flags, ui, ms, cfg, args, ttype: str) -> str
         try:
             data = animethemes_service.search(query)
         except Exception as exc:
-            error = str(exc)
+            from ..core.api import search_failure_message
+
+            error = search_failure_message("AnimeThemes", exc)
             data = {}
         finally:
             loading = False
@@ -485,7 +508,7 @@ def handle_animethemes_search_state(flags, ui, ms, cfg, args, ttype: str) -> str
 
     def _top_header(si):
         if rows and 0 <= si < len(rows):
-            show = _row_show(rows[si])
+            show = _search_row_show(rows[si])
             poster = _show_poster(show, ui)
             if poster:
                 return poster
@@ -559,16 +582,17 @@ def handle_animethemes_search_state(flags, ui, ms, cfg, args, ttype: str) -> str
             picker_state.selected_index = idx
             if open_anime_collection(flags, ui, cfg, args, anime) == "quit":
                 return "QUIT"
-        elif row["kind"] in {"artist", "series"}:
+        elif row["kind"] in {"artist", "series", "studio"}:
             from .animethemes_artist import open_artist
             from .animethemes_series import open_series
             if not raw.get("slug"):
                 continue
             picker_state.selected_index = idx
             opener = open_artist if row["kind"] == "artist" else open_series
+            options = {"collection_kind": "studio"} if row["kind"] == "studio" else {}
             result = opener(flags, ui, ms, cfg, args, raw,
                                  source_view=_search_view(query, current_tab(), tabs_for(), rows),
-                                 source_position=picker_state)
+                                 source_position=picker_state, **options)
             if result == "quit" or isinstance(result, UiEvent) and result.kind == "quit":
                 return "QUIT"
             if isinstance(result, UiEvent) and result.kind == "back":
@@ -576,6 +600,12 @@ def handle_animethemes_search_state(flags, ui, ms, cfg, args, ttype: str) -> str
                 return "ANIMETHEMES_SEARCH"
             if isinstance(result, UiEvent) and result.kind in {"select", "tab"}:
                 handoff = result
+        elif row["kind"] == "playlist":
+            from .animethemes_song_playback import open_playlist
+
+            picker_state.selected_index = idx
+            if open_playlist(flags, ui, cfg, args, raw.get("id")) == "quit":
+                return "QUIT"
         elif row["kind"] == "theme":
             from .animethemes_song_playback import open_theme_results
 

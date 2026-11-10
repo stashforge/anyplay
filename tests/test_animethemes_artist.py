@@ -81,7 +81,7 @@ def test_song_enrichment_keeps_exact_theme_and_fetches_credits(monkeypatch):
         "song": {"id": 1, "title": "Song", "artists": [{"name": "Miku Itou"}]}})
     monkeypatch.setattr(service, "_anime_detail_by_slug", lambda slug: {
         "name": "Anime", "images": [{"link": "https://example.test/cover.jpg"}],
-        "animethemes": [{"id": 99}, {"id": 11, "type": "ED", "sequence": 3, "animethemeentries": [{"videos": []}]}]})
+        "animethemes": [{"id": 99}, {"id": 11, "type": "ED", "sequence": 3, "song": {"title": "Song", "artists": [{"name": "Miku Itou"}]}, "animethemeentries": [{"videos": []}]}]})
     enriched = service.enrich_artist_theme(row)
     assert enriched["raw"]["id"] == 11
     assert enriched["raw"]["song"]["artists"][0]["name"] == "Miku Itou"

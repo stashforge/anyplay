@@ -377,6 +377,7 @@ def test_download_worker_logs_proxy_cleanup_failure(caplog):
 
 def test_download_worker_ffmpeg_writes_hidden_partial_then_commits(monkeypatch):
     from media_cli.media import download_worker
+    monkeypatch.setattr("media_cli.media.hls._ffmpeg_has_extension_picky", lambda: True)
 
     class FakeStdout:
         def __init__(self):
@@ -431,6 +432,9 @@ def test_download_worker_ffmpeg_writes_hidden_partial_then_commits(monkeypatch):
         assert os.path.exists(destination)
         assert not os.path.exists(captured_cmd[-1])
         assert item.status == DownloadStatus.COMPLETED
+        assert captured_cmd[captured_cmd.index("-i") - 4:captured_cmd.index("-i")] == [
+            "-allowed_extensions", "ALL", "-extension_picky", "0",
+        ]
 
 
 def test_download_worker_auto_prefers_ffmpeg_for_hls_when_available(monkeypatch):
@@ -568,6 +572,7 @@ def test_download_worker_ytdlp_enables_audio_multistreams(monkeypatch, tmp_path)
 
 def test_download_worker_ffmpeg_maps_filtered_audio_and_embedded_subtitles(monkeypatch, tmp_path):
     from media_cli.media import download_worker
+    monkeypatch.setattr("media_cli.media.hls._ffmpeg_has_extension_picky", lambda: True)
 
     captured_cmd = []
     sub_path = tmp_path / "Show - Episode 1.eng.vtt"

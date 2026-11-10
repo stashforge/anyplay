@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import re
-from urllib.parse import quote, urlencode
-from ..core.workers import DaemonExecutor
+import json
 from threading import Lock, Thread
 
 from .http import request_json
 
-API_BASE = "https://api.animethemes.moe"
 ANIMETHEMES_SEARCH_TABS = (
     "anime",
     "animethemes",
@@ -18,7 +16,6 @@ ANIMETHEMES_SEARCH_TABS = (
     "studios",
     "playlists",
 )
-ANIME_INCLUDE = "images,resources,animethemes.song.artists,animethemes.animethemeentries.videos"
 
 
 def _text(value) -> str:
@@ -56,138 +53,250 @@ def _anime_name(value) -> str:
     return _text(value)
 
 
-def anime_lookup_url(show: dict) -> str:
-    al_id = _text(show.get("aniListId") or show.get("_anilist_id"))
-    mal_id = _text(show.get("malId") or show.get("_mal_id"))
-    params = {"include": ANIME_INCLUDE}
-    if al_id:
-        params.update({
-            "filter[has]": "resources",
-            "filter[site]": "AniList",
-            "filter[external_id]": al_id,
-        })
-        return f"{API_BASE}/anime?{urlencode(params)}"
-    if mal_id:
-        params.update({
-            "filter[has]": "resources",
-            "filter[site]": "MyAnimeList",
-            "filter[external_id]": mal_id,
-        })
-        return f"{API_BASE}/anime?{urlencode(params)}"
-    slug = _text(show.get("slug") or show.get("_animethemes_slug"))
-    if slug:
-        return f"{API_BASE}/anime/{quote(slug)}?{urlencode(params)}"
-    query = _text(show.get("name") or show.get("englishName"))
-    return f"{API_BASE}/search?{urlencode({'q': query})}"
+GRAPHQL_URL = "https://rs.animethemes.moe/graphql"
+_THEME_FIELDS = """
+    id slug type sequence
+    song { id title { romaji native } staff { role artist { id slug name { main native } } } }
+    entries { id version episodes notes nsfw spoiler
+        videos { nodes { id link resolution source nc subbed lyrics overlap } }
+    }
+"""
+_ANIME_FIELDS = """
+id slug title { romaji english native } format season year synopsis
+images { nodes { id link facet } }
+themes {
+""" + _THEME_FIELDS + "}"
 
 
-def _first_anime(payload: dict) -> dict | None:
-    anime = payload.get("anime")
-    if isinstance(anime, dict):
-        return anime
-    if isinstance(anime, list) and anime:
-        return anime[0]
-    search = payload.get("search") or {}
-    results = search.get("anime") if isinstance(search, dict) else None
-    if isinstance(results, list) and results:
-        return results[0]
-    return None
+def _graphql(query, variables):
+    from ..core.api import SearchFailure
+
+    payload = request_json(
+        GRAPHQL_URL, data=json.dumps({"query": query, "variables": variables}).encode(),
+        extra_hdrs={"User-Agent": "anyplay-cli", "Accept": "application/json"},
+    )
+    if not isinstance(payload, dict) or payload.get("errors") or not isinstance(payload.get("data"), dict):
+        raise SearchFailure("AnimeThemes returned an invalid GraphQL response.")
+    return payload["data"]
+
+
+def _normalize_graphql_anime(anime):
+    if not isinstance(anime, dict):
+        return None
+    result = dict(anime)
+    title = anime.get("title") or {}
+    result["name"] = title.get("romaji") or title.get("english") or ""
+    result["englishName"] = title.get("english") or ""
+    result["nativeName"] = title.get("native") or ""
+    result["media_format"] = anime.get("format")
+    result["images"] = (anime.get("images") or {}).get("nodes") or []
+    themes = []
+    for theme in anime.get("themes") or []:
+        song = theme.get("song") or {}
+        song_title = song.get("title") or {}
+        artists = [
+            {**credit["artist"], "name": credit["artist"]["name"]["main"]}
+            for credit in song.get("staff") or []
+            if credit.get("role", "").casefold() == "performance" and credit.get("artist")
+        ]
+        entries = [
+            {**entry, "videos": (entry.get("videos") or {}).get("nodes") or []}
+            for entry in theme.get("entries") or []
+        ]
+        themes.append({**theme, "song": {**song, "title": song_title.get("romaji") or "",
+                                       "artists": artists}, "animethemeentries": entries})
+    result["animethemes"] = themes
+    return result
 
 
 def get_anime_for_show(show: dict) -> dict | None:
-    payload = request_json(anime_lookup_url(show), extra_hdrs={"User-Agent": "anyplay-cli"})
-    anime = _first_anime(payload)
-    if not anime:
-        return None
-    if anime.get("animethemes"):
-        return anime
-    slug = _text(anime.get("slug"))
-    if not slug:
-        return anime
-    detail_url = f"{API_BASE}/anime/{quote(slug)}?{urlencode({'include': ANIME_INCLUDE})}"
-    return _first_anime(request_json(detail_url, extra_hdrs={"User-Agent": "anyplay-cli"}))
+    al_id = _text(show.get("aniListId") or show.get("_anilist_id"))
+    mal_id = _text(show.get("malId") or show.get("_mal_id"))
+    if al_id or mal_id:
+        query = "query($site: ResourceSite!, $ids: [Int!]) { filterAnimeByExternalSite(site: $site, id: $ids) { " + _ANIME_FIELDS + " } }"
+        data = _graphql(query, {"site": "ANILIST" if al_id else "MAL", "ids": [int(al_id or mal_id)]})
+        rows = data.get("filterAnimeByExternalSite") or []
+        return _normalize_graphql_anime(rows[0]) if rows else None
+    slug = _text(show.get("slug") or show.get("_animethemes_slug"))
+    if slug:
+        return _anime_detail_by_slug(slug)
+    query = "query($search: String!) { search(search: $search, first: 1, page: 1) { anime { data { " + _ANIME_FIELDS + " } } } }"
+    data = _graphql(query, {"search": _text(show.get("name") or show.get("englishName"))})
+    rows = (data.get("search") or {}).get("anime", {}).get("data") or []
+    return _normalize_graphql_anime(rows[0]) if rows else None
 
 
 def _anime_detail_by_slug(slug: str) -> dict | None:
     if not slug:
         return None
-    url = f"{API_BASE}/anime/{quote(slug)}?{urlencode({'include': ANIME_INCLUDE})}"
-    return _first_anime(request_json(url, extra_hdrs={"User-Agent": "anyplay-cli"}))
-
-
-def _merge_search_anime_details(search: dict) -> dict:
-    anime_items = search.get("anime")
-    if not isinstance(anime_items, list) or not anime_items:
-        return search
-
-    enriched_anime = []
-    enriched_themes = []
-    seen_theme_ids = set()
-    for item in anime_items:
-        if not isinstance(item, dict):
-            continue
-        detail = None
-        try:
-            detail = _anime_detail_by_slug(_text(item.get("slug")))
-        except Exception:
-            detail = None
-        anime = detail if isinstance(detail, dict) else item
-        enriched_anime.append(anime)
-        for theme in anime.get("animethemes") or []:
-            if not isinstance(theme, dict):
-                continue
-            theme_id = theme.get("id")
-            if theme_id and theme_id in seen_theme_ids:
-                continue
-            if theme_id:
-                seen_theme_ids.add(theme_id)
-            enriched_themes.append({**theme, "anime": anime})
-
-    if enriched_anime:
-        search["anime"] = enriched_anime
-    if enriched_themes:
-        search["animethemes"] = enriched_themes
-    return search
+    data = _graphql("query($slug: String!) { anime(slug: $slug) { " + _ANIME_FIELDS + " } }", {"slug": slug})
+    return _normalize_graphql_anime(data.get("anime"))
 
 
 def search(query: str) -> dict:
-    payload = request_json(
-        f"{API_BASE}/search?{urlencode({'q': query})}",
-        extra_hdrs={"User-Agent": "anyplay-cli"},
-    )
-    search_payload = payload.get("search") or {}
-    if isinstance(search_payload, dict):
-        result = _merge_search_anime_details(search_payload)
-        def enrich_artist(item):
-            try:
-                return {**item, **get_artist(item.get("slug", ""), summary=True)}
-            except Exception:
-                return item
-        with DaemonExecutor(max_workers=2) as pool:
-            result["artists"] = list(pool.map(enrich_artist, result.get("artists") or []))
-        return result
-    return {}
+    # Fetch all visible buckets together, retaining our existing internal names.
+    selection = """
+        anime { data { ANIME_FIELDS } }
+        themes { data { THEME_FIELDS anime { id slug title { romaji english native } format season year synopsis images { nodes { id link facet } } } } }
+        artists { data { id slug name { main native } images { nodes { id link facet } }
+            groups { nodes { id slug name { main native } } } } }
+        series { data { id slug title { romaji } } }
+        studios { data { id slug name images { nodes { id link facet } } } }
+        playlists { data { id name description tracksCount user { name } } }
+    """.replace("ANIME_FIELDS", _ANIME_FIELDS).replace("THEME_FIELDS", _THEME_FIELDS)
+    data = _graphql(
+        "query($search: String!) { search(search: $search, first: 20, page: 1) { " + selection + " } }",
+        {"search": query},
+    ).get("search") or {}
+    result = {}
+    for bucket in ANIMETHEMES_SEARCH_TABS:
+        source = "themes" if bucket == "animethemes" else bucket
+        rows = (data.get(source) or {}).get("data") or []
+        normalized = []
+        for row in rows:
+            if bucket == "anime":
+                row = _normalize_graphql_anime(row)
+            elif bucket == "animethemes":
+                anime = _normalize_graphql_anime({**(row.get("anime") or {}), "themes": [row]})
+                row = {**anime["animethemes"][0], "anime": {key: value for key, value in anime.items() if key != "animethemes"}}
+            elif bucket == "artists":
+                row = {**row, "name": row["name"]["main"],
+                       "images": (row.get("images") or {}).get("nodes") or [],
+                       "groups": [{**group, "name": group["name"]["main"]}
+                                  for group in (row.get("groups") or {}).get("nodes") or []]}
+            elif bucket == "series":
+                row = {**row, "name": row["title"]["romaji"]}
+            elif bucket == "studios":
+                row = {**row, "images": (row.get("images") or {}).get("nodes") or []}
+            normalized.append(row)
+        result[bucket] = normalized
+    return result
 
 
 def get_theme(theme_id) -> dict:
-    includes = "anime.images,song.artists,animethemeentries.videos"
-    url = f"{API_BASE}/animetheme/{quote(str(theme_id), safe='')}?{urlencode({'include': includes})}"
-    theme = request_json(url, extra_hdrs={"User-Agent": "anyplay-cli"}).get("animetheme") or {}
-    if str(theme.get("id")) != str(theme_id):
+    data = _graphql(
+        "query($ids: [Int!]) { themeConnection(filter: {idIn: $ids}) { nodes { "
+        + _THEME_FIELDS
+        + " anime { id slug title { romaji english native } format season year synopsis images { nodes { id link facet } } } } } }",
+        {"ids": [int(theme_id)]},
+    )
+    themes = (data.get("themeConnection") or {}).get("nodes") or []
+    if len(themes) != 1 or str(themes[0].get("id")) != str(theme_id):
         raise ValueError("AnimeThemes returned a different theme identity")
-    return theme
+    theme = themes[0]
+    anime = _normalize_graphql_anime({**(theme.get("anime") or {}), "themes": [theme]})
+    context = {key: value for key, value in anime.items() if key != "animethemes"}
+    return {**anime["animethemes"][0], "anime": context}
 
 
 def get_series(slug: str) -> dict:
-    includes = "anime.images,anime.animethemes"
-    url = f"{API_BASE}/series/{quote(slug, safe='')}?{urlencode({'include': includes})}"
-    return request_json(url, extra_hdrs={"User-Agent": "anyplay-cli"}).get("series") or {}
+    data = _graphql(
+        "query($slug: String!) { series(slug: $slug) { id slug title { romaji } anime { nodes { "
+        + _ANIME_FIELDS + " } } } }",
+        {"slug": slug},
+    )
+    series = data.get("series")
+    if not isinstance(series, dict):
+        return {}
+    return {
+        **series,
+        "name": (series.get("title") or {}).get("romaji") or "",
+        "anime": [_normalize_graphql_anime(anime) for anime in (series.get("anime") or {}).get("nodes") or []],
+    }
+
+
+def get_playlist(playlist_id: str) -> dict:
+    fields = """
+        id name description tracksCount user { name }
+        tracks {
+            id position
+            video { id link resolution source nc subbed lyrics overlap }
+            entry { id version episodes notes nsfw spoiler
+                theme { THEME_FIELDS
+                    anime { id slug title { romaji english native } format season year synopsis
+                        images { nodes { id link facet } } }
+                }
+            }
+        }
+    """.replace("THEME_FIELDS", _THEME_FIELDS)
+    return _graphql(
+        "query($id: String!) { playlist(id: $id) { " + fields + " } }",
+        {"id": playlist_id},
+    ).get("playlist") or {}
+
+
+def playlist_song_rows(playlist: dict) -> list[dict]:
+    songs = []
+    for track in sorted(playlist.get("tracks") or [], key=lambda row: row["position"]):
+        entry = track.get("entry") or {}
+        theme = entry.get("theme") or {}
+        video = track.get("video") or {}
+        # Playlist entries select a specific version/video; keep that selection.
+        anime = _normalize_graphql_anime({
+            **(theme.get("anime") or {}),
+            "themes": [{**theme, "entries": [{**entry, "videos": {"nodes": [video]}}]}],
+        })
+        songs.extend(anime_song_rows(anime))
+    return songs
+
+
+def get_studio(slug: str) -> dict:
+    data = _graphql(
+        "query($slug: String!) { studio(slug: $slug) { id slug name anime { nodes { "
+        + _ANIME_FIELDS + " } } } }",
+        {"slug": slug},
+    )
+    studio = data.get("studio")
+    if not isinstance(studio, dict):
+        return {}
+    return {**studio, "anime": [
+        _normalize_graphql_anime(anime)
+        for anime in (studio.get("anime") or {}).get("nodes") or []
+    ]}
 
 
 def get_artist(slug: str, *, summary=False) -> dict:
-    include = "images,groups" if summary else "images,groups,songs.animethemes.anime,memberPerformances.song"
-    url = f"{API_BASE}/artist/{quote(slug, safe='')}?{urlencode({'include': include})}"
-    return request_json(url, extra_hdrs={"User-Agent": "anyplay-cli"}).get("artist") or {}
+    fields = """
+        id slug name { main native } images { nodes { id link facet } }
+        groups { edges { node { id slug name { main native } } alias as notes } }
+    """
+    if not summary:
+        fields += """
+            songStaff { role alias as song { id title { romaji native }
+                themes { id slug type sequence anime { id slug title { romaji english native } } } } }
+            memberSongStaff { role song { id } }
+        """
+    artist = _graphql(
+        "query($slug: String!) { artist(slug: $slug) { " + fields + " } }",
+        {"slug": slug},
+    ).get("artist")
+    if not isinstance(artist, dict):
+        return {}
+    result = {
+        **artist, "name": artist["name"]["main"],
+        "images": (artist.get("images") or {}).get("nodes") or [],
+        "groups": [{**edge["node"], "name": edge["node"]["name"]["main"],
+                    "artistmember": {key: edge.get(key) for key in ("alias", "as", "notes")}}
+                   for edge in (artist.get("groups") or {}).get("edges") or []],
+        "songs": [], "memberPerformances": [],
+    }
+    seen_songs = set()
+    for credit in artist.get("songStaff") or []:
+        if credit.get("role", "").casefold() != "performance":
+            continue
+        song = credit["song"]
+        if song["id"] in seen_songs:
+            continue
+        seen_songs.add(song["id"])
+        themes = [{**theme, "anime": _normalize_graphql_anime(theme.get("anime") or {})}
+                  for theme in song.get("themes") or []]
+        result["songs"].append({**song, "title": song["title"]["romaji"],
+                                "animethemes": themes, "artistsong": credit})
+    result["memberPerformances"] = [
+        credit for credit in artist.get("memberSongStaff") or []
+        if credit.get("role", "").casefold() == "performance"
+    ]
+    return result
 
 
 def song_row_label(title, theme=None) -> str:
@@ -268,12 +377,10 @@ def artist_sections(artist: dict) -> list[dict]:
 def enrich_artist_theme(row: dict) -> dict:
     theme = row["raw"]
     song = theme["song"]
-    song_url = f"{API_BASE}/song/{song['id']}?{urlencode({'include': 'artists'})}"
-    song_detail = request_json(song_url, extra_hdrs={"User-Agent": "anyplay-cli"}).get("song") or song
     anime = theme.get("anime") or {}
     anime_detail = _anime_detail_by_slug(anime.get("slug", "")) or anime
     full_theme = next((t for t in anime_detail.get("animethemes") or [] if t.get("id") == theme.get("id")), theme)
-    return {**row, "raw": {**full_theme, "song": {**song, **song_detail}, "anime": anime_detail}}
+    return {**row, "raw": {**full_theme, "song": full_theme.get("song") or song, "anime": anime_detail}}
 
 
 def _theme_song(theme: dict) -> dict:

@@ -1900,15 +1900,51 @@ def handle_play_state(
         except Exception:
             cancel_check = None
 
-        result, percent, time_pos, duration, played_seconds = app_core.play_desktop(
-            ms.show_title, current_ep_label, ms.selected_stream, fetch_cb,
-            ms.total_eps, is_binge, ms.show_id, ms.pending_osd_msg,
-            ms.current_ep_index, next_episode,
-            mal_id=mal_id, aniskip_enabled=aniskip_enabled, aniskip_auto=aniskip_auto,
-            custom_skip_intervals=custom_skip_intervals,
-            start_time_override=start_time_override,
-            cancel_check=cancel_check,
-        )
+        from ..playback.menu import run_playback_menu, playback_picker
+        from ..ui.picker import tui_pick
+
+        def playback_menu(kind):
+            if kind != "m":
+                return "RETURN", None
+            from .playback_menu import handle_mirrors_state
+
+            def picker(**lifecycle):
+                app_core.enter_alt_screen()
+                result = handle_mirrors_state(
+                    flags, ui, ms, cfg, args, ttype, resolve_tracking_fn,
+                    picker_override=lambda *pos, **kwargs: playback_picker(
+                        tui_pick, lifecycle, *pos, **kwargs),
+                )
+                return 0 if result == "PLAY" else -2
+
+            outcome, selected = run_playback_menu(app_core._ipc_player, [], "Select mirror", picker=picker)
+            return outcome, ms.selected_stream if selected is not None else None
+
+        player = app_core._ipc_player
+        previous_menu = getattr(player, "playback_menu", None)
+        if player is not None:
+            player.playback_menu = playback_menu
+        try:
+            result, percent, time_pos, duration, played_seconds = app_core.play_desktop(
+                ms.show_title, current_ep_label, ms.selected_stream, fetch_cb,
+                ms.total_eps, is_binge, ms.show_id, ms.pending_osd_msg,
+                ms.current_ep_index, next_episode,
+                mal_id=mal_id, aniskip_enabled=aniskip_enabled, aniskip_auto=aniskip_auto,
+                custom_skip_intervals=custom_skip_intervals,
+                start_time_override=start_time_override,
+                cancel_check=cancel_check,
+            )
+        finally:
+            if player is not None:
+                player.playback_menu = previous_menu
+        if result == "MENU_SELECTION":
+            ms.selected_stream = player.menu_selection
+            ms.pending_resume_time = time_pos
+            app_core._exit_player_screen()
+            return "PLAY"
+        if result == "MENU_ENDED":
+            result = "EOF"
+            is_binge = False
 
         ms.pending_osd_msg = ""
         app_core._exit_player_screen()

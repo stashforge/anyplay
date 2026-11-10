@@ -301,21 +301,20 @@ def test_summary_theme_is_loaded_with_identity_checked(monkeypatch):
     anime = anime_fixture()
     theme = {**anime["animethemes"][0], "anime": anime}
     requests = []
-    def request(url, **kwargs):
-        requests.append(url)
-        return {"animetheme": theme}
-    monkeypatch.setattr(flow.service, "request_json", request)
+    def graphql(query, variables):
+        requests.append(variables)
+        return {"themeConnection": {"nodes": [{"id": 11, "anime": {}}]}}
+    monkeypatch.setattr(flow.service, "_graphql", graphql)
+    monkeypatch.setattr(flow.service, "_normalize_graphql_anime", lambda raw: {**anime, "animethemes": [theme]})
     songs, selected = flow.prepare_collection([{"raw": {"id": 11}}], 0)
     assert songs[0]["raw"]["id"] == 11
     assert len(songs[0]["variants"]) == 3
     assert selected == 0
-    assert urlsplit(requests[0]).path == "/animetheme/11"
-    assert parse_qs(urlsplit(requests[0]).query) == {
-        "include": ["anime.images,song.artists,animethemeentries.videos"]}
+    assert requests == [{"ids": [11]}]
 
 
 def test_wrong_theme_identity_is_not_used_for_playback(monkeypatch):
-    monkeypatch.setattr(flow.service, "request_json", lambda *args, **kwargs: {"animetheme": {"id": 99}})
+    monkeypatch.setattr(flow.service, "_graphql", lambda *args: {"themeConnection": {"nodes": [{"id": 99}]}})
     with pytest.raises(ValueError, match="different theme identity"):
         flow.prepare_collection([{"raw": {"id": 11}}], 0)
 
@@ -542,5 +541,44 @@ finish(dict(covers=covers))
         assert b"BD" in terminal.output
         assert b"Episode OP1" not in terminal.output
         assert b"Unknown" not in terminal.output
-        assert b"TV" not in terminal.output
+        assert b"TV" in terminal.output
         assert b"SUB" not in terminal.output
+
+
+def test_song_player_updates_cover_worker_identity(monkeypatch):
+    from types import SimpleNamespace
+    from media_cli.ui import player_screen
+
+    show = {"_id": "studio-anime", "name": "Anime", "thumbnail": "https://example.test/cover.jpg"}
+    ui = SimpleNamespace()
+    monkeypatch.setattr(flow.app_core, "_hovered_show_id", "old-search-result")
+    monkeypatch.setattr(flow.app_core, "enter_alt_screen", lambda: None)
+    monkeypatch.setattr(flow, "_play_row", lambda *a, **kw: (
+        flow.app_core._hovered_show_id, ui.hovered_show_id, ui.hovered_show_obj))
+    monkeypatch.setattr(player_screen, "_player_ui_state", {"active": False})
+    result = flow.play_variant(
+        {"song": "Song", "anime": "Anime", "theme": "OP1", "stream": {}},
+        SimpleNamespace(plain_mode=False), {}, SimpleNamespace(player=None), show, ui,
+    )
+    assert result == ("studio-anime", "studio-anime", show)
+
+
+def test_player_uses_anime_metadata_and_one_song_line(monkeypatch):
+    from types import SimpleNamespace
+    from media_cli.ui import player_screen
+
+    show = {"_id": "anime", "name": "Romaji", "englishName": "English", "type": "TV",
+            "season": "spring", "airedStart": {"year": 2023}, "description": "Synopsis"}
+    monkeypatch.setattr(flow.app_core, "enter_alt_screen", lambda: None)
+    monkeypatch.setattr(player_screen, "_player_ui_state", {"active": False})
+    captured = {}
+    monkeypatch.setattr(flow, "_play_row", lambda *a, **kw: captured.update(player_screen._player_ui_state))
+    flow.play_variant(
+        {"song": "Song", "artists": "Artist", "anime": "Romaji", "theme": "OP1",
+         "stream": {"resolution": "1080", "source": "BD"}},
+        SimpleNamespace(plain_mode=False), {}, SimpleNamespace(player=None), show,
+    )
+    assert captured["content_secondary"] == "English"
+    assert captured["content_metadata"] == "TV • Spring 2023"
+    assert captured["content_stream"].startswith("Song by Artist • OP 1")
+    assert captured["show"]["description"] == "Synopsis"

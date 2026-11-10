@@ -16,8 +16,10 @@ _PLAY = (ViewAction("select", "play", ("ENTER", "RIGHT")),)
 
 
 class SeriesController:
-    def __init__(self, series, play, *, source_view, source_position, song_menu_factory=None):
+    def __init__(self, series, play, *, source_view, source_position, song_menu_factory=None, collection_kind="series"):
         self.series = dict(series)
+        self.collection_kind = collection_kind
+        self.collection_label = collection_kind.title()
         self.play = play
         self.source_id = source_view.id
         self.session = ViewSession(source_view, self.handle_event)
@@ -52,12 +54,13 @@ class SeriesController:
         Thread(target=worker, daemon=True, name="animethemes-series").start()
 
     def start(self):
-        self._load("Fetching series titles", self._titles)
+        self._load(f"Fetching {self.collection_kind} titles", self._titles)
 
     def _titles(self):
-        key = ("series", self.series["slug"])
+        key = (self.collection_kind, self.series["slug"])
         if key not in self._cache:
-            self._cache[key] = service.get_series(self.series["slug"])
+            loader = service.get_studio if self.collection_kind == "studio" else service.get_series
+            self._cache[key] = loader(self.series["slug"])
         series = self._cache[key]
         items = {}
         for anime in series.get("anime") or []:
@@ -69,22 +72,26 @@ class SeriesController:
             items[slug] = ViewItem(
                 f"anime:{slug}", row["label"], kind="submenu", reference=anime,
                 details=DetailLines(*(Content(text) if text else Blank for text in _row_detail_values(row))),
-                image=ImageSpec(f"anime:{slug}", "available", url) if url else None,
+                image=ImageSpec(f"anime:{slug}", "available", url) if url else ImageSpec(f"anime:{slug}", "unavailable"),
                 info=anime.get("synopsis") or "",
             )
         return ViewSpec(
-            f"series:{self.series['slug']}", "Select anime", tuple(items.values()),
+            f"{self.collection_kind}:{self.series['slug']}", "Select anime", tuple(items.values()),
             details=DetailLines(Content(series.get("name") or self.series.get("name") or "Series"),
                                 Blank, Content(Count(len(items), "anime"))),
-            context=("AnimeThemes", "Series"), actions=_OPEN,
-            state="ready" if items else "empty", message="No anime found in this series" if not items else "",
+            context=("AnimeThemes", self.collection_label), actions=_OPEN,
+            state="ready" if items else "empty", message=f"No anime found in this {self.collection_kind}" if not items else "",
         )
 
     def _videos(self, anime):
         slug = anime["slug"]
         key = ("anime", slug)
         if key not in self._cache:
-            detail = service.get_anime_for_show({"_animethemes_slug": slug})
+            themes = anime.get("animethemes")
+            complete = isinstance(themes, list) and all(
+                isinstance(theme.get("animethemeentries"), list) for theme in themes
+            )
+            detail = anime if complete else service.get_anime_for_show({"_animethemes_slug": slug})
             if not detail:
                 raise ValueError("Anime detail unavailable")
             self._cache[key] = detail
@@ -93,7 +100,7 @@ class SeriesController:
         if songs:
             from .animethemes_song_playback import create_song_menu
 
-            identity = f"series:{self.series['slug']}:anime:{slug}"
+            identity = f"{self.collection_kind}:{self.series['slug']}:anime:{slug}"
             menu = (self._song_menu_factory(songs, 0, identity, self.session) if self._song_menu_factory
                     else create_song_menu(None, None, {}, None, songs, 0, collection_id=identity,
                                           session=self.session, play_callback=self.play))
@@ -102,10 +109,10 @@ class SeriesController:
         raw_row = {"kind": "anime", "raw": detail, "label": detail.get("name") or slug}
         url = _image_url(detail)
         return ViewSpec(
-            f"series:{self.series['slug']}:anime:{slug}", "Select song", (),
+            f"{self.collection_kind}:{self.series['slug']}:anime:{slug}", "Select song", (),
             details=DetailLines(*(Content(text) if text else Blank for text in _row_detail_values(raw_row))),
-            image=ImageSpec(f"anime:{slug}", "available", url) if url else None,
-            context=("AnimeThemes", "Series"), actions=_PLAY,
+            image=ImageSpec(f"anime:{slug}", "available", url) if url else ImageSpec(f"anime:{slug}", "unavailable"),
+            context=("AnimeThemes", self.collection_label), actions=_PLAY,
             state="empty", message="No theme videos found",
         )
 
@@ -133,7 +140,7 @@ class SeriesController:
         self._closed = True
 
 
-def open_series(flags, ui, ms, cfg, args, raw, *, source_view, source_position):
+def open_series(flags, ui, ms, cfg, args, raw, *, source_view, source_position, collection_kind="series"):
     from ..ui.view_picker import run_view_session
     from .animethemes_song_playback import create_song_menu
 
@@ -142,7 +149,7 @@ def open_series(flags, ui, ms, cfg, args, raw, *, source_view, source_position):
 
     controller = SeriesController(raw, lambda row: _play_row(row, cfg, args),
                                   source_view=source_view, source_position=source_position,
-                                  song_menu_factory=song_menu)
+                                  song_menu_factory=song_menu, collection_kind=collection_kind)
     try:
         controller.start()
         return run_view_session(flags, ui, controller.session, theme=APPLICATION_THEME)

@@ -232,3 +232,22 @@ def test_replacement_gets_loading_budget_after_its_actual_start(playback, monkey
     monkeypatch.setattr(mpv.select, 'select', select)
     assert playback.wait() == 'QUIT'
     assert 'loaded' in emitted
+
+
+@pytest.mark.parametrize("source", ["terminal", "mpv"])
+@pytest.mark.parametrize("key", ["m", "v"])
+def test_playback_menu_shortcuts_keep_player_alive(playback, monkeypatch, source, key):
+    seen = []
+    chosen = {"link": "https://example.test/selected"}
+    playback.load()
+    playback.player.playback_menu = lambda kind: (seen.append(kind) or "SELECT", chosen)
+    if source == "mpv":
+        playback.feed(event("client-message", args=["playback_mirrors" if key == "m" else "playback_versions"]))
+    else:
+        monkeypatch.setattr(mpv.sys.stdin, "read", lambda size: key)
+        monkeypatch.setattr(mpv.select, "select", lambda *a: ([mpv.sys.stdin], [], []))
+    assert playback.wait() == "MENU_SELECTION"
+    assert seen == [key]
+    assert playback.player.menu_selection is chosen
+    assert ("stop",) not in playback.commands
+    assert ("quit",) not in playback.commands
