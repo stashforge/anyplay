@@ -670,7 +670,7 @@ class MpvIpc:
                         last_startup_osd_second = int(startup_elapsed)
                         mirror = str(ui_info.get("mirror") or "mirror").replace("\n", " ").replace("\r", " ")[:120]
                         self.send_cmd(
-                            "show-text", f"Loading {mirror}\n{startup_loading_status(startup_elapsed)}", 1500,
+                            "show-text", f"Loading {mirror}\n{startup_loading_status(startup_elapsed, audio_only=self.audio_only)}", 1500,
                         )
                 elapsed = max(0.0, now - last_playback_tick)
                 last_playback_tick = now

@@ -352,6 +352,14 @@ def _play_row(row: dict, cfg: dict, args: Any, *, collection=None):
 
     title = song_player_title(row)
     stream = {**(row.get("stream") or {}), "media_title": title}
+    audio = ((row.get("raw") or {}).get("video") or {}).get("audio")
+    if row.get("audio_only") and not stream.get("is_local") and isinstance(audio, dict) and audio.get("link"):
+        stream.update(link=audio["link"], type="ogg")
+        source_kind = "direct-audio"
+    else:
+        source_kind = "local" if stream.get("is_local") else "video"
+    logging.getLogger(__name__).debug("AnimeThemes playback source: audio_only=%s kind=%s",
+                                    bool(row.get("audio_only")), source_kind)
     ep = row.get("theme") or "Video"
     player = args.player or cfg.get("player", "mpv")
     try:

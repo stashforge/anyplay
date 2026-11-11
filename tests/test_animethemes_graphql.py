@@ -12,7 +12,8 @@ def test_graphql_slug_lookup_preserves_existing_song_shape(monkeypatch):
             "themes": [{"id": 3, "slug": "OP1", "song": {"title": {"romaji": "Song"},
                 "staff": [{"role": "Performance", "artist": {"name": {"main": "Artist"}}}]},
                 "entries": [{"version": 1, "episodes": "1-11", "videos": {"nodes": [
-                    {"link": "https://example.test/video.webm", "resolution": 1080}]}}]}]}}}
+                    {"link": "https://example.test/video.webm", "resolution": 1080,
+                     "audio": {"link": "https://example.test/exact.ogg", "mimetype": "audio/ogg"}}]}}]}]}}}
     monkeypatch.setattr(service, "request_json", request)
     anime = service.get_anime_for_show({"slug": "example"})
     assert captured["url"] == "https://rs.animethemes.moe/graphql"
@@ -21,6 +22,8 @@ def test_graphql_slug_lookup_preserves_existing_song_shape(monkeypatch):
     assert rows[0]["song"] == "Song"
     assert rows[0]["artists"] == "Artist"
     assert rows[0]["variants"][0]["episodes"] == "1-11"
+    assert "audio { link mimetype }" in captured["body"]["query"]
+    assert rows[0]["variants"][0]["raw"]["video"]["audio"]["link"] == "https://example.test/exact.ogg"
 
 
 def test_graphql_error_is_not_empty_success(monkeypatch):

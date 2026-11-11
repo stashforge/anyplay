@@ -58,7 +58,7 @@ _THEME_FIELDS = """
     id slug type sequence
     song { id title { romaji native } staff { role artist { id slug name { main native } } } }
     entries { id version episodes notes nsfw spoiler
-        videos { nodes { id link resolution source nc subbed lyrics overlap } }
+        videos { nodes { id link resolution source nc subbed lyrics overlap audio { link mimetype } } }
     }
 """
 _ANIME_FIELDS = """
@@ -210,7 +210,7 @@ def get_playlist(playlist_id: str) -> dict:
         id name description tracksCount user { name }
         tracks {
             id position
-            video { id link resolution source nc subbed lyrics overlap }
+            video { id link resolution source nc subbed lyrics overlap audio { link mimetype } }
             entry { id version episodes notes nsfw spoiler
                 theme { THEME_FIELDS
                     anime { id slug title { romaji english native } format season year synopsis

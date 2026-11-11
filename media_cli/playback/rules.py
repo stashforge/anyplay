@@ -1,11 +1,12 @@
 """Pure playback completion, navigation, and OSD rules."""
 
 
-def startup_loading_status(elapsed, timeout=None):
+def startup_loading_status(elapsed, timeout=None, *, audio_only=False):
     seconds = max(0, int(elapsed))
     if elapsed >= 10:
         return f"Taking longer than usual… ({seconds}s)"
-    return f"Loading video… ({seconds}s)"
+    media = "audio" if audio_only else "video"
+    return f"Loading {media}… ({seconds}s)"
 
 
 def should_clear_query_on_child_left(previous, direct_single):

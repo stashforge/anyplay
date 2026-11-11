@@ -31,3 +31,8 @@ def test_shared_player_loading_line_refreshes_elapsed_time(monkeypatch):
     assert "(2s)" in player_screen._loading_status_line(state)
     now[0] = 107.0
     assert "(7s)" in player_screen._loading_status_line(state)
+
+
+@pytest.mark.parametrize("audio_only,expected", [(True, "Loading audio… (8s)"), (False, "Loading video… (8s)")])
+def test_player_startup_label_follows_playback_mode(audio_only, expected):
+    assert player_screen._playback_status_text({"_startup_elapsed": 8}, audio_only=audio_only) == expected

@@ -75,3 +75,13 @@ def test_tiny_terminal_never_scrolls_even_when_all_hints_cannot_fit(player_frame
     screen.render(f.poster)
     assert len(body(f.frames[-1])) <= 7
     assert "Paused" in "\n".join(body(f.frames[-1]))
+
+
+def test_audio_loading_label_is_correct_on_full_and_partial_frames(player_frame):
+    f = player_frame
+    f.state["mpv_props"]["_startup_elapsed"] = 8
+    screen.render(f.poster)
+    assert "Loading audio… (8s)" in strip_ansi(f.frames[-1])
+    screen.update_mpv_props({"_startup_elapsed": 9})
+    assert "Loading audio… (9s)" in strip_ansi(f.frames[-1])
+    assert "Loading video" not in f.frames[-1]

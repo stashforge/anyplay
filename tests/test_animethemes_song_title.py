@@ -42,6 +42,9 @@ def test_desktop_uses_complete_media_title_without_extra_episode_or_quality():
       "stream": {"resolution": "720p", "source": "WEB"}},
      ("ED 1 • Version 2 • EP 7-11", "720p • WEB")),
     ({"theme": "OP1", "stream": {"resolution": "Unknown"}}, ("OP 1 • Original", "")),
+    ({"theme": "ED1", "episodes": "2-10", "audio_only": True,
+      "stream": {"resolution": "720", "source": "WEB"}},
+     ("ED 1 • Original • EP 2-10", "Audio only")),
 ])
 def test_song_player_lines_use_video_metadata_without_episode_placeholders(row, expected):
     assert titles.song_player_lines(row) == expected

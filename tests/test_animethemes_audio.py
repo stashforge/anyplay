@@ -97,3 +97,27 @@ def test_background_player_start_inherits_audio_mode(monkeypatch):
     monkeypatch.setattr(engine, "_prepare_owned_playback_resource", lambda prepare, close: prepare(lambda: False))
     engine._start_player_for_playback(player)
     assert modes == [True, True]
+
+
+@pytest.mark.parametrize("audio_only,local,audio,expected", [
+    (True, False, {"link": "https://a.animethemes.moe/exact-v2.ogg"}, "https://a.animethemes.moe/exact-v2.ogg"),
+    (False, False, {"link": "https://a.animethemes.moe/exact-v2.ogg"}, "https://v.animethemes.moe/video.webm"),
+    (True, True, {"link": "https://a.animethemes.moe/exact-v2.ogg"}, "/tmp/downloaded.webm"),
+    (True, False, None, "https://v.animethemes.moe/video.webm"),
+])
+def test_direct_audio_uses_exact_variant_link_but_keeps_local_and_video_priority(
+    monkeypatch, audio_only, local, audio, expected,
+):
+    calls = []
+    monkeypatch.setattr(animethemes.app_core, "is_termux", lambda: False)
+    monkeypatch.setattr(animethemes.app_core, "play_desktop", lambda *a, **kw: calls.append(a[2]))
+    monkeypatch.setattr(animethemes.app_core, "_exit_player_screen", lambda: None)
+    link = "/tmp/downloaded.webm" if local else "https://v.animethemes.moe/video.webm"
+    row = {"song": "Song", "audio_only": audio_only,
+           "stream": {"link": link, "type": "webm", "is_local": local},
+           "raw": {"video": {"audio": audio}}}
+    animethemes._play_row(row, {}, SimpleNamespace(player=None))
+    assert calls[0]["link"] == expected
+    assert row["stream"]["link"] == link  # downloads and later video playback retain the original
+    if expected.endswith(".ogg"):
+        assert calls[0]["type"] == "ogg"

@@ -671,7 +671,7 @@ def render(
         content.append(next_air_line)
 
     if is_playing:
-        state_str = _playback_status_text(props)
+        state_str = _playback_status_text(props, audio_only=bool(s.get("audio_only")))
         pt_sec = props.get("playback-time", 0) or 0
         dur_sec = props.get("duration", 0) or 0
         rem_sec = dur_sec - pt_sec if dur_sec > 0 else 0
@@ -792,12 +792,12 @@ def render(
         s["_row_time"]  = None
 
 
-def _playback_status_text(props: dict) -> str:
+def _playback_status_text(props: dict, *, audio_only=False) -> str:
     if props.get('_mirror_wait_message'):
         return props['_mirror_wait_message']
     elapsed = props.get("_startup_elapsed")
     if elapsed is not None:
-        return startup_loading_status(elapsed)
+        return startup_loading_status(elapsed, audio_only=audio_only)
     return "\u23f8 Paused" if props.get("pause") else "\u25b6 Playing"
 
 
@@ -823,7 +823,7 @@ def update_mpv_props(props: dict | None) -> None:
             cur_w, cur_h = w, s.get("_cached_h", 0)
 
         if cur_w == w and cur_h == s.get("_cached_h", 0):
-            state_str = _playback_status_text(props)
+            state_str = _playback_status_text(props, audio_only=bool(s.get("audio_only")))
             pt_sec  = props.get("playback-time", 0) or 0
             dur_sec = props.get("duration", 0) or 0
             rem_sec = dur_sec - pt_sec if dur_sec > 0 else 0

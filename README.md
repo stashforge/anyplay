@@ -228,7 +228,11 @@ player with `pkg install mpv`; audio mode does not launch an Android video app.
 The mode applies on the next playback and lasts for the current song collection.
 It disables video output and automatic user-script loading for that mpv process,
 so visualizers cannot open a window. Normal video playback keeps your mpv scripts.
-The source remains a video file; this is not an audio download or a bandwidth guarantee.
+Audio mode prefers the audio file returned for the selected AnimeThemes video.
+Downloaded video copies still play locally first. When no separate audio link is
+provided, playback falls back to the video file with its display disabled.
+Downloads continue saving the selected video; the audio-mode toggle does not
+change the download format.
 
 Player-screen keys:
 

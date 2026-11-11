@@ -75,6 +75,8 @@ def song_player_lines(row: dict) -> tuple[str, str]:
         label, "Original" if version == 1 else f"Version {version}",
         f"EP {episodes}" if episodes else "",
     ) if part)
+    if row.get("audio_only"):
+        return sanitize_terminal_text(metadata), "Audio only"
     stream = row.get("stream") or {}
     resolution = _text(stream.get("resolution"))
     if resolution.isdecimal():
