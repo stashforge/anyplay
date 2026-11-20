@@ -66,13 +66,6 @@ Playwright; the Android companion is a separate APK.
 See [installation dependencies](docs/installation-dependencies.md) for the group
 and system-tool distinctions. These instructions describe the current GitHub source.
 
-Senshi on Termux additionally needs the paired Anyplay WebView companion (version
-8 or newer). It starts the service only when source extraction needs it; it does
-not require Node.js, bubblewrap or a browser window. The existing private pairing
-is reused. Missing pairing or an outdated companion does not trigger automatic
-pairing or fall back to an unrestricted JavaScript runtime. The service stops
-after its existing idle timeout; Linux continues to use its isolated Node worker.
-
 ### Android WebView Companion
 
 Get the companion APK from
@@ -137,7 +130,7 @@ anyplay downloads
 ```bash
 anyplay health anipm --translation both --seed 42
 anyplay health all --translation both --seed 42
-anyplay health senshi --translation dub --verify mpv --seed 42
+anyplay health anipm --translation dub --verify mpv --seed 42
 anyplay health reports
 anyplay health report latest
 ```
@@ -284,7 +277,7 @@ Current provider IDs include:
 - `anipm`
 - `animethemes`
 - `reanime`
-- `senshi`
+- `gotaku`
 - `torrent`
 - `movies`
 
