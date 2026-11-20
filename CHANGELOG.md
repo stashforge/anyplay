@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.11.0 — 2026-11-20
+
+### Added
+
+- Shared search home, provider tables, responsive headers, themes, padding and centered layouts.
+- Smart filters with field suggestions across search, History, Downloads, AniList and AnimeThemes.
+- Persistent download queue, supported transfer resume, and a simplified download manager.
+- Scheduled History and AniList checks through systemd user services and desktop notifications.
+- Gotaku provider and current signed AniDB playback API support.
+- Theme commands and an expanded configuration editor.
+
+### Fixed
+
+- History navigation stalls, repeated cover rendering and inconsistent watched-episode styling.
+- Download recovery, track merging, skip timing handling and provider playback failures.
+- AniList navigation, tab loading, help formatting and option validation.
+- AnimeThemes direct audio selection and playback labels.
+
+### Changed
+
+- Retired Senshi; provider archives remain local reference material.
+- Unified UI styling and configuration defaults; updated user documentation.
+
 ## 0.10.0 — 2026-11-10
 
 ### Added
