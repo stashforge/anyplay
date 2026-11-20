@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+from .viewport import content_size as _content_size, positioned_lines
 import re
 import sys
 import threading
@@ -66,9 +67,16 @@ T = TypeVar("T")
 if TYPE_CHECKING:
     from ..context import UiState
 
-TITLE_COLOR = "\033[1;38;2;145;185;245m"
-SECTION_LABEL = "\033[1;38;2;190;180;235m"
-TEXT_COLOR = "\033[38;2;170;180;195m"
+from ..state.theme import MINT_SCREEN_THEME
+
+
+def _style(role):
+    return MINT_SCREEN_THEME.prefix(MINT_SCREEN_THEME.resolve_style(role))
+
+
+TITLE_COLOR = _style("player.title")
+SECTION_LABEL = _style("player.section")
+TEXT_COLOR = _style("player.text")
 RESET = "\033[0m"
 
 
@@ -129,8 +137,8 @@ def _thin_progress_bar(position: float, duration: float, width: int) -> str:
     filled_char = "\u2501"
     empty_char = "\u2500"
     return (
-        f"\033[38;5;115m{filled_char * filled}\033[0m"
-        f"\033[38;5;240m{empty_char * (bar_width - filled)}\033[0m"
+        f"{_style('player.progress')}{filled_char * filled}\033[0m"
+        f"{_style('player.progress_empty')}{empty_char * (bar_width - filled)}\033[0m"
     )
 
 
@@ -252,7 +260,7 @@ def _loading_status_line(state: dict, snapshot: LoadingSnapshot | None = None) -
         indicator = spinner_frame(_spinner_style)
     except Exception:
         indicator = spinner_frame()
-    return f"\033[1;36m{indicator} {message}{elapsed}\033[0m"
+    return f"{_style('player.status')}{indicator} {message}{elapsed}\033[0m"
 
 
 @contextmanager
@@ -411,7 +419,7 @@ def deactivate(close_alt: bool = False) -> None:
     _player_ui_state["active"] = False
 
 
-def add_status_line(message: str, color: str = "\033[94m") -> bool:
+def add_status_line(message: str, color: str | None = None) -> bool:
     """Retain intentional player progress; only the UI owner may redraw."""
     s = _player_ui_state
     if not s["active"]:
@@ -419,7 +427,7 @@ def add_status_line(message: str, color: str = "\033[94m") -> bool:
     from ..context import FLAGS
     if getattr(FLAGS, "plain_mode", False):
         return False
-    _store_status(s, message, color)
+    _store_status(s, message, color or _style("player.log"))
     if threading.current_thread() is threading.main_thread():
         render()
     return True
@@ -532,7 +540,7 @@ def render(
         enter_alt_screen_fn()
 
     try:
-        w, h = os.get_terminal_size(sys.stdin.fileno())
+        w, h = _content_size(sys.stdin.fileno())
     except Exception:
         w, h = 80, 24
 
@@ -577,7 +585,7 @@ def render(
         meta_parts.append(str(ttype).upper())
 
     if target_ep_str:
-        meta_parts.append(f"\033[38;5;252m{target_ep_str}\033[38;5;248m")
+        meta_parts.append(f"{_style('player.episode')}{target_ep_str}{_style('player.metadata')}")
 
     if isinstance(show, dict):
         from ..domain.metadata import format_available_episodes
@@ -609,13 +617,13 @@ def render(
     if s.get("content_metadata") is not None:
         meta_line = s["content_metadata"]
     next_air = format_next_airing(show) if isinstance(show, dict) else ""
-    next_air_line = f"\033[38;5;117m{next_air}\033[0m" if next_air else ""
+    next_air_line = f"{_style('player.airing')}{next_air}\033[0m" if next_air else ""
 
     si = s.get("stream_info", {})
     mirror = si.get("mirror")
     stream_str = ""
     if mirror:
-        pref_star = " \u2022 \033[33mPreferred \u2605" if si.get("is_pref") else ""
+        pref_star = f" \u2022 {_style('player.preferred')}Preferred \u2605" if si.get("is_pref") else ""
         stream_str = f"{mirror}{pref_star}\033[0m"
 
     props = s.get("mpv_props")
@@ -623,7 +631,7 @@ def render(
 
     # ── Check for terminal resize — invalidates cached row positions ──
     try:
-        w, h = os.get_terminal_size(sys.stdin.fileno())
+        w, h = _content_size(sys.stdin.fileno())
     except Exception:
         w, h = 80, 24
     resized = w != s.get("_cached_w") or h != s.get("_cached_h")
@@ -653,7 +661,7 @@ def render(
         from ..core.storage import is_incognito as is_incognito_fn  # lazy import to avoid circular
         if is_incognito_fn():
             content.append("")
-            content.append("\033[38;2;155;125;185mINCOGNITO\033[0m")
+            content.append(f"{_style('player.incognito')}INCOGNITO{RESET}")
     except Exception:
         pass
 
@@ -697,7 +705,7 @@ def render(
         if not compact:
             content.append("")
         _idx_state = len(content)
-        content.append(f"\033[1;36m{state_str}\033[0m")
+        content.append(f"{_style('player.status')}{state_str}\033[0m")
         _idx_bar = len(content)
         content.append(bar)
         _idx_time = len(content)
@@ -739,13 +747,13 @@ def render(
             content.extend(detail_lines)
         if len(content) + len(shortcut_lines) < h - 1 - poster_rows:
             content.append("")
-        content.extend(f"\033[38;5;244m{line}\033[0m" for line in shortcut_lines)
+        content.extend(f"{_style('player.shortcut')}{line}\033[0m" for line in shortcut_lines)
     else:
         content.append("")
         content.append(f"{SECTION_LABEL}Status{RESET}")
 
         content.append(_loading_status_line(s, loading_snapshot))
-        content.append(f"\033[38;5;244m{_loading_cancel_hint(loading_snapshot)}\033[0m")
+        content.append(f"{_style('player.shortcut')}{_loading_cancel_hint(loading_snapshot)}\033[0m")
         content.append("")
         for sl in s["status_lines"]:
             content.append(sl)
@@ -773,7 +781,7 @@ def render(
         s["_last_poster_key"] = poster_key
         overlay = f"\033[1;1H{native_poster}" if native_poster and poster_changed else ""
         _safe_stdout_write(
-            clear_images + ("\033[H\033[2J" if resized else "\033[H") + "\r\n".join(out) + "\033[J"
+            clear_images + ("\033[H\033[2J" if resized else "\033[H") + positioned_lines(out) + "\033[J"
             + overlay + "\033[1;1H\033[?25l"
         )
 
@@ -818,7 +826,7 @@ def update_mpv_props(props: dict | None) -> None:
     if props is not None and row_state and row_bar and row_time and w:
         # Check terminal hasn't been resized since the last full render
         try:
-            cur_w, cur_h = os.get_terminal_size(sys.stdin.fileno())
+            cur_w, cur_h = _content_size(sys.stdin.fileno())
         except Exception:
             cur_w, cur_h = w, s.get("_cached_h", 0)
 
@@ -833,9 +841,9 @@ def update_mpv_props(props: dict | None) -> None:
                 time_line += f"  \u2022  -{_fmt_time(rem_sec)}"
 
             _safe_stdout_write(
-                f"\033[{row_state};1H\033[2K\033[1;36m{_fit_terminal_line(state_str, w)}\033[0m"
+                f"\033[{row_state};1H\033[2K{_style('player.status')}{_fit_terminal_line(state_str, w)}\033[0m"
                 f"\033[{row_bar};1H\033[2K{_fit_terminal_line(bar, w)}"
-                f"\033[{row_time};1H\033[2K\033[38;5;250m{_fit_terminal_line(time_line, w)}\033[0m"
+                f"\033[{row_time};1H\033[2K{_style('player.time')}{_fit_terminal_line(time_line, w)}\033[0m"
                 "\033[?25l"
             )
             return

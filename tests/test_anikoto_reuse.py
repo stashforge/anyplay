@@ -279,7 +279,7 @@ def test_mutated_instance_scope_discards_old_identity(site, setting):
     assert provider._anime_page_cache == {}
 
 
-@pytest.mark.parametrize("title_id", [" 150672 ", "alias", "https://anikototv.to/watch/oshi-no-ko/ep-1"])
+@pytest.mark.parametrize("title_id", [" 150672 ", "alias", "https://anikototv.bz/watch/oshi-no-ko/ep-1"])
 def test_title_invalidation_clears_aliases_and_refetches_only_selected_title(site, monkeypatch, title_id):
     callback = Mock()
     provider = providers.get_provider("anikoto", callback)
@@ -287,10 +287,10 @@ def test_title_invalidation_clears_aliases_and_refetches_only_selected_title(sit
     provider._fetch_media("alias")
     provider._fetch_media("another alias")
     assert provider._get_anime_page("alias")[0] == "562"
-    assert provider._get_anime_page("https://anikototv.to/watch/oshi-no-ko/ep-1")[0] == "562"
+    assert provider._get_anime_page("https://anikototv.bz/watch/oshi-no-ko/ep-1")[0] == "562"
     unrelated = {"id": 222, "title": {"romaji": "Other show"}}
     provider._remember_media("other alias", unrelated)
-    other_mapping = ("999", "https://anikototv.to/watch/other/ep-1")
+    other_mapping = ("999", "https://anikototv.bz/watch/other/ep-1")
     provider._anime_page_cache["222"] = other_mapping
     provider._anime_page_cache["other alias"] = other_mapping
 
@@ -345,7 +345,7 @@ def test_refresh_between_identity_and_catalog_cannot_disable_mal_verification(si
 @pytest.mark.parametrize("operation", ["episode_catalog", "episode_sources"])
 def test_numeric_mapping_without_metadata_cannot_be_used_unvalidated(site, monkeypatch, operation):
     provider = AnikotoProvider()
-    provider._anime_page_cache["150672"] = ("562", "https://anikototv.to/watch/oshi-no-ko/ep-1")
+    provider._anime_page_cache["150672"] = ("562", "https://anikototv.bz/watch/oshi-no-ko/ep-1")
     monkeypatch.setattr("media_cli.services.anilist.fetch_one", lambda *args, **kwargs: None)
     if operation == "episode_catalog":
         assert provider.episode_catalog("150672")["ids"] == []
@@ -419,7 +419,7 @@ def test_old_metadata_response_cannot_overwrite_refreshed_cache(site, monkeypatc
     assert requests == ["lookup", "lookup"]
 
 
-@pytest.mark.parametrize("selection", ["150672", "alias", "https://anikototv.to/watch/oshi-no-ko/ep-1"])
+@pytest.mark.parametrize("selection", ["150672", "alias", "https://anikototv.bz/watch/oshi-no-ko/ep-1"])
 @pytest.mark.parametrize("boundary", ["title", "scope"])
 def test_old_identity_response_cannot_overwrite_refreshed_mapping(site, monkeypatch, response_gate, selection, boundary):
     entered, release, pause = response_gate
@@ -479,7 +479,7 @@ def test_old_catalog_rejection_cannot_evict_refreshed_identity(site, monkeypatch
 
     monkeypatch.setattr("urllib.request.urlopen", request)
     monkeypatch.setattr("media_cli.services.anilist.fetch_one", lambda *args, **kwargs: site.media)
-    watch_url = "https://anikototv.to/watch/oshi-no-ko/ep-1"
+    watch_url = "https://anikototv.bz/watch/oshi-no-ko/ep-1"
     with ThreadPoolExecutor(max_workers=1) as pool:
         pending = pool.submit(provider._episode_page, "562", watch_url, site.media)
         try:
@@ -516,3 +516,33 @@ def test_get_title_without_search_exposes_actual_anilist_identity_and_loaded_emp
     assert provider.get_title("150672")["aniListId"] == "150672"
     assert requests == [int(selection)]
 
+
+
+def test_site_and_embed_service_domains_are_independent():
+    from media_cli.providers.anikoto import AnikotoProvider
+    provider = AnikotoProvider()
+    provider.metadata = {'service_domains': ['https://embed.example/']}
+    provider.domains = ['https://watch.example/', 'https://backup.example']
+    assert provider.anikoto_url == 'https://watch.example'
+    assert provider.base_url == 'https://embed.example'
+    provider.domains[0] = 'https://new-watch.example'
+    assert provider.anikoto_url == 'https://new-watch.example'
+    assert provider.base_url == 'https://embed.example'
+    provider.metadata['service_domains'][0] = 'https://new-embed.example'
+    assert provider.base_url == 'https://new-embed.example'
+    assert provider.anikoto_url == 'https://new-watch.example'
+
+
+def test_registry_service_domain_change_starts_new_session():
+    callback = Mock()
+    meta = providers.PROVIDER_REGISTRY['anikoto']
+    meta['domains'] = ['https://watch.example']
+    meta['service_domains'] = ['https://embed.example']
+    first = providers.get_provider('anikoto', callback)
+    assert first.anikoto_url == 'https://watch.example'
+    assert first.base_url == 'https://embed.example'
+    meta['service_domains'][0] = 'https://new-embed.example'
+    second = providers.get_provider('anikoto', callback)
+    assert second is not first
+    assert second.anikoto_url == first.anikoto_url
+    assert second.base_url == 'https://new-embed.example'

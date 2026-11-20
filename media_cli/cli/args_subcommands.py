@@ -186,7 +186,7 @@ def add_history_subcommand(commands):
             "Examples:\n"
             f"  {APP_NAME} history\n"
             f"  {APP_NAME} history --cover\n"
-            f"  {APP_NAME} history --incognito"
+            f"  {APP_NAME} history --plain"
         ),
         add_help=False,
         formatter_class=MinimalHelpFormatter,
@@ -376,7 +376,7 @@ def add_config_subcommand(commands):
         help="Manage CLI configuration",
         description=(
             "View, edit, or update configuration settings.\n\n"
-            f"Running '{APP_NAME} config' without arguments opens config.conf in your editor.\n"
+            f"Running '{APP_NAME} config' without arguments prints saved settings with credentials hidden.\n"
             "Use 'set' to update individual keys directly from the command line."
         ),
         usage=(
@@ -404,7 +404,7 @@ def add_config_subcommand(commands):
         nargs="?",
         choices=["set", "get"],
         metavar="<action>",
-        help="Action to perform: 'set', 'get'. Omit to open config file in editor.",
+        help="Action to perform: 'set', 'get'. Omit to show saved settings.",
     )
     config.add_argument(
         "key",
@@ -419,11 +419,12 @@ def add_config_subcommand(commands):
         help="Value to assign to the key",
     )
     config_opts = config.add_argument_group("Config options")
+    config_opts.add_argument("--expanded", action="store_true", help="Edit with all supported settings and commented defaults")
     config_opts.add_argument(
         "-e", "--editor",
-        dest="editor",
+        dest="editor", nargs="?", const="",
         metavar="EDITOR",
-        help="Editor to open configuration file with (e.g., nano, micro, vim, code)",
+        help="Edit config; optional editor overrides config, VISUAL/EDITOR, and system fallback",
     )
     global_options = config.add_argument_group("Global options")
     _add_debug_option(global_options, suppress_default=True)
@@ -471,18 +472,42 @@ def add_logs_subcommand(commands):
 
 def add_health_subcommand(commands):
     from ..health.profiles import PROFILES
+    from ..provider_manifest import RETIRED_PROVIDERS
     health = commands.add_parser(
         "health", help="Check providers and manage saved health reports",
-        description="Check provider metadata, native catalogues, sources and streams, or manage saved reports. Use health all to check enabled providers sequentially; each keeps its supported depth. --translation both checks Sub and Dub separately. Supported depths depend on the provider. Senshi and other media-enabled adapters default to HTTP checks; --verify extraction stops before media access. --verify mpv silently decodes a short sample without a window or sound. AnimeThemes and Torrents currently offer catalogue/search-only checks; no torrent transfer is started. Visible playback checks are not available yet.\nView with: anyplay health report <id|latest>; q exits the pager.\nDelete one: anyplay health report <id|latest> --delete",
+        usage=(f"{APP_NAME} health <provider|all> [options]\n"
+               f"       {APP_NAME} health reports\n"
+               f"       {APP_NAME} health report <id|latest> [--delete]"),
+        description="Check providers and save a report. Checking all providers can take several minutes per provider.",
+        epilog=(
+            "Commands:\n"
+            "  <provider>        Check one provider; use its ID from 'anyplay providers'\n"
+            "  all               Check every enabled provider, one at a time\n"
+            "  reports           List saved reports\n"
+            "  report <id|latest>  Open a saved report; press q to close\n\n"
+            "Check levels:\n"
+            "  catalogue         Search and available title/episode metadata\n"
+            "  extraction        Also resolve sources into stream URLs\n"
+            "  http              Also check media access, without playback\n"
+            "  mpv               Also decode a short sample, without a window or sound\n\n"
+            "Each provider supports different levels. Unsupported levels use its deepest\n"
+            "supported check. AnimeThemes and Torrents are search-only; no torrent transfer\n"
+            "is started. Passing samples do not guarantee the entire library works.\n\n"
+            "Examples:\n"
+            f"  {APP_NAME} health all --translation both --verify mpv\n"
+            f"  {APP_NAME} health anipm --verify http\n"
+            f"  {APP_NAME} health report latest\n"
+            f"  {APP_NAME} health report latest --delete"
+        ),
         add_help=False, formatter_class=MinimalHelpFormatter,
     )
     _configure_help_parser(health)
-    health.add_argument("health_action", choices=("reports", "report", "all", *PROFILES), help="List/view reports or check a supported provider")
+    health.add_argument("health_action", metavar="<command>", choices=("reports", "report", "all", *(key for key in PROFILES if key not in RETIRED_PROVIDERS)), help="Provider ID, all, reports, or report")
     health.add_argument("health_report_id", nargs="?", metavar="ID", help="Report ID or latest (required with report)")
     health.add_argument("--delete", dest="health_delete", action="store_true", help="Delete the selected report instead of viewing it")
-    health.add_argument("--seed", dest="health_seed", type=int, help="Repeat episode sample selection with this nonnegative seed (provider checks)")
-    health.add_argument("--verify", dest="health_verify", choices=("catalogue", "extraction", "http", "mpv"), help="Verification level (default depends on provider)")
-    health.add_argument("--translation", dest="health_translation", choices=("sub", "dub", "both"), help="Check Sub, Dub, or both independently (default: sub); unsupported translations are not applicable")
+    health.add_argument("--seed", dest="health_seed", type=int, metavar="N", help="Reuse the same nonnegative number for repeatable sample selection")
+    health.add_argument("--verify", dest="health_verify", choices=("catalogue", "extraction", "http", "mpv"), help="How far to check; see check levels below. Default: provider-specific")
+    health.add_argument("--translation", dest="health_translation", choices=("sub", "dub", "both"), help="Translation to check (default: sub). Both checks each separately; unsupported translations are skipped")
     health.add_argument("-h", "--help", action="help", help="Show this help message and exit")
     _add_debug_option(health, suppress_default=True)
     _add_plain_option(health, suppress_default=True)
@@ -502,3 +527,42 @@ def register_all_subcommands(commands, search_provider=None):
     add_config_subcommand(commands)
     add_logs_subcommand(commands)
     add_health_subcommand(commands)
+    add_service_subcommand(commands)
+    add_theme_subcommand(commands)
+
+
+def add_service_subcommand(commands):
+    service = commands.add_parser(
+        "service", help="Manage scheduled History refresh",
+        usage=f"{APP_NAME} service <action>",
+        description="Manage the optional systemd user timer for History refresh.",
+        epilog=("Actions:\n"
+                "  install    Write the user service and timer\n"
+                "  start      Enable and start scheduled checks\n"
+                "  restart    Reload units and restart scheduled checks\n"
+                "  stop       Stop and disable scheduled checks\n"
+                "  status     Show timer and last check status\n"
+                "  check      Check once and deliver unnotified releases\n\n"
+                f"Examples:\n  {APP_NAME} service install\n  {APP_NAME} service start"),
+        add_help=False, formatter_class=MinimalHelpFormatter)
+    _configure_help_parser(service)
+    service.add_argument("service_action", choices=("install", "start", "restart", "stop", "status", "check", "run"), metavar="<action>")
+    service.add_argument("-h", "--help", action="help", help="Show this help message and exit")
+    _add_debug_option(service, suppress_default=True)
+    return service
+
+
+def add_theme_subcommand(commands):
+    from ..state.theme_catalog import THEME_NAMES
+    theme = commands.add_parser(
+        "theme", help="List or preview themes",
+        usage=f"{APP_NAME} theme list\n       {APP_NAME} theme preview <name>",
+        description="List themes or preview one for this session without saving it.",
+        epilog=f"Examples:\n  {APP_NAME} theme list\n  {APP_NAME} theme preview ember\n  {APP_NAME} config set theme ember",
+        add_help=False, formatter_class=MinimalHelpFormatter)
+    _configure_help_parser(theme)
+    theme.add_argument("theme_action", choices=("list", "preview"), metavar="<action>")
+    theme.add_argument("theme_name", nargs="?", choices=THEME_NAMES, metavar="<name>")
+    theme.add_argument("-h", "--help", action="help", help="Show this help message and exit")
+    _add_debug_option(theme, suppress_default=True)
+    return theme

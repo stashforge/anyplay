@@ -2,7 +2,7 @@
 
 import math
 
-from .aniskip import validated_skip_intervals
+from .aniskip import clamp_ending_overrun, validated_skip_intervals
 
 
 def normalize_provider_skips(payload) -> list[dict]:
@@ -43,7 +43,7 @@ def playback_skip_intervals(intervals, duration: float) -> list[dict]:
     if not math.isfinite(duration) or duration <= 0:
         return []
     native = normalize_provider_skips([row for row in intervals if row.get("source") == "provider"])
-    native = [row for row in native if row["end"] <= duration]
+    native = [bounded for row in native if (bounded := clamp_ending_overrun(row, duration)) is not None]
     if native:
         return native
     remote = validated_skip_intervals([row for row in intervals if row.get("source") != "provider"], duration)

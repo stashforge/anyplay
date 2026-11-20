@@ -108,6 +108,26 @@ def test_readonly_view_never_dispatches_delete(menu):
     assert menu.calls == []
 
 
+def test_history_tabs_remember_their_own_selection_and_keep_filter(menu):
+    control = controller(menu)
+    first, second = control.session.current.items
+    send(control, "focus", second.id)
+    control.session.position.query = "Example"
+    control.session.position.scroll = 1
+
+    send(control, "tab", value="All")
+    assert control.session.position.selected_id == first.id
+    assert control.session.position.scroll == 0
+    assert control.session.position.query == "Example"
+
+    send(control, "tab", value="Active")
+    assert control.session.position.selected_id == second.id
+    assert control.session.position.scroll == 1
+    send(control, "tab", value="All")
+    assert control.session.position.selected_id == first.id
+    assert control.session.position.scroll == 0
+
+
 @pytest.mark.parametrize("kind", ["back", "quit"])
 def test_navigation_outcomes_are_distinct(menu, kind):
     control = controller(menu)
@@ -210,7 +230,7 @@ finish(dict(kind=result.kind, owner_acceptance=accepted == [owner],
 """
     with Terminal(tmp_path, source, columns=140) as terminal:
         terminal.send_after(b"Updated 1m ago", b"\x12")
-        terminal.send_after(b"Updated just now", b"\x1b")
+        terminal.send_after(b"Updated just now", b"\x03")
         assert terminal.result() == dict(kind="quit", owner_acceptance=True, detached_worker=True,
                                          query="Same", cursor=2, selected="history:example:one:sub")
 
@@ -269,3 +289,27 @@ finish(dict(mode=state['mode'], kind=result.kind, selected=result.reference.show
         terminal.send_after(b"Updated 1m ago", key)
         terminal.send_after(expected.encode(), b"\r")
         assert terminal.result() == {"mode": expected, "kind": "selected", "selected": "one"}
+
+
+@pytest.mark.parametrize("filtered", [False, True])
+def test_history_escape_returns_to_search_after_clearing_filter(tmp_path, filtered):
+    source = """
+from media_cli.app.history_menu_view import build_history_view
+from media_cli.app.history_menu_controller import run_history_menu
+entries = [dict(show=dict(_id="one", _provider="example", name="Example"), translation_type="sub")]
+def read(): return build_history_view(entries, mode="All", total_count=1, show_cover=False)
+result = run_history_menu(flags, ui, read_view=read, switch_mode=lambda mode: None,
+    select=lambda ref: True, refresh_title=lambda ref: None, refresh_view=lambda: None,
+    delete=lambda ref: None, information=lambda ref: None)
+finish(dict(kind=result.kind))
+"""
+    import os
+    with Terminal(tmp_path, source) as terminal:
+        terminal.until(b"Watch History")
+        if filtered:
+            os.write(terminal.master, b"/zzzz")
+            terminal.until(b"No matching results")
+            os.write(terminal.master, b"\x1b")
+            terminal.until(b"1 results")
+        os.write(terminal.master, b"\x1b")
+        assert terminal.result() == {"kind": "back"}

@@ -100,11 +100,37 @@ def end_stdout_guard() -> None:
         _guard = None
 
 
+_canvas_active = False
+
+
+def _canvas_text(text: str) -> str:
+    """Keep TUI clears/resets on the canvas; never recolor restored shell output."""
+    global _canvas_active
+    enter, leave = '\033[?1049h', '\033[?1049l'
+    if enter in text:
+        _canvas_active = True
+    if not _canvas_active:
+        return text
+    from ..state.theme import MINT_SCREEN_THEME as theme
+    from .viewport import offset_output
+    if leave in text:
+        before, after = text.split(leave, 1)
+        before = offset_output(before)
+        _canvas_active = False
+        if theme.background is not None:
+            before = theme.reset + before.replace('\033[0m', theme.reset)
+        return before + '\033[0m' + leave + after
+    text = offset_output(text)
+    if theme.background is None:
+        return text
+    return theme.reset + text.replace('\033[0m', theme.reset)
+
+
 def write_terminal(text: str, *, flush: bool = True) -> None:
     """UI-owned text only. Workers must enqueue data rather than call this."""
     if threading.current_thread() is not threading.main_thread():
         raise RuntimeError('Only the UI thread may draw to the terminal')
     stream = _guard.original if sys.stdout is _guard and _guard is not None else sys.stdout
-    stream.write(text)
+    stream.write(_canvas_text(text))
     if flush:
         stream.flush()

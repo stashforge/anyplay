@@ -26,6 +26,7 @@ def _prepare_download(row, cfg, args):
         engine=engine if engine in ("yt-dlp", "aria2c", "ffmpeg") else "auto",
         ep_id=f"theme:{theme.get('id') or target.digest}",
         show_metadata={"_provider": "animethemes", "_id": f"animethemes:theme:{theme.get('id') or target.digest}"},
+        resume_request={"kind": "direct", "url": url},
         automatic=False,
     )
     return target, item

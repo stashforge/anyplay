@@ -341,6 +341,8 @@ def play_android(
                 on_progress=handle_progress,
                 flixcloud_w_payload=stream.get("flixcloud_w_payload"),
                 flixcloud_xor_mask=stream.get("flixcloud_xor_mask"),
+                gotaku_key_seed=stream.get("gotaku_key_seed"),
+                gotaku_segment_bytes=stream.get("gotaku_segment_bytes"),
                 **({"ip_version": 4} if stream.get("ip_version") == 4 else {}),
             )
             replace_active_local_proxy(proxy_server)

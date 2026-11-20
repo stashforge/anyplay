@@ -14,19 +14,21 @@ def mode_label(ui: Any, ms: Any) -> str:
         or getattr(ui, "ep_prev_state", "") == "HISTORY"
     ):
         return "History"
-    return ""
+    if str(getattr(ui, "search_prev_state", "")).startswith("ANILIST"):
+        return "AniList"
+    return "Search"
 
 
 def join_footer_parts(*parts: str) -> str:
     return " • ".join(str(part).strip() for part in parts if str(part or "").strip())
 
 
-def provider_label(show: dict | None) -> str:
+def provider_label(show: dict | None, *, include_unlinked: bool = False) -> str:
     if not isinstance(show, dict):
         return ""
     if not (show.get("_provider") or show.get("provider")):
         return ""
-    if show.get("_has_provider_link") is False:
+    if show.get("_has_provider_link") is False and not include_unlinked:
         return ""
     return str(show.get("_provider_name") or (show.get("_provider") or show.get("provider") or "").title())
 

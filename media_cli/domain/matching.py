@@ -13,7 +13,7 @@ def _cached_match_titles(item):
     cached = _title_cache.get(key)
     if cached is None:
         cached = tuple(match_titles(item))
-        if len(_title_cache) >= 512:
+        if len(_title_cache) >= 2048:
             _title_cache.pop(next(iter(_title_cache)))
         _title_cache[key] = cached
     return cached
@@ -90,7 +90,7 @@ def title_match_score(left_titles, right_titles):
     return _cached_title_match_score(tuple(left_titles), tuple(right_titles))
 
 
-@lru_cache(maxsize=512)
+@lru_cache(maxsize=16384)
 def _cached_title_match_score(left_titles, right_titles):
     """Cache only immutable text inputs; metadata decisions remain uncached."""
     best = 0

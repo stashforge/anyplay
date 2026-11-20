@@ -759,6 +759,8 @@ def _write_history_progress(show, progress, ttype, episode_id, last_synced, touc
             entry["progress"] = old["progress"]
         if str(old.get("episode")) == str(episode_id) and old.get("episode_label"):
             entry["episode_label"] = old["episode_label"]
+        if "release_available" in old:
+            entry["release_available"] = old["release_available"]
         if "was_caught_up" in old:
             entry["was_caught_up"] = old["was_caught_up"]
         if "has_new_release" in old:
@@ -906,7 +908,7 @@ def patch_history_entry_show(show_id, ttype, updated_show, *, fields=None):
         "_anilist_score", "_anilist_status", "anilistMatch", "_title_enriched",
         "_metadata_fields_loaded",
         "_enrichment_attempted",
-        "_provider_catalog_checked_at", "_provider_catalog_attempted_at",
+        "_provider_catalog_checked_at", "_provider_catalog_attempted_at", "_anilist_airing_attempted_at",
         "_provider_catalog_failed_at", "_provider_catalog_refresh_error",
     }
     if fields is not None:
@@ -967,6 +969,7 @@ def _patch_history_entry_state(history, updated_entry):
     provider = title_provider_key(updated_show)
     entry_keys = {"was_caught_up", "has_new_release"}
     show_keys = {
+        "_release_notification",
         "_episode_display",
         "status", "episodeCount", "availableEpisodes", "availableEpisodesDetail",
         "name", "englishName", "romajiName", "nativeName", "thumbnail", "altNames",
@@ -975,7 +978,7 @@ def _patch_history_entry_state(history, updated_entry):
         "_episode_ids_by_ttype", "_episodes_map", "_episodes_map_by_ttype",
         "_episodes_by_number", "_episodes_by_number_by_ttype",
         "_episode_catalog_state", "_episode_catalog_error", "_allanime_checked_at",
-        "_provider_catalog_checked_at", "_anilist_airing_checked_at",
+        "_provider_catalog_checked_at", "_anilist_airing_checked_at", "_anilist_airing_attempted_at",
         "_provider_catalog_attempted_at", "_provider_catalog_failed_at", "_provider_catalog_refresh_error",
         "aniListId", "malId", "_provider", "_provider_id", "_provider_name",
         "description", "genres", "banner", "format",
@@ -993,6 +996,7 @@ def _patch_history_entry_state(history, updated_entry):
             continue
         if entry is updated_entry:
             changed = True
+        history_domain.history_entry_category(entry)
         for key in entry_keys:
             if updated_entry.get(key) and not entry.get(key):
                 entry[key] = True
@@ -1164,6 +1168,8 @@ def load_config():
             f"Config was invalid; moved it to {path}"
         ),
     )
+    from ..domain.history import configure_history_refresh
+    configure_history_refresh(cfg)
     if secret_state.is_available():
         secret_token = secret_state.get_secret(secret_state.ANILIST_KEY)
         disk_token = cfg.get("anilist_token")
@@ -1842,3 +1848,29 @@ def delete_offline_episode(show_title: str, episode, cfg: dict | None = None, re
                 pass
 
     return deleted
+
+
+@_history_transaction
+def acknowledge_history_release(show, ttype):
+    """Acknowledge only releases visible when details opened, without progress writes."""
+    if is_incognito():
+        return
+    from ..domain.titles import title_provider_key
+    history = load_history()
+    changed = False
+    for entry in history:
+        target = entry.get('show') or {}
+        if (str(target.get('_id')) != str(show.get('_id')) or
+                title_provider_key(target) != title_provider_key(show) or
+                entry.get('translation_type', 'sub') != ttype):
+            continue
+        available = history_domain.history_available_episode_count(entry)
+        if available is None:
+            continue
+        seen = target.setdefault('_release_seen', {})
+        seen[ttype] = max(float(seen.get(ttype, 0)), float(available))
+        show.setdefault('_release_seen', {})[ttype] = seen[ttype]
+        entry['has_new_release'] = False
+        changed = True
+    if changed:
+        save_refreshed_history(history)

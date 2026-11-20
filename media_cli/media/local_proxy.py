@@ -1,5 +1,7 @@
 """Private localhost proxy and generated-content server lifecycle."""
 
+from __future__ import annotations
+
 import http.server
 import re
 import threading
@@ -7,6 +9,7 @@ import time
 import urllib.parse
 import urllib.request
 import uuid
+from typing import Any
 
 from ..services.http import SSL_CTX_SECURE
 from ..services.network_affinity import ipv4_curl_options, urlopen_ipv4
@@ -388,6 +391,64 @@ def _flixcloud_ensure_token(segment_url: str, parent_url: str) -> str:
         return segment_url
 
 
+class _GotakuSegmentDecryptor:
+    """Consolidated stateful helper for Gotaku segment prefix decryption."""
+    def __init__(self, seed: Any, sb: int, url: str, range_header: str | None, status_code: int):
+        from ..providers.shared.gotaku_crypto import (
+            b64url_decode,
+            derive_segment_counter,
+            decrypt_segment_prefix,
+        )
+        self._decrypt_segment_prefix = decrypt_segment_prefix
+        self.raw_seed = b64url_decode(seed) if isinstance(seed, str) else seed
+        self.counter = derive_segment_counter(url)
+        self.max_bytes = sb
+        self.range_offset = 0
+        if range_header and status_code == 206:
+            m = re.match(r"bytes=(\d+)-", range_header)
+            if m:
+                self.range_offset = int(m.group(1))
+        self.bytes_streamed = 0
+
+    def decrypt(self, chunk: bytes) -> bytes:
+        if not chunk or (self.range_offset + self.bytes_streamed) >= self.max_bytes:
+            self.bytes_streamed += len(chunk)
+            return chunk
+        dec = self._decrypt_segment_prefix(
+            chunk,
+            self.raw_seed,
+            self.counter,
+            offset_in_prefix=self.range_offset + self.bytes_streamed,
+            max_decrypt_bytes=self.max_bytes,
+        )
+        self.bytes_streamed += len(chunk)
+        return dec
+
+
+def _decrypt_gotaku_playlist_if_needed(body: bytes, url: str, entry: dict) -> str:
+    key_seed = entry.get("gotaku_key_seed")
+    if not key_seed:
+        return body.decode("utf-8", errors="replace")
+    try:
+        from ..providers.shared.gotaku_crypto import (
+            b64url_decode,
+            derive_playlist_key,
+            decrypt_playlist_body,
+            extract_playlist_token,
+        )
+        if isinstance(key_seed, str):
+            key_seed = b64url_decode(key_seed)
+        token = extract_playlist_token(url)
+        pl_key = derive_playlist_key(key_seed, token)
+        decrypted = decrypt_playlist_body(body, pl_key)
+        if decrypted and decrypted.strip().startswith("#"):
+            return decrypted
+        return ""
+    except Exception as exc:
+        _debug_warn("Failed to decrypt Gotaku playlist", exc)
+        return ""
+
+
 def _build_proxy_server(initial_entries, timeout, show_id=None, episode=None, duration=0.0, on_progress=None,
                         ip_version=None):
     """Spin up one local proxy server backing an arbitrary set of routes.
@@ -490,6 +551,13 @@ def _build_proxy_server(initial_entries, timeout, show_id=None, episode=None, du
                         "flixcloud_w_payload": entry_options.get("flixcloud_w_payload"),
                         "flixcloud_xor_mask": entry_options.get("flixcloud_xor_mask"),
                     }
+                is_subtitles = stripped.startswith("#EXT-X-MEDIA:") and "TYPE=SUBTITLES" in stripped
+                is_key = stripped.startswith("#EXT-X-KEY:")
+                if entry_options.get("gotaku_key_seed"):
+                    if not is_subtitles:
+                        extra["gotaku_key_seed"] = entry_options.get("gotaku_key_seed")
+                    if not is_subtitles and not is_key:
+                        extra["gotaku_segment_bytes"] = entry_options.get("gotaku_segment_bytes")
                 child_type = "application/vnd.apple.mpegurl" if is_master and stripped.startswith("#EXT-X-MEDIA:") else None
                 path = register(real, ref, hdrs, content_type=child_type, extra=extra)
                 line = line[:start] + local_url_for(path) + line[end:]
@@ -508,6 +576,9 @@ def _build_proxy_server(initial_entries, timeout, show_id=None, episode=None, du
                     "flixcloud_w_payload": entry_options.get("flixcloud_w_payload"),
                     "flixcloud_xor_mask": entry_options.get("flixcloud_xor_mask"),
                 }
+            if entry_options.get("gotaku_key_seed"):
+                extra["gotaku_key_seed"] = entry_options.get("gotaku_key_seed")
+                extra["gotaku_segment_bytes"] = entry_options.get("gotaku_segment_bytes")
             if pending_duration is not None:
                 path = register(real, ref, hdrs, time_offset=running_time, extra=extra)
                 running_time += pending_duration
@@ -624,7 +695,13 @@ def _build_proxy_server(initial_entries, timeout, show_id=None, episode=None, du
 
                     if method == "GET" and _is_playlist(url, content_type):
                         body = response.read()
-                        text = body.decode("utf-8", errors="replace")
+                        text = _decrypt_gotaku_playlist_if_needed(body, final_url, entry)
+                        if entry.get("gotaku_key_seed") and not text:
+                            self.send_response(502)
+                            self.send_header("Content-Type", "text/plain; charset=utf-8")
+                            self.end_headers()
+                            self.wfile.write(b"Failed to decrypt Gotaku playlist\n")
+                            return
                         rewritten = rewrite_playlist(text, final_url, ref, hdrs, entry)
                         data = rewritten.encode("utf-8")
                         try:
@@ -692,6 +769,15 @@ def _build_proxy_server(initial_entries, timeout, show_id=None, episode=None, du
                             first_chunk = _xor_bytes(first_chunk, xor_mask, 0)
                         xor_index = len(first_chunk) if should_xor else 0
 
+                        gotaku_decryptor = None
+                        gotaku_seed = entry.get("gotaku_key_seed")
+                        gotaku_sb = int(entry.get("gotaku_segment_bytes") or 0)
+                        if gotaku_seed and gotaku_sb > 0:
+                            gotaku_decryptor = _GotakuSegmentDecryptor(
+                                gotaku_seed, gotaku_sb, url, range_header, response.status
+                            )
+                            first_chunk = gotaku_decryptor.decrypt(first_chunk)
+
                         self.send_response(response.status)
                         content_type_sent = False
                         has_accept_ranges = False
@@ -725,6 +811,8 @@ def _build_proxy_server(initial_entries, timeout, show_id=None, episode=None, du
                                 if should_xor:
                                     chunk = _xor_bytes(chunk, xor_mask, xor_index)
                                     xor_index += len(chunk)
+                                elif gotaku_decryptor:
+                                    chunk = gotaku_decryptor.decrypt(chunk)
                                 try:
                                     self.wfile.write(chunk)
                                 except (BrokenPipeError, ConnectionResetError):
@@ -771,7 +859,13 @@ def _build_proxy_server(initial_entries, timeout, show_id=None, episode=None, du
                             for chunk in resp.iter_content(65536):
                                 raw_chunks.append(chunk)
                             body = b"".join(raw_chunks)
-                            text = body.decode("utf-8", errors="replace")
+                            text = _decrypt_gotaku_playlist_if_needed(body, final_url, entry)
+                            if entry.get("gotaku_key_seed") and not text:
+                                self.send_response(502)
+                                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                                self.end_headers()
+                                self.wfile.write(b"Failed to decrypt Gotaku playlist\n")
+                                return
                             rewritten = rewrite_playlist(text, final_url, ref, hdrs, entry)
                             data = rewritten.encode("utf-8")
                             try:
@@ -846,6 +940,15 @@ def _build_proxy_server(initial_entries, timeout, show_id=None, episode=None, du
                                 first_chunk = _xor_bytes(first_chunk, xor_mask, 0)
                             xor_index = len(first_chunk) if should_xor else 0
 
+                            gotaku_decryptor = None
+                            gotaku_seed = entry.get("gotaku_key_seed")
+                            gotaku_sb = int(entry.get("gotaku_segment_bytes") or 0)
+                            if gotaku_seed and gotaku_sb > 0:
+                                gotaku_decryptor = _GotakuSegmentDecryptor(
+                                    gotaku_seed, gotaku_sb, url, range_header, resp.status_code
+                                )
+                                first_chunk = gotaku_decryptor.decrypt(first_chunk)
+
                             self.send_response(resp.status_code)
                             content_type_sent = False
                             has_accept_ranges = False
@@ -885,6 +988,8 @@ def _build_proxy_server(initial_entries, timeout, show_id=None, episode=None, du
                                         if should_xor:
                                             chunk = _xor_bytes(chunk, xor_mask, xor_index)
                                             xor_index += len(chunk)
+                                        elif gotaku_decryptor:
+                                            chunk = gotaku_decryptor.decrypt(chunk)
                                         try:
                                             self.wfile.write(chunk)
                                         except (BrokenPipeError, ConnectionResetError):
@@ -940,7 +1045,8 @@ def start_local_proxy(
         target_player=None, show_id=None, episode=None,
         duration=0.0, on_progress=None,
         flixcloud_w_payload=None, flixcloud_xor_mask=None,
-        ip_version=None, audio_url=None, audio_tracks=None):
+        ip_version=None, audio_url=None, audio_tracks=None,
+        gotaku_key_seed=None, gotaku_segment_bytes=None):
     validate_http_url(target_url)
     if ip_version not in (None, 4):
         raise ValueError("Unsupported stream network policy")
@@ -951,6 +1057,7 @@ def start_local_proxy(
             show_id=show_id, episode=episode, duration=duration, on_progress=on_progress,
             flixcloud_w_payload=flixcloud_w_payload, flixcloud_xor_mask=flixcloud_xor_mask,
             ip_version=ip_version,
+            gotaku_key_seed=gotaku_key_seed, gotaku_segment_bytes=gotaku_segment_bytes,
         )
     is_hls = str(stream_type).lower() == "hls"
     extension = "m3u8" if is_hls else "mp4"
@@ -982,6 +1089,8 @@ def start_local_proxy(
                 "content_type": "application/vnd.apple.mpegurl",
                 "flixcloud_w_payload": flixcloud_w_payload,
                 "flixcloud_xor_mask": flixcloud_xor_mask,
+                "gotaku_key_seed": gotaku_key_seed,
+                "gotaku_segment_bytes": gotaku_segment_bytes,
             },
         }
 
@@ -1124,6 +1233,10 @@ def start_local_proxy(
                                 "flixcloud_w_payload": flixcloud_w_payload,
                                 "flixcloud_xor_mask": flixcloud_xor_mask,
                             }
+                        if gotaku_key_seed:
+                            extra = extra or {}
+                            extra["gotaku_key_seed"] = gotaku_key_seed
+                            extra["gotaku_segment_bytes"] = gotaku_segment_bytes
                         var_path = _register(var_abs, referer, forwarded_headers,
                                              content_type="application/vnd.apple.mpegurl", extra=extra)
                         master_lines.append(f"http://127.0.0.1:{port}{var_path}")
@@ -1154,6 +1267,8 @@ def start_local_proxy(
             **({"content_type": "application/vnd.apple.mpegurl"} if is_hls else {}),
             "flixcloud_w_payload": flixcloud_w_payload,
             "flixcloud_xor_mask": flixcloud_xor_mask,
+            "gotaku_key_seed": gotaku_key_seed,
+            "gotaku_segment_bytes": gotaku_segment_bytes,
         }
     }
     port, _registry, _register, server = _build_proxy_server(
@@ -1169,7 +1284,8 @@ def start_local_dual_proxy(
         width=1280, height=720, bandwidth=2_400_000, title="stream",
         subtitles=None, audio_tracks=None, target_player=None,
         show_id=None, episode=None, duration=0.0, on_progress=None,
-        flixcloud_w_payload=None, flixcloud_xor_mask=None, ip_version=None):
+        flixcloud_w_payload=None, flixcloud_xor_mask=None, ip_version=None,
+        gotaku_key_seed=None, gotaku_segment_bytes=None):
     """Like start_local_proxy, but for sources that split video and audio
     into two separate HLS manifests (Dailymotion does this) with no
     combined master. Builds the master ourselves; both sub-manifests go
@@ -1195,10 +1311,15 @@ def start_local_dual_proxy(
 
     media_extra = {}
     if flixcloud_w_payload:
-        media_extra = {
+        media_extra.update({
             "flixcloud_w_payload": flixcloud_w_payload,
             "flixcloud_xor_mask": flixcloud_xor_mask,
-        }
+        })
+    if gotaku_key_seed:
+        media_extra.update({
+            "gotaku_key_seed": gotaku_key_seed,
+            "gotaku_segment_bytes": gotaku_segment_bytes,
+        })
 
     initial = {
         master_secret: {"kind": "synthetic", "text": ""},  # filled in below

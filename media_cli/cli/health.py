@@ -28,6 +28,10 @@ def show_report(text: str, *, plain: bool = False) -> int:
 
 
 def handle_health_command(action: str, report_id: str | None = None, *, plain: bool = False, delete: bool = False, seed: int | None = None, verify: str | None = None, translation: str = "sub") -> int:
+    from ..provider_manifest import RETIRED_PROVIDERS
+    if action in RETIRED_PROVIDERS:
+        print(f"Provider {action!r} is no longer included. Choose another provider.", file=sys.stderr)
+        return 1
     if action in PROFILES or action == "all":
         import shutil
         from ..health.runner import check_provider
@@ -54,7 +58,7 @@ def handle_health_command(action: str, report_id: str | None = None, *, plain: b
                 from ..health.batch import check_batch
                 from ..provider_manifest import disabled_providers_from_config, PROVIDER_REGISTRY
                 disabled = disabled_providers_from_config()
-                ids = [pid for pid in PROFILES if pid not in disabled and
+                ids = [pid for pid in PROFILES if pid in PROVIDER_REGISTRY and pid not in disabled and
                        PROVIDER_REGISTRY.get(pid, {}).get('status', 'active') == 'active']
                 print(f"Checking {len(ids)} enabled providers sequentially; each keeps its supported verification depth. This can take several minutes per provider.", flush=True)
                 data = check_batch(ids, run_provider=collect, seed=seed, verify=verify, translation=translation)

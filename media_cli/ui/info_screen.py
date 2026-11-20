@@ -8,12 +8,13 @@ Usage::
     from .info_screen import show_info_screen
     show_info_screen(show_dict, poster_manager=pm, ui=ui_state)
 
-Press ``Q`` or ``ESC`` to return to wherever the caller was.
+Press any key to return; arrow keys scroll when the content overflows.
 """
 
 from __future__ import annotations
 
 import os
+from .viewport import content_size as _content_size, positioned_lines
 import re
 import sys
 from copy import deepcopy
@@ -279,6 +280,7 @@ def _show_info_screen(
     from . import terminal_images
 
     first_frame_pending = True
+    can_scroll = False
     try:
         scroll = 0
 
@@ -300,11 +302,11 @@ def _show_info_screen(
 
         def _render(scroll_offset: int = 0) -> int:
             try:
-                w, h = os.get_terminal_size(sys.stdin.fileno())
+                w, h = _content_size(sys.stdin.fileno())
             except Exception:
                 w, h = 80, 24
 
-            nonlocal poster_raw, first_frame_pending
+            nonlocal poster_raw, first_frame_pending, can_scroll
             # Refresh poster in case it just finished downloading
             if poster_manager and not poster_raw:
                 poster_raw = poster_manager.get(show) or ""
@@ -332,11 +334,12 @@ def _show_info_screen(
             for line in visible:
                 out.append(f"\033[2K{_fit(line, w)}")
 
+            can_scroll = max_scroll > 0
             # footer hint
             scroll_hint = f"  {clamped + 1}-{min(clamped + visible_h, total_lines)}/{total_lines}" \
                           if total_lines > visible_h else ""
             footer = _fit(
-                f"{HINT}Q / Esc  close{scroll_hint}{RESET}",
+                f"{HINT}{'↑↓ scroll · any other key closes' if can_scroll else 'Any key closes'}{scroll_hint}{RESET}",
                 w,
             )
             # pad remaining rows
@@ -350,7 +353,7 @@ def _show_info_screen(
             from .terminal_output import write_terminal
             write_terminal(
                 clear_sig + ("\033[2J" if first_frame_pending else "")
-                + "\033[H" + "\r\n".join(out)
+                + "\033[H" + positioned_lines(out)
                 + overlay + "\033[?25l"
             )
             sys.stdout.flush()
@@ -361,15 +364,13 @@ def _show_info_screen(
 
         while True:
             key = _read_key(tty_fd)
-            if key in ("Q", "ESC", "CTRL_O"):
-                break
-            elif key == "DOWN":
+            if can_scroll and key == "DOWN":
                 scroll += 1
                 scroll = _render(scroll)
-            elif key == "UP":
+            elif can_scroll and key == "UP":
                 scroll = max(0, scroll - 1)
                 scroll = _render(scroll)
-            elif key == "ENTER":
+            else:
                 break
 
     finally:

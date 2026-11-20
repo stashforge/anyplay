@@ -8,6 +8,7 @@ from copy import deepcopy
 
 from ..ui.display import with_loading
 from ..ui.transition import PreparationCancelled
+from ..ui.anilist_menu import AniListTabChanged
 
 _log = logging.getLogger(__name__)
 
@@ -32,6 +33,10 @@ def run_screen_controller(handler, flags, ui, ms, cfg, args, *extra, fallback):
 
     try:
         result, next_ui, next_ms, next_cfg, next_args = with_loading("Preparing screen…", prepare)
+    except AniListTabChanged as changed:
+        ui.anilist_browse_status = changed.status
+        _log.debug("AniList pending tab skipped: list=%s", changed.status or 'ALL')
+        return 'ANILIST_BROWSE'
     except PreparationCancelled:
         if draft:
             ui._resume_picker_position = getattr(draft[0], "_last_picker_position", None)
@@ -46,3 +51,17 @@ def run_screen_controller(handler, flags, ui, ms, cfg, args, *extra, fallback):
     cfg.update(next_cfg)
     _log.debug("Screen preparation accepted: handler=%s destination=%s", handler.__name__, result)
     return result
+
+
+def preparation_parent(state, ui, ms):
+    """Cancellation leaves preparation rather than restarting the same request."""
+    return {
+        "DETAILS": ui.search_prev_state,
+        "ACTION_MENU": ui.action_prev_state,
+        "EPISODE": ui.ep_prev_state,
+        "MIRRORS": "DETAILS",
+        "ANILIST_MENU": "SEARCH",
+        "ANILIST_BROWSE": "SEARCH",
+        "ANILIST_AIRING": ms.anilist_airing_parent,
+        "ANILIST_SEARCH": "SEARCH",
+    }.get(state, state)

@@ -137,10 +137,59 @@ class SearchResultsController:
         return None
 
 
-def run_search_results(flags, ui, *, restore_position=True, **options) -> SearchResultsResult:
+def run_search_results(flags, ui, *, restore_position=True, presentation=None, **options) -> SearchResultsResult:
     try:
         controller = SearchResultsController(ui=ui, **options)
-        result = run_view_session(flags, ui, controller.session, theme=APPLICATION_THEME, updates_fn=controller.updates,
+        picker = None
+        theme = APPLICATION_THEME
+        if presentation is not None and not flags.plain_mode:
+            from ..state.theme import MINT_SCREEN_THEME
+            from ..ui.action_picker import action_picker
+            from ..ui.library_info import library_info_lines
+            from ..ui.footer import Footer, FooterStatus, StatusKind, render_footer
+            from ..ui.picker_render import loading_frame
+            theme = MINT_SCREEN_THEME
+
+            def information(index, width):
+                items = controller.session.current.items
+                return library_info_lines(items[index].reference, options["ttype"], width, local_only=False,
+                                          context=options["provider_name"]) if 0 <= index < len(items) else ()
+
+            def status(index, width):
+                view = controller.session.current
+                busy = view.state == "loading" or controller.session.navigation is not None
+                message = view.message
+                snapshot = controller.session.loading_snapshot(feedback=True) if controller.session.navigation is not None else None
+                if snapshot is not None:
+                    message = snapshot.message if snapshot.visible else ""
+                statuses = (FooterStatus(message, StatusKind.LOADING if busy else view.message_kind,
+                                        loading_frame() if busy else ""),) if message else ()
+                footer = Footer(statuses=statuses, include_cover_status=flags.show_image and index >= 0 and options["provider_id"] != "torrent")
+                if flags.show_image and index >= 0 and options["provider_id"] != "torrent":
+                    from ..ui.display import _poster_footer_line
+                    return _poster_footer_line(ui.hovered_show_obj or {}, footer, width)
+                return render_footer(footer, width, theme=theme)
+
+            from ..provider_manifest import PROVIDER_REGISTRY
+            screen = dict(presentation, screen_title="Results · " + options["query"], badge=" · ".join((options["provider_name"], *options.get("badges", ()))),
+                          layout="top" if options["provider_id"] == "torrent" else presentation.get("layout", "bottom"),
+                          reserve_cover=bool(flags.show_image and PROVIDER_REGISTRY.get(options["provider_id"], {}).get("cover_images", True)),
+                          context="", summary_noun="results", placeholder="Filter titles…", empty="No matching titles",
+                          info_fn=information, status_fn=status,
+                          key_aliases={"i": "CTRL_O"}, shortcut_help=(("i", "Title information"),),
+                          shortcuts_fn=lambda _index: (("enter", "open"), ("↑↓", "move"), ("/", "filter"),
+                                                       ("?", "help"), ("esc", "search")))
+            if options["provider_id"] == "torrent":
+                from ..ui import torrent_results
+                def torrent_shows():
+                    return [item.reference for item in controller.session.current.items]
+                screen["table_fn"] = lambda width: torrent_results.make_table(torrent_shows(), width)
+                screen["summary_fn"] = lambda: torrent_results.source_summary(torrent_shows())
+            def picker(*args, **kwargs):
+                view = controller.session.current
+                screen["empty"] = "Searching titles…" if view.state == "loading" else "No matching titles"
+                return action_picker(*args, presentation=screen, **kwargs)
+        result = run_view_session(flags, ui, controller.session, picker=picker, theme=theme, updates_fn=controller.updates,
                                   position_key=(controller.session.current.id, options["query"], options["ttype"]),
                                   restore_position=restore_position)
         if not isinstance(result, SearchResultsResult):

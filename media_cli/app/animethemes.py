@@ -339,6 +339,7 @@ def _search_view(query, tab, tabs, rows):
         reference=index,
     ) for index, row in enumerate(rows))
     return ViewSpec("animethemes:search", "Search AnimeThemes", items,
+                    screen_title="Results · " + query, screen_badge="AnimeThemes",
                     details=DetailLines(Blank, Blank, Blank),
                     tabs=tuple(ViewTab(name, _tab_label(name)) for name in tabs), active_tab_id=tab,
                     context=("AnimeThemes", f'"{query}"'),
@@ -438,13 +439,30 @@ def handle_animethemes_search_state(flags, ui, ms, cfg, args, ttype: str) -> str
     del ttype
     query = ms.query_str
     if not query:
-        from .search import prompt_search_query
-        result = prompt_search_query(flags, ui, provider_name="AnimeThemes", search_title="Search AnimeThemes")
+        from .search import prompt_search_home, prompt_search_query
+        if not flags.plain_mode:
+            args.provider = "animethemes"
+            result = prompt_search_home(flags, ui, args, cfg)
+        else:
+            result = prompt_search_query(flags, ui, provider_name="AnimeThemes", search_title="Search AnimeThemes")
         ui.search_error = ""
         if result == -2:
             return "QUIT"
+        if result == -7:
+            ui.downloads_parent = "SEARCH"
+            return "DOWNLOADS"
+        if result == -8:
+            return "HISTORY"
+        if result == -9:
+            return "ANILIST_MENU"
+        if result == -10:
+            ms.anilist_airing_parent = "ANIMETHEMES_SEARCH"
+            return "ANILIST_AIRING"
         if not isinstance(result, str) or not result.strip():
             return "ANIMETHEMES_SEARCH"
+        if getattr(args, "provider", "animethemes") != "animethemes":
+            ms.query_str = result.strip()
+            return "SEARCH"
         query = ms.query_str = result.strip()
         if not flags.incognito_mode:
             app_core.save_search_history(query)
@@ -471,8 +489,14 @@ def handle_animethemes_search_state(flags, ui, ms, cfg, args, ttype: str) -> str
     threading.Thread(target=_worker, daemon=True).start()
     active_idx = 0
 
+    row_cache = {}
+
     def rows_for(tab):
-        return animethemes_service.flatten_search_bucket(tab, data.get(tab) or [])
+        bucket = data.get(tab)
+        cached = row_cache.get(tab)
+        if cached is None or cached[0] is not bucket:
+            cached = row_cache[tab] = (bucket, animethemes_service.flatten_search_bucket(tab, bucket or []))
+        return cached[1]
 
     def loading_text():
         return search_status.read(loading) or ""
@@ -514,6 +538,15 @@ def handle_animethemes_search_state(flags, ui, ms, cfg, args, ttype: str) -> str
         labels = [row["label"] for row in rows] if rows else ([] if loading else ["No results"])
         return labels, _search_header(query, tab_name, rows, 0, loading_text(), error), not loading
 
+    def _search_chrome():
+        from ..ui.navigation_tabs import NavigationTabs
+        from ..ui.view_model import ViewTab
+        names = tabs_for()
+        from .animethemes_filter_data import search_filter_data
+        return dict(title="Results · " + query, badge="AnimeThemes",
+                    **search_filter_data(current_tab(), rows),
+                    tabs=NavigationTabs(tuple(ViewTab(name, _tab_label(name)) for name in names), current_tab()) if names else None)
+
     def _top_header(si):
         if rows and 0 <= si < len(rows):
             show = _search_row_show(rows[si])
@@ -548,6 +581,7 @@ def handle_animethemes_search_state(flags, ui, ms, cfg, args, ttype: str) -> str
                     ui,
                     lambda: _search_prompt(tabs_for(), active_idx),
                     labels,
+                    chrome_fn=_search_chrome,
                     header_fn=lambda si: _search_header(
                         query,
                         current_tab(),

@@ -1,11 +1,15 @@
 """AniList root-menu presentation."""
 
-from ..core.terminal import (
-    absolute_terminal_frame,
-    display_width,
-    fit_terminal_line,
-)
-from .picker_render import render_item
+
+from .transition import PreparationCancelled
+
+
+class AniListTabChanged(PreparationCancelled):
+    """Abandon a pending list screen while its cached fetch may finish."""
+    def __init__(self, status):
+        self.status = status
+        super().__init__(status)
+
 
 LIST_STATUSES = {
     "Airing": "ANILIST_AIRING",
@@ -18,6 +22,9 @@ LIST_STATUSES = {
     "Search": "ANILIST_SEARCH",
 }
 
+
+LIBRARY_TABS = (("CURRENT", "Watching"), ("PLANNING", "Planning"), ("COMPLETED", "Completed"),
+                ("REPEATING", "Rewatching"), ("PAUSED", "Paused"), ("DROPPED", "Dropped"), ("ALL", "All"))
 
 def menu_header(width=80):
     from .panels import render_menu_card
@@ -38,54 +45,20 @@ def menu_navigation(result):
 
 
 def loading_frame(status, rows, columns, loading_text=""):
-    pointer_color = "\033[38;2;243;139;168m"
-    prompt_color = "\033[38;2;203;166;247m"
-    hint = "\033[38;5;244m"
-    reset = "\033[0m"
-    options = list(LIST_STATUSES)
-    selected = next(
-        (
-            index
-            for index, label in enumerate(options)
-            if LIST_STATUSES[label] == status
-        ),
-        -1,
-    )
-    header_lines = menu_header().splitlines()
-    if loading_text:
-        header_lines[-1] = loading_text
-    item_count = len(options)
-    padding = max(0, rows - item_count - 1 - len(header_lines))
-    output = [""] * padding
-    item_width = max(20, columns - 3)
-
-    for index in range(item_count - 1, -1, -1):
-        is_selected = index == selected
-        pointer = (
-            f"{pointer_color}\u276f{reset}" if is_selected else " "
-        )
-        label = render_item(
-            options[index],
-            "",
-            is_selected,
-            max_w=item_width,
-        )
-        output.append(fit_terminal_line(
-            f"{pointer} {label}",
-            columns,
-        ))
-
-    prompt = f"{prompt_color}AniList Lists \u276f{reset}"
-    count = f"{hint}{item_count}/{item_count}{reset}"
-    used = display_width(f"{prompt}  {count}")
-    separator_width = max(1, columns - used - 2)
-    sep_char = "\u2500"
-    separator = f" {hint}{sep_char * separator_width}{reset}"
-    output.append(fit_terminal_line(
-        f"{prompt}  {count}{separator}",
-        columns,
-    ))
-    output.extend(
-        fit_terminal_line(line, columns) for line in header_lines
-    )
-    return absolute_terminal_frame(output, rows, columns)
+    """Use the standard list compositor while a requested list is loading."""
+    from .list_selection import ListSelection
+    from .list_screen import list_screen_frame
+    from .frame_surface import compose
+    from .navigation_tabs import NavigationTabs
+    from .view_model import ViewTab
+    airing = status == 'ANILIST_AIRING'
+    tabs = (('today', 'Today'), ('tomorrow', 'Tomorrow'), ('week', 'Next 5 Days')) if airing else LIBRARY_TABS
+    active = 'today' if airing else (status or 'ALL')
+    if active not in dict(tabs):
+        active = 'CURRENT'
+    state = ListSelection([], '', selected=-1)
+    frame = list_screen_frame(state, 'AniList · Airing' if airing else 'AniList', width=columns, height=rows,
+        badge='AniList', tabs=NavigationTabs(tuple(ViewTab(key, label) for key, label in tabs), active),
+        status=loading_text, empty='Loading titles…',
+        shortcuts=(('enter', 'open'), ('tab', 'next'), ('?', 'help'), ('esc', 'search')))
+    return compose(frame, rows, columns)

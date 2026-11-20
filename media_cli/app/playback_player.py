@@ -339,6 +339,8 @@ def trigger_background_auto_download(show_ctx, current_ep_index, episode_ids, tt
         on_complete=_on_complete,
         ep_id=next_ep,
         show_metadata=build_offline_metadata(show_ctx),
+        resume_request={"kind": "provider", "provider": provider_id, "show_id": str(provider_title_id),
+                        "episode_id": str(next_ep), "translation": ttype, "quality": quality},
         automatic=True,
     )
     worker = get_global_worker(download_dir)
@@ -905,7 +907,7 @@ def handle_play_state(
     resolve_tracking_fn,
 ) -> str:
     s_ctx = ui.ui_show_ctx
-    sync_enabled = resolve_tracking_fn(ui.search_prev_state, args, cfg, s_ctx)
+    sync_enabled = None
     from copy import deepcopy
     from ..ui.transition import PreparationCancelled
     from .details_preparation import PreparedDetails, commit_details_transition
@@ -920,17 +922,47 @@ def handle_play_state(
         # Consume this attempt so cancellation cannot turn a later Play into Download.
         args.download = False
 
+    player_loading = (
+        not is_download_mode and not getattr(flags, "plain_mode", False)
+        and not getattr(args, "print_url", False) and not getattr(args, "sources", False)
+        and sys.stdin.isatty() and sys.stdout.isatty()
+    )
+    entry_started = time.monotonic()
+    if player_loading:
+        from ..ui.player_screen import _player_ui_state, render, reset_loading_cancel
+        reset_loading_cancel()
+        app_core.enter_alt_screen()
+        _player_ui_state.update({
+            "active": True, "show": s_ctx, "ttype": ttype,
+            "current_ep": ms.current_ep,
+            "current_ep_label": playback_mod._display_episode_label(s_ctx, ms.current_ep, ttype),
+            "total_eps": ms.total_eps, "status_lines": [], "stream_info": {},
+            "mpv_props": None, "loading_provider_name": "", "loading_start_time": time.time(),
+            "_cleared_terminal_image": False, "_last_poster_key": None,
+        })
+        render(poster_manager=getattr(app_core, "_poster_manager", None), ui=ui)
+        _logger.debug("Playback entry timing: stage=loading-screen elapsed=%.3fs", time.monotonic() - entry_started)
+
     original = deepcopy(s_ctx)
     def prepare_entry():
+        nonlocal sync_enabled
         show = deepcopy(original)
+        sync_enabled = resolve_tracking_fn(ui.search_prev_state, args, cfg, show)
         app_core.prepare_show_display_state(show, ttype, sync_enabled)
         ids = app_core.ensure_episode_ids(show, ttype)
         return PreparedDetails(show, tuple(str(ep) for ep in ids), original)
 
     try:
-        prepared = app_core.with_loading("Preparing download…" if interactive_download else "Preparing playback…", prepare_entry)
+        if player_loading:
+            from ..ui.player_screen import run_loading_work
+            prepared = run_loading_work(prepare_entry, poster_manager=getattr(app_core, "_poster_manager", None), ui=ui)
+        else:
+            prepared = app_core.with_loading("Preparing download…" if interactive_download else "Preparing playback…", prepare_entry)
     except PreparationCancelled:
+        if player_loading:
+            app_core._exit_player_screen()
         return "DETAILS"
+    _logger.debug("Playback entry timing: stage=prepared elapsed=%.3fs", time.monotonic() - entry_started)
     commit_details_transition(s_ctx, prepared)
     ms.show_title = get_show_display_title(s_ctx, sync_enabled=sync_enabled)
     ms.show_id = s_ctx.get("_id")
@@ -1053,6 +1085,8 @@ def handle_play_state(
                 on_complete=_on_complete,
                 ep_id=epid,
                 show_metadata=s_ctx,
+                resume_request={"kind": "provider", "provider": provider_id, "show_id": str(ms.show_id),
+                                "episode_id": str(epid), "translation": ttype, "quality": quality},
                 download_sub_langs=getattr(args, "download_sub_langs", None),
                 download_audio_langs=getattr(args, "download_audio_langs", None),
                 subtitle_mode=getattr(args, "subtitle_mode", None),
@@ -1077,7 +1111,7 @@ def handle_play_state(
         print(
             f"\033[1;97mResolving stream for EP {playback_mod._fmt_ep(current_ep_label)}…\033[0m"
         )
-    else:
+    elif not player_loading:
         app_core.enter_alt_screen()
         from ..ui.player_screen import _player_ui_state
         _player_ui_state.update({
@@ -1937,6 +1971,10 @@ def handle_play_state(
         finally:
             if player is not None:
                 player.playback_menu = previous_menu
+        if result == "STARTUP_FAILED":
+            app_core._exit_player_screen()
+            app_core.set_action_feedback(ui.ui_show_ctx, getattr(player, "startup_error", "mpv could not start. Retry playback."))
+            return "DETAILS"
         if result == "MENU_SELECTION":
             ms.selected_stream = player.menu_selection
             ms.pending_resume_time = time_pos

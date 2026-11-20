@@ -12,7 +12,7 @@ def manager(tmp_path, hovered):
 
 
 @pytest.mark.parametrize("move_away", [False, True])
-def test_uncached_cover_waits_250ms_and_rechecks_selection(monkeypatch, tmp_path, move_away):
+def test_uncached_cover_waits_450ms_and_rechecks_selection(monkeypatch, tmp_path, move_away):
     selected = ["a"]
     sleeps = []
     fetched = []
@@ -33,8 +33,8 @@ def test_uncached_cover_waits_250ms_and_rechecks_selection(monkeypatch, tmp_path
     monkeypatch.setattr("media_cli.ui.poster.fetch_cover_bytes", fetch)
     poster._mark_download("hash")
     poster._download(show, show["thumbnail"], "hash", str(tmp_path), str(tmp_path / "a.jpg"))
-    assert sleeps == [0.25]
-    assert fetched == ([] if move_away else [(show["thumbnail"], (0.25,))])
+    assert sleeps == [0.45]
+    assert fetched == ([] if move_away else [(show["thumbnail"], (0.45,))])
     assert "hash" not in poster.active_downloads
 
 
@@ -49,3 +49,20 @@ def test_already_rendered_cover_does_not_wait_or_start_worker(monkeypatch, tmp_p
     monkeypatch.setattr("media_cli.ui.poster.time.sleep", unexpected)
     monkeypatch.setattr("media_cli.ui.poster.threading.Thread", unexpected)
     assert poster.get(show) == "pixels"
+
+
+def test_fast_navigation_skips_lookup_and_loading_message(monkeypatch, tmp_path):
+    selected = ["a"]
+    poster = manager(tmp_path, lambda: selected[0])
+    show = {"_id": "a", "thumbnail": "https://example.test/a.png"}
+    poster.set_status(show, "pending")
+    assert poster.footer_status(show, persistent=True) is None
+    monkeypatch.setattr("media_cli.ui.poster.time.sleep", lambda _: selected.__setitem__(0, "b"))
+    def forbidden(*args, **kwargs):
+        pytest.fail("Skipped title must not inspect or render its cover")
+    monkeypatch.setattr("media_cli.ui.poster.shutil.which", forbidden)
+    poster.read_cache_dirs = forbidden
+    poster._mark_download("hash")
+    poster._prepare_cover(show, show["thumbnail"], "hash")
+    assert show["_poster_status"] == "pending"
+    assert not poster.active_downloads

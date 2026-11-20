@@ -16,7 +16,7 @@ from ..domain.tracking import (
 )
 from ..ui.help import picker_help
 from ..ui.picker import tui_pick
-from .footer import context_footer
+from .footer import context_footer, mode_label
 
 
 def handle_update_progress_state(
@@ -129,6 +129,8 @@ def handle_update_progress_state(
             return _hdr_cache[cache_key]
         parts = []
         app_core.build_info_panel(s, ttype_local, w, parts, local_only=getattr(ms, "_is_downloads", False))
+        from ..domain.metadata import genre_text
+        parts.append(genre_text(s))
         footer = context_footer(
             s,
             ui,
@@ -173,16 +175,58 @@ def handle_update_progress_state(
         reverse_label="Flip order",
     )
     picker_title = "Set AniList Progress" if sync_active else "Set Watch Progress"
-    idx = tui_pick(
-        flags, ui,
-        picker_title, progress_opts,
-        header_fn=_progress_hdr,
-        hints=progress_hints,
-        tab_fn=_progress_tab_fn,
-        reverse_fn=_progress_tab_fn,
-        info_fn=app_core.make_single_show_info_fn(s, ui),
-        help_dict=hd9
-    )
+    if not flags.plain_mode:
+        from dataclasses import replace
+        from .details_menu_controller import run_details_menu
+        from .details_menu_view import build_details_menu_view
+        from .footer import provider_label
+        from ..ui.library_info import library_info_lines
+        from ..ui.styled_text import StyledText, TextRun
+        from ..ui.view_model import Inherit, ViewAction, ViewItem
+
+        def progress_view():
+            base = build_details_menu_view(
+                s, (), view_id=f"{mode_label(ui, ms).lower()}-progress", image_key=f"progress:{ms.show_id}",
+                ttype=ttype_local, local_only=bool(getattr(ms, "_is_downloads", False)),
+                show_cover=flags.show_image and cfg.get("details_cover", True),
+            )
+            items = tuple(ViewItem(
+                f"progress:{entry['id']}",
+                StyledText((TextRun(entry["label"], "episode.watched" if _is_entry_watched(entry) else "row_normal"),)),
+                hint=progress_hints[entry["label"]], reference=str(entry["id"]), details=Inherit,
+            ) for entry in progress_entries)
+            return replace(base, prompt=picker_title, items=items,
+                           actions=base.actions + (ViewAction("flip", "flip", ("CTRL_R",)),),
+                           help=tuple(hd9.items()))
+
+        outcome = run_details_menu(
+            flags, ui, read_view=progress_view, switch_translation=_progress_tab_fn,
+            information=lambda: app_core.make_single_show_info_fn(s, ui)(0),
+            action_handlers={"flip": lambda _reference: _progress_tab_fn()},
+            presentation={
+                "layout": cfg.get("tui_layout", "bottom"), "badge": provider_label(s),
+                "screen_title": f"{mode_label(ui, ms)} · Progress", "summary_noun": "episodes",
+                "placeholder": "Filter progress…", "empty": "No matching episodes",
+                "info_fn": lambda _index, width: library_info_lines(s, ttype_local, width),
+                "shortcuts_fn": lambda _index: (("enter", "set progress"), ("↑↓", "move"),
+                                               ("/", "filter"), ("?", "help"), ("esc", "back")),
+            },
+        )
+        if outcome.kind == "quit":
+            return "QUIT"
+        idx = next((i for i, entry in enumerate(progress_entries)
+                    if str(entry["id"]) == outcome.action_id), -1) if outcome.kind == "selected" else -1
+    else:
+        idx = tui_pick(
+            flags, ui,
+            picker_title if flags.plain_mode else f"{mode_label(ui, ms)} · Progress", progress_opts,
+            header_fn=_progress_hdr,
+            hints=progress_hints,
+            tab_fn=_progress_tab_fn,
+            reverse_fn=_progress_tab_fn,
+            info_fn=app_core.make_single_show_info_fn(s, ui),
+            help_dict=hd9
+        )
 
     if idx >= 0:
         chosen = progress_entries[idx]
@@ -278,6 +322,8 @@ def handle_update_status_state(
             return _hdr_cache[cache_key]
         parts = []
         app_core.build_info_panel(s, ttype_local, w, parts, local_only=getattr(ms, "_is_downloads", False))
+        from ..domain.metadata import genre_text
+        parts.append(genre_text(s))
         footer = context_footer(
             s,
             ui,
@@ -368,6 +414,8 @@ def handle_update_score_state(
             return _hdr_cache[cache_key]
         parts = []
         app_core.build_info_panel(s, ttype_local, w, parts, local_only=getattr(ms, "_is_downloads", False))
+        from ..domain.metadata import genre_text
+        parts.append(genre_text(s))
         footer = context_footer(
             s,
             ui,

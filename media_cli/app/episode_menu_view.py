@@ -33,7 +33,7 @@ class EpisodeMenuOption:
 def _label(option: EpisodeMenuOption) -> str | StyledText:
     if not option.watched and not option.downloaded:
         return option.label
-    runs: tuple[TextRun, ...] = (TextRun(option.label, "muted" if option.watched else "episode.label"),)
+    runs: tuple[TextRun, ...] = (TextRun(option.label, "episode.watched" if option.watched else "episode.label"),)
     if option.downloaded:
         runs += (TextRun("  \u2714", "episode.downloaded"),)
     return StyledText(runs)
@@ -92,6 +92,6 @@ def build_episode_menu_view(
         delete_label="Delete episode" if has_downloads else None, info_label="Title information",
     )
     return replace(
-        base, prompt="Select episode", items=items, state="ready" if items else "empty",
+        base, screen_title=base.screen_title.removesuffix("Details") + ("Files" if show.get("_torrent") else "Episodes"), prompt="Select file" if show.get("_torrent") else "Select episode", items=items, state="ready" if items else "empty",
         actions=actions, help=tuple(help_data.items()),
     )

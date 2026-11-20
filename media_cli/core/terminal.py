@@ -9,16 +9,23 @@ _TERMINAL_STRING_RE = re.compile(
     re.DOTALL,
 )
 
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+_WHITESPACE_RE = re.compile(r"\s+")
+
 
 def sanitize_terminal_text(value: object) -> str:
     text = str(value or "")
     text = _TERMINAL_STRING_RE.sub("", text)
     text = _ANSI_RE.sub("", text)
-    text = "".join(
-        " " if ord(ch) < 32 or 127 <= ord(ch) <= 159 else ch
-        for ch in text
-    )
-    return re.sub(r"\s+", " ", text).strip()
+    text = _CONTROL_RE.sub(" ", text)
+    return _WHITESPACE_RE.sub(" ", text).strip()
+
+
+def sanitize_input_text(value: object) -> str:
+    """Keep editable whitespace; unlike metadata, input must not be trimmed."""
+    text = _TERMINAL_STRING_RE.sub("", str(value or ""))
+    text = _ANSI_RE.sub("", text)
+    return _CONTROL_RE.sub(" ", text)
 
 
 def strip_ansi(value: object) -> str:
@@ -83,7 +90,21 @@ def fit_terminal_line(line: object, columns: int) -> str:
     return truncate_display(str(line or ""), max(1, int(columns) - 1))
 
 
-def absolute_terminal_frame(lines, rows, columns, previous_lines=None):
+def _drop_styled_columns(text, columns):
+    """Drop a trusted styled prefix while retaining its active SGR state."""
+    index, used, styles = 0, 0, []
+    while index < len(text) and used < columns:
+        match = _ANSI_RE.match(text, index)
+        if match:
+            styles.append(match.group(0))
+            index = match.end()
+        else:
+            used += char_width(text[index])
+            index += 1
+    return ''.join(styles) + text[index:]
+
+
+def absolute_terminal_frame(lines, rows, columns, previous_lines=None, *, protected_image=None):
     """Render exactly one bounded line at each absolute terminal row."""
     frame = []
     bounded_rows = max(1, int(rows))
@@ -91,6 +112,15 @@ def absolute_terminal_frame(lines, rows, columns, previous_lines=None):
         line = lines[row - 1] if row - 1 < len(lines) else ""
         if previous_lines is not None and row - 1 < len(previous_lines) and previous_lines[row - 1] == line:
             continue
+        if protected_image is not None:
+            top, left, width, height = protected_image
+            if top <= row < top + height:
+                # Clearing the whole row would erase the unchanged native image.
+                end = left + width
+                if left:
+                    frame.append(f"\033[{row};1H" + (' ' * left))
+                frame.append(f"\033[{row};{end + 1}H\033[K" + _drop_styled_columns(fit_terminal_line(line, columns), end))
+                continue
         frame.append(f"\033[{row};1H\033[2K{fit_terminal_line(line, columns)}")
     return "".join(frame)
 

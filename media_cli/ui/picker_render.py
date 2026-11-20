@@ -1,6 +1,8 @@
 """Stateless picker key decoding and item rendering."""
 
+import logging
 import os
+import time
 import select
 
 from ..core.terminal import sanitize_terminal_text, truncate_display
@@ -21,16 +23,26 @@ def loading_frame(style=None):
 def get_key(descriptor):
     char = os.read(descriptor, 1)
     if char == b"\x1b":
-        if select.select([descriptor], [], [], 0.025)[0]:
+        deadline = time.monotonic() + .05
+        if select.select([descriptor], [], [], .025)[0]:
             second = os.read(descriptor, 1)
             if second in (b"[", b"O"):
-                third = os.read(descriptor, 1)
-                rest = third
-                while not (b"\x40" <= rest[-1:] <= b"\x7e"):
-                    rest += os.read(descriptor, 1)
-                return decode_key_bytes(char + second + rest)
+                rest = b""
+                while len(rest) < 32:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0 or not select.select([descriptor], [], [], remaining)[0]:
+                        break
+                    byte = os.read(descriptor, 1)
+                    if not byte:
+                        break
+                    rest += byte
+                    if b"\x40" <= byte <= b"\x7e":
+                        return decode_key_bytes(char + second + rest)
+                logging.getLogger(__name__).debug("Incomplete terminal key sequence discarded; UI remains responsive")
+                return "UNKNOWN"
             return decode_key_bytes(char + second)
     return decode_key_bytes(char)
+
 
 
 

@@ -123,3 +123,35 @@ def test_episode_fetch_uses_player_pump_and_cancel_does_not_commit_cache(monkeyp
     assert ms.ep_cache_key == original_key
     assert ms.ep_cache_data == (original_data if original_key else None)
     assert original_data == {"sources": []}
+
+
+def test_interactive_player_paints_before_tracking_and_catalog(monkeypatch):
+    from media_cli.app import playback_player
+    from media_cli.ui import player_screen
+    from media_cli.ui.transition import PreparationCancelled
+
+    events = []
+    core = playback_player.app_core
+    ui = UiState(ui_show_ctx={'_id': 'one', 'name': 'Example'})
+    monkeypatch.setattr(playback_player.sys.stdin, 'isatty', lambda: True)
+    monkeypatch.setattr(playback_player.sys.stdout, 'isatty', lambda: True)
+    monkeypatch.setattr(player_screen, '_player_ui_state', {})
+    monkeypatch.setattr(player_screen, 'reset_loading_cancel', lambda: None)
+    monkeypatch.setattr(core, 'enter_alt_screen', lambda: events.append('enter'))
+    monkeypatch.setattr(player_screen, 'render', lambda **kw: events.append('paint'))
+    monkeypatch.setattr(core, 'prepare_show_display_state', lambda *a: events.append('metadata'))
+    monkeypatch.setattr(core, 'ensure_episode_ids', lambda *a: events.append('catalog') or ['1'])
+    monkeypatch.setattr(core, '_exit_player_screen', lambda: events.append('exit'))
+    monkeypatch.setattr(core, 'with_loading', lambda *a: pytest.fail('Used details loading instead of player pump'))
+    def pump(prepare, **kwargs):
+        events.append('pump')
+        prepare()
+        raise PreparationCancelled
+    monkeypatch.setattr(player_screen, 'run_loading_work', pump)
+    result = playback_player.handle_play_state(
+        CliFlags(), ui, MachineState(current_ep='1'), {}, SimpleNamespace(), 'sub', '1080p',
+        lambda *a: events.append('tracking') or False,
+    )
+    assert result == 'DETAILS'
+    assert events == ['enter', 'paint', 'pump', 'tracking', 'metadata', 'catalog', 'exit']
+    assert ui.ui_show_ctx == {'_id': 'one', 'name': 'Example'}

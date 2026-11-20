@@ -12,6 +12,7 @@ Picker screens draw the divider below this header section.
 from __future__ import annotations
 
 import os
+from .viewport import content_size as _content_size
 from typing import Any, Callable
 
 from ..core.terminal import (
@@ -117,7 +118,7 @@ def render_search_header(
     badges: list[str] | None = None,
 ) -> str:
     try:
-        width = os.get_terminal_size().columns
+        width = _content_size().columns
     except OSError:
         width = 80
 

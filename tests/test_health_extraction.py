@@ -5,20 +5,8 @@ import json
 import pytest
 
 from media_cli.health import catalogue
-from media_cli.providers.senshi import Senshi
 
 
-def test_extract_one_named_source_without_extracting_other_routes(monkeypatch):
-    provider = Senshi()
-    monkeypatch.setattr(provider, '_fetch_json', lambda *args: [
-        {'status': 'sub', 'remote_source_id': 'r', 'server2': 'https://embed.test/a', 'serverFM': 'https://embed.test/b'},
-        {'status': 'dub', 'remote_source_id': 'dub'},
-    ])
-    seen = []
-    monkeypatch.setattr(provider, '_extract_embed_sources', lambda embeds, is_dub: seen.append((embeds, is_dub)) or [])
-    assert hasattr(provider, 'extract_discovered_source'), 'Need source-specific extraction boundary'
-    provider.extract_discovered_source('20', '8', 'Vidcloud', 'sub')
-    assert seen == [([{'remote_source_id': 'r'}], False)]
 
 
 def run(extract):

@@ -9,6 +9,8 @@ import threading
 import time
 from typing import Any
 
+from .loading_messages import catalog_loading_message
+
 from .. import app_core
 from ..domain.titles import title_provider_key
 from ..context import CliFlags, MachineState, UiState
@@ -810,7 +812,7 @@ def handle_action_menu_state(
             DetailsMenuOption(
                 action, label,
                 _action_hints_fn(index) if episode_ids or action in catalog_independent else (
-                    "episodes are still loading" if catalog_loading else "load episodes with Retry Episodes"),
+                    ("torrent files are still loading" if action_show.get("_torrent") else "episodes are still loading") if catalog_loading else "load episodes with Retry Episodes"),
                 opens_menu=action in submenu_actions,
             )
             for index, (label, action) in enumerate(zip(opts, acts, strict=True))
@@ -838,7 +840,7 @@ def handle_action_menu_state(
                 and (action_show.get("_provider") or action_show.get("provider"))
                 and action_show.get("_has_provider_link") is not False
             ),
-            loading_message=f"Loading {ttype.upper()} episodes…" if catalog_loading else '',
+            loading_message=catalog_loading_message(action_show, ttype) if catalog_loading else '',
             loading_indicator=spinner_frame(spinner_from_config(cfg)) if catalog_loading else '',
         )
 
@@ -888,9 +890,18 @@ def handle_action_menu_state(
                 _skip_settings_menu()
 
         information = app_core.make_single_show_info_fn(action_show, ui)
+        settings_presentation = None
+        if details_presentation is not None:
+            settings_presentation = dict(
+                details_presentation, screen_title="Downloads · Playback", summary_noun="settings",
+                placeholder="Filter settings…", empty="No matching settings",
+                shortcuts_fn=lambda _index: (("enter", "toggle/open"), ("↑↓", "move"), ("←→", "change"),
+                                             ("/", "filter"), ("?", "help"), ("esc", "back")),
+            )
         outcome = run_details_menu(
             flags, ui, read_view=lambda: _action_view(playback_settings=True, setting_controls=controls()),
             switch_translation=lambda: None, information=lambda: information(0), activate=activate,
+            presentation=settings_presentation,
         )
         return "QUIT" if outcome.kind == "quit" else "DETAILS"
 
@@ -1056,9 +1067,18 @@ def handle_action_menu_state(
                     app_core.set_action_feedback(action_show, "Custom skips saved for this session.")
 
         information = app_core.make_single_show_info_fn(action_show, ui)
+        skip_presentation = None
+        if details_presentation is not None:
+            skip_presentation = dict(
+                details_presentation, screen_title="Downloads · Skip Settings", summary_noun="settings",
+                placeholder="Filter skip settings…", empty="No matching skip settings",
+                shortcuts_fn=lambda _index: (("enter", "toggle/open"), ("↑↓", "move"), ("←→", "change"),
+                                             ("/", "filter"), ("?", "help"), ("esc", "back")),
+            )
         run_details_menu(
             flags, ui, read_view=read_view, switch_translation=lambda: None,
             information=lambda: information(0), activate=activate,
+            presentation=skip_presentation,
         )
 
     app_core.prepare_show_display_state(
@@ -1078,12 +1098,21 @@ def handle_action_menu_state(
         ui._view_positions.pop((_action_view().id,), None)
         ui.details_focus_primary = False
 
+    details_presentation = None
+    if getattr(ms, "_is_downloads", False) or action_show.get("_torrent"):
+        from ..ui.library_info import library_info_lines
+        details_presentation = {
+            "layout": cfg.get("tui_layout", "bottom"),
+            "badge": provider_label(action_show),
+            "info_fn": lambda _index, width: library_info_lines(action_show, ttype, width),
+        }
     outcome = run_details_menu(
         flags, ui, read_view=_action_view, switch_translation=_action_tab_fn,
         information=lambda: information(0),
         ready=(lambda: ui.ui_ttype_ctx != ttype or (catalog_ready is not None and catalog_ready()))
               if ready_ids is not None else None,
         can_activate=lambda action: _catalog_action_allowed(action),
+        presentation=details_presentation,
     )
 
     if outcome.kind == "quit":
@@ -1600,26 +1629,32 @@ def handle_download_menu_state(
     acts = []
     hints = {}
 
-    # 1. Download EP <N>
-    opts.append(f"Download EP {current_label}")
-    acts.append("SINGLE")
-    hints[opts[-1]] = "single episode"
+    is_torrent = bool(action_show.get("_torrent") or action_show.get("_provider") == "torrent")
+    if is_torrent:
+        opts = ["Download Selected File", "Download All Files", "Pick Files to Download…"]
+        acts = ["SINGLE", "ALL", "PICK"]
+        hints = {opts[0]: current_label, opts[1]: f"{total_eps} video files", opts[2]: "choose files with Space"}
+    else:
+        # 1. Download EP <N>
+        opts.append(f"Download EP {current_label}")
+        acts.append("SINGLE")
+        hints[opts[-1]] = "single episode"
 
-    # 2. Download from EP <N> to End (if not on last episode)
-    if current_idx < total_eps - 1:
-        opts.append(f"Download from EP {current_label} to End")
-        acts.append("TO_END")
-        hints[opts[-1]] = f"batch remaining ({total_eps - current_idx} eps)"
+        # 2. Download from EP <N> to End (if not on last episode)
+        if current_idx < total_eps - 1:
+            opts.append(f"Download from EP {current_label} to End")
+            acts.append("TO_END")
+            hints[opts[-1]] = f"batch remaining ({total_eps - current_idx} eps)"
 
-    # 3. Download All
-    opts.append(f"Download All ({first_label}–{last_label})")
-    acts.append("ALL")
-    hints[opts[-1]] = f"entire series ({total_eps} eps)"
+        # 3. Download All
+        opts.append(f"Download All ({first_label}–{last_label})")
+        acts.append("ALL")
+        hints[opts[-1]] = f"entire series ({total_eps} eps)"
 
-    # 4. Pick Episodes to Download
-    opts.append("Pick Episodes to Download…")
-    acts.append("PICK")
-    hints[opts[-1]] = "custom multi-select (Space/Tab)"
+        # 4. Pick Episodes to Download
+        opts.append("Pick Episodes to Download…")
+        acts.append("PICK")
+        hints[opts[-1]] = "custom multi-select (Space/Tab)"
 
     _dl_hdr_cache: dict[tuple, str] = {}
 
@@ -1658,12 +1693,28 @@ def handle_download_menu_state(
         _dl_hdr_cache[cache_key] = res
         return res
 
+    def torrent_chrome(title, *, pick_files=False):
+        from ..ui.torrent_results import information
+        from ..state.theme import MINT_SCREEN_THEME
+        def info(index, width):
+            from ..ui.styled_text import StyledText, TextRun, render_styled_text
+            from ..core.terminal import sanitize_terminal_text
+            lines = list(information(action_show, width, MINT_SCREEN_THEME))
+            selected_id = episode_ids[index] if pick_files and 0 <= index < len(episode_ids) else current_ep_id
+            filename = playback_mod._display_episode_label(action_show, selected_id, ttype)
+            lines[-1] = render_styled_text(StyledText((TextRun(sanitize_terminal_text(filename), "library.value"),)), width=width, theme=MINT_SCREEN_THEME)
+            return lines
+        return {"title": "Search · " + title, "badge": "Torrents", "info_fn": info,
+                "shortcuts": (("enter", "download" if pick_files else "select"), ("↑↓", "move"),
+                              *((("space", "mark"),) if pick_files else ()), ("?", "help"), ("esc", "back"))}
+
     hd = picker_help("Download Menu", "Go back", "Go back")
     idx = tui_pick(
         flags,
         ui,
         "Download Menu",
         opts,
+        chrome_fn=(lambda: torrent_chrome("Download")) if is_torrent else None,
         header_fn=_dl_hdr,
         hints=hints,
         help_dict=hd,
@@ -1684,6 +1735,8 @@ def handle_download_menu_state(
     elif action == "PICK":
         def _build_batch_dl_label(ep_id, idx):
             raw_lbl = playback_mod._display_episode_label(action_show, ep_id, ttype)
+            if is_torrent:
+                return raw_lbl
             lbl = f"Episode {raw_lbl}"
             w_list = action_show.get("watched_episodes", [])
             is_w = str(ep_id) in w_list or str(raw_lbl) in w_list
@@ -1735,8 +1788,9 @@ def handle_download_menu_state(
         chosen = tui_pick(
             flags,
             ui,
-            "Select episodes to download",
+            "Select files to download" if is_torrent else "Select episodes to download",
             ep_options,
+            chrome_fn=(lambda: torrent_chrome("Files", pick_files=True)) if is_torrent else None,
             header_fn=_pick_hdr,
             multi_select=True,
             help_dict=pick_hd,
@@ -1748,8 +1802,8 @@ def handle_download_menu_state(
     if not queued_eps:
         return "DETAILS"
 
-    _execute_batch_download(flags, ui, ms, cfg, args, ttype, action_show, queued_eps)
-    return "DETAILS"
+    result = _execute_batch_download(flags, ui, ms, cfg, args, ttype, action_show, queued_eps)
+    return "QUIT" if result == "QUIT" else "DETAILS"
 
 
 def _execute_batch_download(flags, ui, ms, cfg, args, ttype, action_show, queued_eps):
@@ -1779,6 +1833,14 @@ def _execute_batch_download(flags, ui, ms, cfg, args, ttype, action_show, queued
 
         def _make_resolver(show_id, ep_id, ttype, provider_id, quality):
             def _res(item):
+                if provider_id == "torrent":
+                    from ..torrents.sources import selected_file_source
+                    filename = playback_mod._display_episode_label(action_show, ep_id, ttype)
+                    source = selected_file_source(action_show, ep_id, filename)
+                    item.torrent = source["torrent"]
+                    item.current_mirror_name = "Torrent swarm"
+                    item.logs.append("Resolving selected torrent file; using libtorrent.")
+                    return source["sourceUrl"], {}, None
                 stream_res = app_core.fetch_episode_stream(
                     show_id,
                     ep_id,
@@ -1831,17 +1893,20 @@ def _execute_batch_download(flags, ui, ms, cfg, args, ttype, action_show, queued
         for ep_id in queued_eps:
             ep_label = playback_mod._display_episode_label(action_show, ep_id, ttype)
             item_id = f"{ms.show_id or safe_title}:{ep_id}"
-            dest_path = os.path.join(target_dir, f"{safe_title} - Episode {ep_label}{ext}")
+            is_torrent = provider_id == "torrent"
+            dest_path = os.path.join(target_dir, os.path.basename(ep_label) if is_torrent else f"{safe_title} - Episode {ep_label}{ext}")
             item = DownloadItem(
                 id=item_id,
                 title=ms.show_title,
-                episode=f"Episode {ep_label}",
+                episode=ep_label if is_torrent else f"Episode {ep_label}",
                 destination_path=dest_path,
-                engine=downloader_choice if downloader_choice in ("yt-dlp", "aria2c", "ffmpeg") else "auto",
+                engine="libtorrent" if is_torrent else (downloader_choice if downloader_choice in ("yt-dlp", "aria2c", "ffmpeg") else "auto"),
                 resolve_fn=_make_resolver(ms.show_id, ep_id, ttype, provider_id, quality),
                 on_complete=_on_complete,
                 ep_id=ep_id,
                 show_metadata=action_show,
+                resume_request={"kind": "provider", "provider": provider_id, "show_id": str(ms.show_id),
+                                "episode_id": str(ep_id), "translation": ttype, "quality": quality},
                 download_sub_langs=getattr(args, "download_sub_langs", None),
                 download_audio_langs=getattr(args, "download_audio_langs", None),
                 subtitle_mode=getattr(args, "subtitle_mode", None),
@@ -1869,13 +1934,17 @@ def _execute_batch_download(flags, ui, ms, cfg, args, ttype, action_show, queued
         print(
             f"\033[1;97m[{i}/{total_to_dl}] Resolving stream for EP {ep_label}…\033[0m"
         )
-        stream_res = app_core.fetch_episode_stream(
-            ms.show_id,
-            ep_id,
-            ttype,
-            cfg.get("quality", "best"),
-            provider_id=provider_id,
-        )
+        if provider_id == "torrent":
+            from ..torrents.sources import selected_file_source
+            stream_res = (selected_file_source(action_show, ep_id, ep_label), "Torrent swarm")
+        else:
+            stream_res = app_core.fetch_episode_stream(
+                ms.show_id,
+                ep_id,
+                ttype,
+                cfg.get("quality", "best"),
+                provider_id=provider_id,
+            )
         if not stream_res or not stream_res[0]:
             print(f"\033[31m✖ No stream found for EP {ep_label}\033[0m")
             continue
@@ -1903,7 +1972,8 @@ def _execute_batch_download(flags, ui, ms, cfg, args, ttype, action_show, queued
                 from media_cli.media.download import sanitize_filename
                 title = ms.show_title
                 folder_key = sanitize_filename(title) or title
-                offline_file = app_core.find_offline_file_for_episode(title, ep_label, cfg)
+                offline_file = (os.path.join(download_dir, folder_key, os.path.basename(ep_label)) if provider_id == "torrent"
+                                else app_core.find_offline_file_for_episode(title, ep_label, cfg))
                 if offline_file:
                     register_downloaded_episode_files(
                         folder_key,
@@ -2218,8 +2288,7 @@ def handle_mirrors_state(
                 left_part = f"✔ {found_str} • {src_str}"
             else:
                 left_part = f"✘ No mirrors found • {src_str}"
-            right_part = "Ctrl+R=refresh  ?=Help  Esc=back"
-            plain_status = f"{left_part}  │  {right_part}"
+            plain_status = f"{left_part} • Ctrl+R=refresh • ?=Help • Esc=back"
 
         parts = []
         if ui.ui_show_ctx:
@@ -2234,6 +2303,9 @@ def handle_mirrors_state(
                 override_ep_str=ep_str,
                 local_only=getattr(ms, "_is_downloads", False),
             )
+            from ..domain.metadata import genre_text
+            parts.append(genre_text(ui.ui_show_ctx))
+            parts.append(provider_label(ui.ui_show_ctx))
 
         toast = ui.pref_toast
         toast_time = ui.pref_toast_time
@@ -2332,9 +2404,10 @@ def handle_mirrors_state(
         midx = (picker_override or tui_pick)(
             flags,
             ui,
-            "Select mirror",
+            f"{mode_label(ui, ms)} · Mirrors",
             init_opts,
             header=init_hdr,
+            top_header_fn=lambda _index: app_core._get_poster(ui.ui_show_ctx) if ui.ui_show_ctx else "",
             live_fn=_mirror_refresh,
             tab_fn=_tab_pref,
             reverse_fn=_mirror_force_refresh,

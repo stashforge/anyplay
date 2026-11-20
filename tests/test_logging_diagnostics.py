@@ -6,7 +6,7 @@ from media_cli.cli.args import parse_cli_args
 
 
 def test_configure_file_logging_writes_warning_and_rotates(monkeypatch, isolate_test_state_and_config):
-    from media_cli.core.diagnostics import configure_file_logging, get_log_paths, reset_file_logging_for_tests
+    from media_cli.core.diagnostics import configure_file_logging, get_log_paths, reset_file_logging_for_tests, flush_file_logging
     from media_cli.state import paths
 
     monkeypatch.setattr(paths, "LOG_DIR", os.path.join(isolate_test_state_and_config, "logs"))
@@ -20,6 +20,7 @@ def test_configure_file_logging_writes_warning_and_rotates(monkeypatch, isolate_
         logger.warning("second warning with enough padding to rotate the file")
         logger.error("third error")
 
+        flush_file_logging()
         log_paths = get_log_paths()
         assert os.path.exists(log_paths["anyplay"])
         assert os.path.exists(log_paths["anyplay"] + ".1")
@@ -37,7 +38,7 @@ def test_configure_file_logging_writes_warning_and_rotates(monkeypatch, isolate_
 
 
 def test_configure_file_logging_debug_mode_records_debug(monkeypatch, isolate_test_state_and_config):
-    from media_cli.core.diagnostics import configure_file_logging, get_log_paths, reset_file_logging_for_tests
+    from media_cli.core.diagnostics import configure_file_logging, get_log_paths, reset_file_logging_for_tests, flush_file_logging
     from media_cli.state import paths
 
     monkeypatch.setattr(paths, "LOG_DIR", os.path.join(isolate_test_state_and_config, "logs"))
@@ -46,6 +47,7 @@ def test_configure_file_logging_debug_mode_records_debug(monkeypatch, isolate_te
         configure_file_logging(debug=True, max_bytes=1024, backup_count=1)
         logging.getLogger("media_cli.tests").debug("visible debug message")
 
+        flush_file_logging()
         with open(get_log_paths()["anyplay"], "r", encoding="utf-8") as fh:
             assert "visible debug message" in fh.read()
     finally:
@@ -138,3 +140,26 @@ def test_logs_command_reports_when_log_file_missing(capsys, isolate_test_state_a
 
     out = capsys.readouterr().out
     assert f"No anyplay log file yet: {log_path}" in out
+
+
+def test_slow_file_sink_does_not_block_logging_caller(monkeypatch, isolate_test_state_and_config):
+    from threading import Event
+    from media_cli.core import diagnostics
+    entered, release = Event(), Event()
+    monkeypatch.setattr(diagnostics.paths, "LOG_DIR", isolate_test_state_and_config)
+    original = diagnostics.RotatingFileHandler.emit
+    def slow(handler, record):
+        entered.set()
+        release.wait(2)
+        original(handler, record)
+    diagnostics.reset_file_logging_for_tests()
+    monkeypatch.setattr(diagnostics.RotatingFileHandler, "emit", slow)
+    try:
+        diagnostics.configure_file_logging(debug=True)
+        logging.getLogger("media_cli.tests").debug("background file write")
+        assert entered.wait(1)
+        # The logger returned while the file writer is still blocked.
+        assert not release.is_set()
+    finally:
+        release.set()
+        diagnostics.reset_file_logging_for_tests()

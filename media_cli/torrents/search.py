@@ -202,6 +202,7 @@ def parse_nyaa_rss(xml_text: str) -> list[TorrentResult]:
                 group=_group_from_name(name),
                 added_unix=_unix_from_rss_date(item.findtext("pubDate")),
                 raw={"rss": True, "link": link},
+                trusted={"yes": True, "no": False}.get((item.findtext(f"{NYAA_NS}trusted") or "").strip().lower()),
             )
         )
     return results
@@ -235,7 +236,9 @@ def _merge_pair(existing: TorrentResult, item: TorrentResult) -> TorrentResult:
         mal_id=existing.mal_id or item.mal_id,
         audio_langs=existing.audio_langs or item.audio_langs,
         sub_langs=existing.sub_langs or item.sub_langs,
-        tracker_urls=existing.tracker_urls or item.tracker_urls,
+        tracker_urls=tuple(dict.fromkeys((*existing.tracker_urls, *item.tracker_urls))),
+        trusted=True if existing.trusted is True or item.trusted is True else
+                False if existing.trusted is False or item.trusted is False else None,
         added_unix=max(existing.added_unix, item.added_unix),
     )
 

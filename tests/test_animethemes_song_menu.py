@@ -320,9 +320,11 @@ finish(dict(kind=result, requests=requests, selected=menu.selected_index,
             prompt=menu.session.current.prompt))
 '''
     with Terminal(tmp_path, source) as terminal:
-        terminal.send_after(b"Select action", b"Songs\r")
-        terminal.send_after(b"Select song", b"Ending\r")
-        terminal.send_after(b"PLAY_REQUEST:12", b"\x1b")
+        terminal.send_after(b"Select action", b"/Songs\r")
+        terminal.send_after(b"Select song", b"/Ending\r")
+        terminal.until(b"PLAY_REQUEST:12")
+        terminal.send_after("Songs▏".encode(), b"\x1b")
+        terminal.send_after(b"esc", b"\x1b")
         assert terminal.result() == {"kind": "back", "requests": [12], "selected": 1,
                                      "prompt": "Select action"}
 
@@ -330,6 +332,7 @@ finish(dict(kind=result, requests=requests, selected=menu.selected_index,
 def test_real_terminal_actions_put_play_closest_to_divider(tmp_path):
     import json
     import re
+    import os
 
     from test_ui_view_terminal import Terminal
 
@@ -344,11 +347,11 @@ result = run_view_session(flags, ui, menu.session, poster_manager=manager)
 finish(result)
 '''
     with Terminal(tmp_path, source) as terminal:
-        frame = strip_ansi(terminal.until(b"Select action").decode("utf-8", errors="replace"))
+        frame = strip_ansi(terminal.until(b"\x1b[35;100H").decode("utf-8", errors="replace"))
         assert "Previous" not in frame
         labels = ["Playback", "Quality", "Version", "Songs", "Next", "Play"]
         offsets = [re.search(r"\b" + re.escape(label) + r"\b", frame).start() for label in labels]
-        terminal.send_after(b"Enter=select", b"\x1b")
+        os.write(terminal.master, b"\x1b")
         assert terminal.result() == "back"
         assert offsets == sorted(offsets)
 
@@ -366,7 +369,7 @@ result = run_view_session(flags, ui, menu.session, poster_manager=manager)
 finish(dict(result=result, auto_next=menu.auto_play_next))
 '''
     with Terminal(tmp_path, source) as terminal:
-        terminal.send_after(b"Select action", b"Playback\r")
+        terminal.send_after(b"Select action", b"/Playback\r")
         terminal.send_after(b"Auto-Play Next: Off", b"\r")
         terminal.send_after(b"Auto-Play Next: On", b"\x1b[C")
         terminal.send_after(b"Auto-Play Next: Off", b"\x1b[D")
@@ -374,6 +377,7 @@ finish(dict(result=result, auto_next=menu.auto_play_next))
         terminal.send_after(b"Auto-Play Next: Off", b"\x1b[C")
         terminal.send_after(b"Auto-Play Next: On", b"\x1b")
         terminal.send_after(b"Select action", b"\x1b")
+        terminal.send_after(b"6 results", b"\x1b")
         assert terminal.result() == {"result": "back", "auto_next": True}
 
 
@@ -390,12 +394,14 @@ result = run_view_session(flags, ui, menu.session, poster_manager=manager)
 finish(dict(result=result, repeat=menu.repeat_mode))
 '''
     with Terminal(tmp_path, source) as terminal:
-        terminal.send_after(b"Select action", b"Playback\r")
-        terminal.send_after(b"Repeat: Off", b"Repeat\r")
+        terminal.send_after(b"Select action", b"/Playback\r")
+        terminal.send_after(b"Repeat: Off", b"/Repeat\r")
         terminal.send_after(b"replay once, then follow Auto-Play Next", b"\x1b[C")
         terminal.send_after(b"keep replaying this song", b"\x1b[H\x1b[D")
         terminal.send_after(b"replay once, then follow Auto-Play Next", b"\x1b")
+        terminal.send_after(b"4 results", b"\x1b")
         terminal.send_after(b"Select action", b"\x1b")
+        terminal.send_after(b"6 results", b"\x1b")
         assert terminal.result() == {"result": "back", "repeat": "once"}
 
 

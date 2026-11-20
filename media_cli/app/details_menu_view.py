@@ -7,12 +7,14 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..core.terminal import sanitize_terminal_text
+from ..domain.metadata import genre_text
 from ..ui.footer import Footer, FooterStatus, StatusKind
 from ..ui.help import picker_help
 from ..ui.poster import PosterManager
 from ..ui.styled_text import TextRun
 from ..ui.view_model import ImageSpec, Inherit, ViewAction, ViewItem, ViewSpec
 from .show_view_data import build_show_detail_lines
+from .footer import provider_label
 
 
 @dataclass(frozen=True)
@@ -66,14 +68,21 @@ def build_details_menu_view(
         )
         for option in options
     )
+    show_cover = show_cover and not bool(show.get("_torrent"))
     url = PosterManager._get_cover_url(show) if show_cover else None
     image = (
         (ImageSpec(image_key, "available", url) if url else ImageSpec(image_key, "unavailable")) if show_cover else None
     )
+    from ..ui.torrent_results import information_content
     return ViewSpec(
         view_id,
         "Select action",
         items,
+        screen_title=" · ".join(part for part in ((context[0] if context else ""), "Details") if part),
+        screen_badge=sanitize_terminal_text(provider_label(show, include_unlinked=True)),
+        extra_details=sanitize_terminal_text(genre_text(show)),
+        info_context=sanitize_terminal_text(provider_label(show, include_unlinked=True)),
+        info_lines=information_content(show) if show.get("_torrent") else (),
         details=build_show_detail_lines(show, ttype, local_only=local_only),
         image=image,
         context=tuple(sanitize_terminal_text(part) for part in context),

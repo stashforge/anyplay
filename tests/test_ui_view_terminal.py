@@ -115,8 +115,16 @@ class Terminal:
         deadline = time.monotonic() + timeout
         while True:
             found = self.output.find(marker, start)
-            if found >= 0:
-                self.cursor = found + len(marker)
+            end = found + len(marker) if found >= 0 else None
+            if found < 0 and b'\x1b' not in marker:
+                # Match visible text across SGR runs; theme changes must not
+                # make otherwise unchanged labels invisible to terminal tests.
+                styled = rb'(?:\x1b\[[0-9;]*m)*'.join(re.escape(bytes([byte])) for byte in marker)
+                match = re.search(styled, self.output[start:])
+                if match is not None:
+                    end = start + match.end()
+            if end is not None:
+                self.cursor = end
                 return bytes(self.output[start:self.cursor])
             if time.monotonic() >= deadline:
                 pytest.fail(f'Timed out waiting for {marker!r}; tail={bytes(self.output[-5000:])!r}')
@@ -256,7 +264,7 @@ finish(dict(elapsed=time.monotonic()-started, details=asdict(resolve_details(ses
     assert result['details'] == dict(title='Unchanged artist', secondary='Unchanged secondary', metadata='Unchanged metadata')
     assert b'Loading cover' in loading
     footer = dict(row_writes(frame_output))[35]
-    assert 'Cover context' in footer
+    assert any('Cover context' in text for row, text in row_writes(frame_output) if row < 4)
     assert 'Fetching cover' not in footer and 'Loading cover' not in footer
     if protocol != 'symbols':
         assert frame_output.count(packet.encode()) == 1
@@ -390,7 +398,7 @@ class RecordingSession(ViewSession):
             snapshots.append(dict(before=before, after=(self.current.id, asdict(self.position))))
         return accepted
 root = ViewSpec('root', 'ROOT-NAV', tuple(ViewItem(f's{i}', f'song {i:02}', details=DetailLines(Content(f'Focused root {i}'), Blank, Blank)) for i in range(60)), reverse_items=False, details=DetailLines(Blank, Blank, Blank))
-child = ViewSpec('child', 'CHILD-NAV', tuple(ViewItem(f'v{i}', f'verse {i:02}', details=DetailLines(Content(f'Focused child {i}'), Blank, Blank)) for i in range(60)), reverse_items=False, details=DetailLines(Blank, Blank, Blank))
+child = ViewSpec('child', 'CHILD-NAV', tuple(ViewItem(f'v{i}', f'verse {i:02}', details=DetailLines(Content(f'Focused child {i}'), Blank, Blank)) for i in range(60)), actions=(ViewAction('back', 'back', ('CTRL_R',)),), reverse_items=False, details=DetailLines(Blank, Blank, Blank))
 grand = ViewSpec('grand', 'GRAND-NAV', (ViewItem('leaf', 'Leaf', details=Inherit),), reverse_items=False, details=DetailLines(Blank, Blank, Blank))
 saved = {}
 def handle(event):
@@ -408,12 +416,12 @@ value = run_view_session(flags, ui, session, poster_manager=manager)
 finish(dict(value=value, saved=saved, snapshots=snapshots, final=asdict(session.position)))
 """
     with Terminal(tmp_path, script) as terminal:
-        terminal.send_after(b'ROOT-NAV', b'song' + b'\x1b[B' * 40)
+        terminal.send_after(b'ROOT-NAV', b'/song' + b'\x1b[B' * 40)
         terminal.send_after(b'Focused root 40', b'\r')
-        terminal.send_after(b'CHILD-NAV', b'verse' + b'\x1b[B' * 36)
+        terminal.send_after(b'CHILD-NAV', b'/verse' + b'\x1b[B' * 36)
         terminal.send_after(b'Focused child 36', b'\r')
         terminal.send_after(b'GRAND-NAV', b'\x1b[D')
-        terminal.send_after(b'CHILD-NAV', b'\x1b')
+        terminal.send_after(b'CHILD-NAV', b'\x12')
         terminal.send_after(b'ROOT-NAV', b'\r')
         result = terminal.result()
     assert result['value'] == 'done'
@@ -448,15 +456,14 @@ finish(dict(selected=session.position.selected_id))
         assert 1 <= row <= 38
         assert display_width(text) <= columns - 1, (row, text)
     rows = dict(writes)
-    if columns < MIN_TUI_COLUMNS:
-        assert rows[37].startswith(f'Resize to {MIN_TUI_COLUMNS}')
-        assert rows[38].startswith('Esc: back')
-        assert not any(text.startswith('Title') for _, text in writes)
-        return
-    assert rows[35].startswith('Title')
-    assert rows[36].startswith('Secondary')
-    assert rows[37].startswith('Metadata')
-    assert rows[38].startswith('Context')
+    # The shared frame fits compact terminals instead of the old width notice.
+    assert rows[32].startswith('Title')
+    assert rows[33].startswith('Secondary')
+    assert rows[34].startswith('Metadata')
+    assert 'Con' in rows[3]
+    assert rows[37].startswith('─')
+    assert rows[38]
+
 
 
 def test_plain_async_completes_without_input_and_does_not_number_headings(tmp_path):

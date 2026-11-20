@@ -104,7 +104,7 @@ def test_partial_results_do_not_become_auto_selectable_until_ready():
 def test_missing_cover_and_alternative_name_are_explicit():
     result = view((show(thumbnail="", englishName="", genres=["Adventure", "Comedy"]),))
     details = resolve_details(result.details, result.items[0].details)
-    assert details.secondary == "Adventure • Comedy"
+    assert details.secondary == "No alternative title"
     assert result.items[0].image.state == "unavailable"
     result = view((show(thumbnail="", englishName=""),))
     assert resolve_details(result.details, result.items[0].details).secondary == "No alternative title"

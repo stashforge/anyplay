@@ -152,3 +152,70 @@ def test_history_screen_rejects_invalid_modes_flags_and_counts(kwargs):
 
     with pytest.raises((TypeError, ValueError)):
         build_history_view((entry(),), **({"mode": "All", "total_count": 1} | kwargs))
+
+
+def test_history_provider_stays_visible_after_details_lookup_fails():
+    source = entry(provider="anidb")
+    source["show"]["_provider_name"] = "AniDB.app"
+    before = build([source])[0]
+    source["show"]["_has_provider_link"] = False
+    after = build([source])[0]
+    assert after.label == before.label
+    assert after.footer_context == before.footer_context
+    assert after.footer_context[0] == "AniDB.app"
+
+
+def test_history_information_uses_shared_metadata_colors():
+    from media_cli.state.theme import MINT_SCREEN_THEME
+    from media_cli.ui.detail_panel import render_detail_lines
+    fields = resolve_details(build([entry()])[0].details)
+    line = render_detail_lines(primary=fields.title, secondary=fields.secondary,
+                               details=fields.metadata, width=160, theme=MINT_SCREEN_THEME)[2]
+    assert "\033[38;5;114mFINISHED" in line
+    assert "\033[38;5;114mWatched" in line
+    assert "\033[38;5;240m • " in line
+
+
+def test_torrent_history_recovers_name_and_uses_torrent_panel_without_cover():
+    record = entry(identity="a" * 40, provider="torrent")
+    record["show"].update(name="a" * 40, _torrent={
+        "infohash": "a" * 40, "name": "Example.S01.Dual.Audio.mkv",
+        "source": "nyaa", "seeders": 22, "leechers": 3, "size_bytes": 1000000000,
+    })
+    before = deepcopy(record)
+    item = build([record])[0]
+    assert item.label_text == "Example.S01.Dual.Audio.mkv"
+    assert item.image is None
+    text = "\n".join("".join(run.text for run in line.runs) for line in item.info_lines)
+    assert "S 22 · L 3" in text
+    assert "Watched 3" in text
+    assert "No genres" not in text and "★" not in text
+    assert record == before
+
+
+def test_history_smart_filters_use_loaded_metadata_and_activity_counts():
+    from media_cli.app.history_menu_view import build_history_view
+    from media_cli.app.history_activity import HistoryActivity
+    from media_cli.ui.view_model import visible_items
+    source = entry(provider='anipm', has_new_release=True)
+    source['show'].update(genres=['Magic', 'Fantasy'], airedStart={'year': 2020}, season='SPRING')
+    activity = HistoryActivity({('anipm', 'one'): 2})
+    view = build_history_view([source], mode='All', total_count=1, activity=activity)
+    query = 'provider:anipm,anikoto year:>=2008 genre:magic status:finished type:tv season:spring watched:>=3 downloaded:>0 new:true'
+    assert len(visible_items(view, query)) == 1
+    assert not visible_items(view, 'new:false')
+    assert not visible_items(view, 'downloaded:0')
+    assert len(visible_items(view, 'title:"Another name" translation:sub')) == 1
+    source['show']['genres'].append('Romance')
+    assert not visible_items(view, 'genre:romance')
+
+
+def test_history_missing_metadata_is_not_invented():
+    from media_cli.app.history_menu_view import build_history_view
+    from media_cli.app.history_activity import HistoryActivity
+    from media_cli.ui.view_model import visible_items
+    view = build_history_view([entry()], mode='All', total_count=1, activity=HistoryActivity({}))
+    assert not visible_items(view, 'year:>2000')
+    assert not visible_items(view, 'genre:fantasy')
+    assert len(visible_items(view, 'downloaded:0 new:false')) == 1
+    assert len(visible_items(view, 'Exm')) == 1

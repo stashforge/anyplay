@@ -1,4 +1,4 @@
-"""Failed checks retain known episodes and use a separate retry cooldown."""
+"""Failed checks retain known episodes and share the automatic refresh interval."""
 
 from copy import deepcopy
 from types import SimpleNamespace
@@ -16,6 +16,7 @@ def test_failed_refresh_preserves_known_data_and_success_time(monkeypatch, provi
                 availableEpisodes={"sub": 11}, _provider_catalog_checked_at=5_000,
                 description="Cached", genres=["Drama"])
     entry = dict(show=show, episode="10", translation_type="sub", was_caught_up=True, has_new_release=True)
+    show["_release_notification"] = {"previous": 10, "available": 11, "translation": "sub", "progress": 10}
     original = deepcopy(show)
 
     def catalogue(*args, **kwargs):
@@ -42,13 +43,14 @@ def test_failed_refresh_preserves_known_data_and_success_time(monkeypatch, provi
     )
     assert entry["has_new_release"]
     assert not history.history_entry_refresh_is_stale(entry, now=now + 59)
-    assert history.history_entry_refresh_is_stale(entry, now=now + 60)
+    assert history.history_entry_refresh_is_stale(entry, now=now + 3600)
 
 
-def test_failed_provider_can_retry_even_when_anilist_metadata_is_fresh():
+def test_recent_anilist_check_and_provider_failure_share_cooldown():
     entry = {"show": {"_provider_catalog_failed_at": 1_000, "_anilist_airing_checked_at": 1_059}}
     assert not history.history_entry_refresh_is_stale(entry, now=1_059)
-    assert history.history_entry_refresh_is_stale(entry, now=1_060)
+    assert not history.history_entry_refresh_is_stale(entry, now=1_060)
+    assert history.history_entry_refresh_is_stale(entry, now=4_659)
 
 
 def test_success_clears_failure_and_uses_normal_cooldown(monkeypatch):
@@ -65,11 +67,11 @@ def test_success_clears_failure_and_uses_normal_cooldown(monkeypatch):
     assert show["_provider_catalog_failed_at"] == 0
     assert show["_provider_catalog_refresh_error"] == ""
     assert show["_episode_catalog_state"] == "loaded"
-    assert not history.history_entry_refresh_is_stale(entry, now=10_060)
-    assert history.history_entry_refresh_is_stale(entry, now=11_800)
+    assert not history.history_entry_refresh_is_stale(entry, now=13_599)
+    assert history.history_entry_refresh_is_stale(entry, now=13_600)
 
 
-def test_linked_provider_retry_is_not_blocked_by_anilist_cooldown(monkeypatch):
+def test_linked_provider_failure_does_not_retry_early(monkeypatch):
     from media_cli.core import anilist
 
     entry = dict(show=dict(_id="one", _provider="example", aniListId="42", name="Example",
@@ -87,8 +89,8 @@ def test_linked_provider_retry_is_not_blocked_by_anilist_cooldown(monkeypatch):
     monkeypatch.setattr(anilist, "_provider_catalog_refresh_fn", retry)
     monkeypatch.setattr(anilist.anilist_service, "fetch", lambda *a, **kw: pytest.fail("Fresh AniList data refetched"))
     monkeypatch.setattr(anilist.storage, "patch_history_entry_state", lambda *a: True)
-    assert anilist.refresh_history_anilist_airing_batch([entry])
-    assert calls == [entry]
+    assert not anilist.refresh_history_anilist_airing_batch([entry])
+    assert calls == []
 
 
 def test_failure_cooldown_survives_history_reload(monkeypatch, tmp_path):
@@ -100,6 +102,7 @@ def test_failure_cooldown_survives_history_reload(monkeypatch, tmp_path):
     entry = dict(show=dict(_id="one", name="Example", availableEpisodes={"sub": 11},
                           _provider_catalog_checked_at=5_000), episode="10", translation_type="sub",
                  was_caught_up=True, has_new_release=True)
+    entry["show"]["_release_notification"] = {"previous": 10, "available": 11, "translation": "sub", "progress": 10}
     storage.save_refreshed_history([entry])
     entry["show"].update(_provider_catalog_failed_at=10_000, _provider_catalog_attempted_at=10_000,
                          _provider_catalog_refresh_error="Unavailable")
@@ -109,4 +112,31 @@ def test_failure_cooldown_survives_history_reload(monkeypatch, tmp_path):
     assert loaded["show"]["availableEpisodes"] == {"sub": 11}
     assert loaded["has_new_release"]
     assert not history.history_entry_refresh_is_stale(loaded, now=10_059)
-    assert history.history_entry_refresh_is_stale(loaded, now=10_060)
+    assert history.history_entry_refresh_is_stale(loaded, now=13_600)
+
+
+@pytest.mark.parametrize('keyword_headers', [False, True])
+def test_refresh_cache_accepts_dictionary_request_arguments(monkeypatch, keyword_headers):
+    calls = []
+    class Provider:
+        def _fetch(self, url, headers=None):
+            calls.append((url, headers))
+            return {'name': 'Fresh name'}
+
+        def get_title(self, show_id):
+            if keyword_headers:
+                return self._fetch('https://example.test/title', headers={'Accept': 'application/json'})
+            return self._fetch('https://example.test/title', {'Accept': 'application/json'})
+
+        def episode_catalog(self, show_id, **kwargs):
+            return {'state': 'loaded', 'ids': ['1'], 'labels': {}}
+
+    provider = Provider()
+    original_fetch = provider._fetch
+    monkeypatch.setattr('media_cli.services.catalog._provider_for_title', lambda *args: provider)
+    row = {'show': {'_id': 'one', '_provider': 'example', 'name': 'Old name'},
+           'translation_type': 'sub', 'episode': '0'}
+    assert history.refresh_history_entry_provider_catalog(row, enrich=False)
+    assert calls == [('https://example.test/title', {'Accept': 'application/json'})]
+    assert row['show']['name'] == 'Fresh name'
+    assert provider._fetch == original_fetch

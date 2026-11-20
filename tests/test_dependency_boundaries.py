@@ -201,17 +201,6 @@ def test_catalog_browsing_does_not_require_playback_libraries(monkeypatch, provi
     importer.assert_not_called()
 
 
-def test_senshi_direct_sources_do_not_require_remote_transport_or_hls_parser(monkeypatch):
-    from media_cli.providers.senshi import Senshi
-    from media_cli.services import catalog
-
-    module = requirements()
-    monkeypatch.setattr(module.importlib, "import_module", Mock(side_effect=AssertionError("Unused import")))
-    provider = Senshi()
-    monkeypatch.setattr(provider, "_fetch_json", lambda *args: [{"url": "https://cdn1.anidap.biz/token/master.m3u8", "status": "HardSub"}])
-    monkeypatch.setattr(catalog, "get_provider", lambda *args: provider)
-    sources = catalog.get_episode_data("123", "1", provider_id="senshi")
-    assert len(sources["episode"]["sourceUrls"]) == 1
 
 
 def test_anipm_adaptive_fallback_survives_missing_quality_parser(monkeypatch):
@@ -227,38 +216,3 @@ def test_anipm_adaptive_fallback_survives_missing_quality_parser(monkeypatch):
     result = collect_mirrors(base, "sub", {}, resolve_channel=lambda *args: {},
                              fetch_playlist=lambda *args, **kwargs: "#EXTM3U\n")
     assert result["episode"]["sourceUrls"][0]["streamUrl"] == "https://cdn.example/master.m3u8"
-
-
-@pytest.mark.parametrize("has_direct", [False, True])
-def test_senshi_missing_remote_dependency_preserves_other_available_sources(monkeypatch, has_direct):
-    from media_cli.core.api import ProviderDependencyError
-    from media_cli.providers.senshi import Senshi
-
-    module = requirements()
-    monkeypatch.setattr(module.importlib, "import_module", Mock(side_effect=ImportError("unavailable")))
-    provider = Senshi()
-    embeds = [{"remote_source_id": "111", "status": "HardSub"}]
-    if has_direct:
-        embeds.append({"url": "https://cdn1.anidap.biz/token/master.m3u8", "status": "HardSub"})
-    monkeypatch.setattr(provider, "_fetch_json", lambda *args: embeds)
-    remote = Mock(side_effect=AssertionError("Missing library checked before remote lookup"))
-    monkeypatch.setattr(provider, "_resolve_remote_sources", remote)
-    if has_direct:
-        result = provider.episode_sources("123", "1", "sub")
-        assert len(result["episode"]["sourceUrls"]) == 1
-    else:
-        with pytest.raises(ProviderDependencyError, match="curl-cffi"):
-            provider.episode_sources("123", "1", "sub")
-    remote.assert_not_called()
-
-
-@pytest.mark.parametrize("provider,operation,package", [
-    ("senshi", "remote_sources", "curl-cffi"),
-])
-def test_required_stream_operations_report_missing_backend(monkeypatch, provider, operation, package):
-    from media_cli.core.api import ProviderDependencyError
-
-    module = requirements()
-    monkeypatch.setattr(module.importlib, "import_module", Mock(side_effect=ImportError("unavailable")))
-    with pytest.raises(ProviderDependencyError, match=package):
-        module.require_provider_operation(provider, operation)

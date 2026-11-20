@@ -41,33 +41,6 @@ def run_open(monkeypatch, saved_provider, configured):
     return match
 
 
-def test_saved_senshi_match_opens_details_with_native_identity(monkeypatch):
-    from media_cli.core import storage
-    from media_cli.domain import matching
-    from media_cli.providers.senshi import Senshi
-    from media_cli.services import catalog
-
-    saved = {'_provider': 'senshi', '_id': '52034', 'match_source': 'id'}
-    monkeypatch.setattr(anilist.app_core, 'get_al_match', lambda *a: saved)
-    monkeypatch.setattr(storage, 'get_al_match', lambda *a: saved)
-    monkeypatch.setattr(anilist.app_core, 'match_anilist_show_to_provider', matching.match_anilist_show_to_provider)
-    monkeypatch.setattr(anilist.app_core, 'with_loading', lambda message, fn, *a, **kw: fn(*a, **kw))
-    monkeypatch.setattr(catalog, 'require_provider_operation', lambda *a: None)
-    monkeypatch.setattr(catalog, 'get_provider', lambda key, *a: Senshi())
-    catalogue = Mock(return_value=['1'])
-    monkeypatch.setattr(anilist.app_core, 'load_episode_ids_for_selection', catalogue)
-    ui, ms = SimpleNamespace(), SimpleNamespace()
-    source = {'_id': '150672', 'name': 'Example', 'malId': 52034}
-    result = anilist._open_anilist_show_from_picker(
-        SimpleNamespace(), ui, ms, SimpleNamespace(provider=None, episode=None), 'sub', source,
-        'ANILIST_SEARCH', {'provider': 'anipm'},
-    )
-    assert result == 'DETAILS'
-    assert ms.show_id == '52034'
-    assert ui.ui_show_ctx['_provider'] == 'senshi'
-    assert ui.ui_show_ctx['_provider_id'] == '52034'
-    assert int(ui.ui_show_ctx['malId']) == 52034
-    assert catalogue.call_args.args[0]['_provider'] == 'senshi'
 
 
 def test_invalid_match_opens_unlinked_details_instead_of_crashing(monkeypatch):

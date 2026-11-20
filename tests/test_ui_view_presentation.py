@@ -479,3 +479,35 @@ def test_partial_inheritance_and_whole_blank_use_the_same_resolution_in_every_ou
     assert presentation.plain_details()[:3] == ["", "", ""]
     assert presentation.info() == "\n\n"
     assert strip_ansi(presentation.details()).split("\n")[:3] == ["", "", ""]
+
+
+def test_status_only_footer_skips_shortcut_binding_work(monkeypatch):
+    import media_cli.ui.view_presentation as module
+    presentation, session, _ = setup(message="Refreshing titles…",
+                                     message_kind=StatusKind.LOADING)
+    expected = replace(presentation._footer(item_id="a"), context=(), actions=())
+    def unexpected(*args, **kwargs):
+        raise AssertionError("Status-only repaint must not rebuild shortcut bindings")
+    monkeypatch.setattr(module, "tui_bindings", unexpected)
+    assert presentation._footer(item_id="a", status_only=True) == expected
+    assert "Refreshing titles" in strip_ansi(presentation.details("a", status_only=True))
+
+
+def test_status_only_footer_preserves_supplied_cover_policy_and_statuses():
+    supplied = Footer(statuses=(FooterStatus("Saved"),), context=("Provider",),
+                      actions=("enter=open",), include_cover_status=False)
+    presentation, _, _ = setup(footer=supplied)
+    assert presentation._footer(status_only=True) == replace(supplied, context=(), actions=())
+
+
+def test_status_only_header_reports_slow_substages(monkeypatch, caplog):
+    import logging
+    import media_cli.ui.view_presentation as module
+    presentation, _, _ = setup()
+    ticks = iter([0., .001, .002, .003, .080])
+    monkeypatch.setattr(module.time, "perf_counter", lambda: next(ticks))
+    with caplog.at_level(logging.DEBUG, logger=module.__name__):
+        presentation.details("a", status_only=True)
+    assert "Slow view header:" in caplog.text
+    assert "show=0.001s" in caplog.text
+    assert "footer=0.077s" in caplog.text

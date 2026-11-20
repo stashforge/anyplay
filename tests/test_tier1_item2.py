@@ -299,10 +299,12 @@ def test_downloads_progress_modal_updates_download_watch_list(monkeypatch, tmp_p
     ms._download_files = {"52": "/tmp/Shen Mu 3/Shen Mu 3 - Episode 52.mkv"}
     deleted = []
 
-    def choose_episode_52(flags, ui, title, opts, **kwargs):
-        return next(i for i, opt in enumerate(opts) if "Episode 52" in opt)
+    def choose_episode_52(flags, ui, *, read_view, **kwargs):
+        from media_cli.app.details_menu_controller import DetailsMenuResult
+        item = next(item for item in read_view().items if item.reference == "52")
+        return DetailsMenuResult("selected", item.reference)
 
-    monkeypatch.setattr("media_cli.app.details_modals.tui_pick", choose_episode_52)
+    monkeypatch.setattr("media_cli.app.details_menu_controller.run_details_menu", choose_episode_52)
     monkeypatch.setattr("media_cli.app.details_modals.app_core.ensure_episode_ids", lambda *a, **k: episode_ids)
     monkeypatch.setattr("media_cli.app.details_modals.app_core.build_info_panel", lambda *a, **k: None)
     monkeypatch.setattr("media_cli.app.details_modals.app_core.set_action_feedback", lambda *a, **k: None)

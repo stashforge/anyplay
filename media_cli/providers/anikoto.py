@@ -45,7 +45,11 @@ _KEY_3 = "736y1uTJpBLUX"
 
 def _native_skips(payload: dict, decoded=None) -> list[dict]:
     data = {**payload, **decoded} if isinstance(decoded, dict) else payload
-    return normalize_provider_skips({"op": data.get("intro"), "ed": data.get("outro")})
+    intervals = normalize_provider_skips({"op": data.get("intro"), "ed": data.get("outro")})
+    _logger.debug("Anikoto native skips: intro_present=%s outro_present=%s accepted=%r",
+                  isinstance(data.get("intro"), dict), isinstance(data.get("outro"), dict),
+                  [(row["type"], row["start"], row["end"]) for row in intervals])
+    return intervals
 
 
 def _slug_title_from_watch_href(href: str) -> str:
@@ -256,7 +260,7 @@ class AnikotoProvider:
             self.metadata = {}
         if not hasattr(self, 'domains'):
             self.domains = []
-        self.anikoto_url = "https://anikototv.to"
+        self._anikoto_url_override = None
         self.headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
         }
@@ -267,7 +271,24 @@ class AnikotoProvider:
         self._cache_scope = (self.anikoto_url, self.base_url, self._request_json)
 
     @property
+    def anikoto_url(self) -> str:
+        if self._anikoto_url_override:
+            return self._anikoto_url_override
+        # New registry separates public site domains from the embed service.
+        # Legacy/custom metadata may still use domains solely for MegaPlay.
+        if self.metadata.get("service_domains") and self.domains:
+            return self.domains[0].rstrip("/")
+        return "https://anikototv.bz"
+
+    @anikoto_url.setter
+    def anikoto_url(self, value: str) -> None:
+        self._anikoto_url_override = value
+
+    @property
     def base_url(self) -> str:
+        services = self.metadata.get("service_domains")
+        if services:
+            return services[0].rstrip("/")
         return self.domains[0] if getattr(self, 'domains', None) else "https://megaplay.buzz"
 
     @property
@@ -800,25 +821,25 @@ class AnikotoProvider:
                     s_param = "tcdn"
 
                 def _fetch_megaplay_sources(target_s: str) -> dict | None:
-                    api = f"https://megaplay.buzz/stream/getSourcesNew?id={d_id}"
+                    api = f"{self.base_url}/stream/getSourcesNew?id={d_id}"
                     if target_s:
                         api += f"&s={target_s}"
                     req = urllib.request.Request(api, headers={
                         "User-Agent": self.headers["User-Agent"],
                         "Referer": embed_url,
-                        "Origin": "https://megaplay.buzz",
+                        "Origin": self.base_url,
                         "X-Requested-With": "XMLHttpRequest"
                     })
                     try:
                         return json.loads(urllib.request.urlopen(req, timeout=6).read().decode('utf-8'))
                     except Exception:
-                        api_old = f"https://megaplay.buzz/stream/getSources?id={d_id}"
+                        api_old = f"{self.base_url}/stream/getSources?id={d_id}"
                         if target_s:
                             api_old += f"&s={target_s}"
                         req_old = urllib.request.Request(api_old, headers={
                             "User-Agent": self.headers["User-Agent"],
                             "Referer": embed_url,
-                            "Origin": "https://megaplay.buzz",
+                            "Origin": self.base_url,
                             "X-Requested-With": "XMLHttpRequest"
                         })
                         try:
@@ -1006,7 +1027,7 @@ class AnikotoProvider:
         source_urls = []
         seen_urls = set()
 
-        # 1. Multi-Server Extraction via anikototv.to
+        # 1. Multi-server extraction through the configured Anikoto website
         try:
             anime_id, watch_url, media = self._episode_identity(provider_id)
 

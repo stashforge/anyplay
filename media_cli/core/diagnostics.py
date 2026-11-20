@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import logging
+import atexit
+import queue
 import os
 from collections import deque
-from logging.handlers import RotatingFileHandler
+from logging.handlers import RotatingFileHandler, QueueHandler, QueueListener
 from typing import Iterable
 
 from ..state import paths
@@ -14,7 +16,8 @@ DEFAULT_LOG_MAX_BYTES = 1_048_576
 DEFAULT_LOG_BACKUP_COUNT = 5
 
 _HANDLER_NAME = "anyplay-file-diagnostics"
-_file_handler: RotatingFileHandler | None = None
+_file_handler: QueueHandler | None = None
+_file_listener: QueueListener | None = None
 _previous_root_level: int | None = None
 
 
@@ -38,7 +41,7 @@ def configure_file_logging(
     Normal mode records warnings and errors. Debug mode records debug and above.
     The returned path is the primary log file.
     """
-    global _file_handler, _previous_root_level
+    global _file_handler, _file_listener, _previous_root_level
 
     log_path = get_log_paths()["anyplay"]
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
@@ -47,6 +50,11 @@ def configure_file_logging(
     if _previous_root_level is None:
         _previous_root_level = root.level
 
+    if _file_listener is not None:
+        _file_listener.stop()
+        for sink in _file_listener.handlers:
+            sink.close()
+        _file_listener = None
     if _file_handler is not None:
         root.removeHandler(_file_handler)
         try:
@@ -68,18 +76,29 @@ def configure_file_logging(
         "%(asctime)s.%(msecs)03d %(levelname)s %(name)s %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     ))
-    root.addHandler(handler)
+    pending = queue.Queue()
+    queued = QueueHandler(pending)
+    queued.name = _HANDLER_NAME
+    queued.setLevel(level)
+    _file_listener = QueueListener(pending, handler, respect_handler_level=True)
+    _file_listener.start()
+    root.addHandler(queued)
     if root.level > level:
         root.setLevel(level)
-    _file_handler = handler
+    _file_handler = queued
     return log_path
 
 
 def reset_file_logging_for_tests() -> None:
     """Remove the Anyplay rotating handler and restore root logging state."""
-    global _file_handler, _previous_root_level
+    global _file_handler, _file_listener, _previous_root_level
 
     root = logging.getLogger()
+    if _file_listener is not None:
+        _file_listener.stop()
+        for sink in _file_listener.handlers:
+            sink.close()
+        _file_listener = None
     if _file_handler is not None:
         root.removeHandler(_file_handler)
         try:
@@ -90,6 +109,15 @@ def reset_file_logging_for_tests() -> None:
     if _previous_root_level is not None:
         root.setLevel(_previous_root_level)
         _previous_root_level = None
+
+
+def flush_file_logging() -> None:
+    """Wait for queued records only when explicitly reading diagnostics, never painting UI."""
+    if _file_listener is not None:
+        _file_listener.queue.join()
+
+
+atexit.register(reset_file_logging_for_tests)
 
 
 def tail_file(path: str, lines: int = 50) -> list[str]:

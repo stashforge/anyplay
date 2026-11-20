@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from .viewport import content_size as _content_size
 from typing import Any, Callable
 
 from ..core.terminal import truncate_display
@@ -179,7 +180,7 @@ def manual_match_input_header(
 
     def _hdr(si: int) -> str:
         try:
-            w = os.get_terminal_size().columns
+            w = _content_size().columns
         except OSError:
             w = 80
         if error:
@@ -194,7 +195,7 @@ def manual_match_input_header(
 def manual_anilist_input_header(show: dict[str, Any], error: str = ""):
     def _hdr(si: int) -> str:
         try:
-            w = os.get_terminal_size().columns
+            w = _content_size().columns
         except OSError:
             w = 80
         if error:
@@ -241,7 +242,7 @@ def select_provider_for_match(
     curr_name = provider_display_name(current_key)
     def _hdr(idx: int) -> str:
         try:
-            w = os.get_terminal_size().columns
+            w = _content_size().columns
         except OSError:
             w = 80
 
@@ -295,7 +296,7 @@ def confirm_auto_match(
 
     def _hdr(idx: int) -> str:
         try:
-            w = os.get_terminal_size().columns
+            w = _content_size().columns
         except OSError:
             w = 80
 
@@ -363,7 +364,7 @@ def confirm_auto_anilist_match(
 
     def _hdr(idx: int) -> str:
         try:
-            w = os.get_terminal_size().columns
+            w = _content_size().columns
         except OSError:
             w = 80
 
@@ -412,7 +413,7 @@ def no_match_prompt(
 
     def _hdr(idx: int) -> str:
         try:
-            w = os.get_terminal_size().columns
+            w = _content_size().columns
         except OSError:
             w = 80
 

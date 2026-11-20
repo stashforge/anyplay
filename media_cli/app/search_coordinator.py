@@ -117,6 +117,23 @@ def make_provider_oneshot_search(
         nonlocal loading, enriching, results, error
         try:
             shows = None
+            if provider_id == "torrent":
+                from ..providers import get_provider
+                from ..services.http import request_json
+                def publish_torrents(records):
+                    nonlocal search_message
+                    with publication_lock:
+                        if search_cancel.is_set():
+                            return
+                        results[:] = records
+                        done = len(records[0].get("_torrent_sources", {})) if records else 0
+                        search_message = f"Searching torrent indexes… {done}/3 checked"
+                records = get_provider(provider_id, request_json).search(query, ttype, progress=publish_torrents)
+                publish_torrents(records)
+                with publication_lock:
+                    if not search_cancel.is_set():
+                        _provider_search_cache[cache_key] = list(records)
+                return
             al_shows = None
 
             def _fetch_aa():

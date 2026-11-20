@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 from math import isfinite
+from .animethemes_filter_data import SONG_FIELDS, song_filter_values
 
 from ..ui.setting_control import ChoiceSetting, toggle_setting
 from ..ui.styled_text import StyledText, TextRun
@@ -139,14 +140,14 @@ class SongMenuController:
         label = song["label"]
         if available:
             label = StyledText((TextRun(label, "episode.label"), TextRun("  \u2714", "episode.downloaded")))
-        return ViewItem(f"song:{index}", label, details=_details(song), reference=index,
+        return ViewItem(f"song:{index}", label, details=_details(song), reference=index, filter_values=song_filter_values(song),
                         hint="downloaded" if available else "",
                         image=_image(song, f"{self.root_id}:song:{index}"))
 
     def songs_view(self):
         return ViewSpec(
             f"{self.root_id}:songs", "Select song",
-            tuple(self._song_item(index) for index in range(len(self.songs))),
+            tuple(self._song_item(index) for index in range(len(self.songs))), filter_schema=SONG_FIELDS,
             details=DetailLines(Blank, Blank, Blank), context=("AnimeThemes",), actions=_ACTIONS,
         )
 

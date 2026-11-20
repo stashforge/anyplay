@@ -37,6 +37,8 @@ def _episode_labels_for(show: dict, ttype: str) -> dict:
 def _display_episode_label(show: dict, episode_id, ttype: str) -> str:
     labels = _episode_labels_for(show, ttype)
     raw = str(labels.get(str(episode_id)) or episode_id)
+    if show.get("_torrent") or show.get("_provider") == "torrent":
+        return raw
     from media_cli.domain.episodes import resolve_dual_episode_label
     dual = resolve_dual_episode_label(show, raw)
     if dual:
@@ -399,21 +401,7 @@ def handle_episode_state(
                     if wc == clean or (clean_eid_num and wc == clean_eid_num) or (sec and sec == ws):
                         return True
 
-        local_p = progress_snapshot
-        al_p = show.get("_anilist_progress")
-        eff_p = None
-        if local_p is not None:
-            try:
-                eff_p = float(str(local_p))
-            except (ValueError, TypeError):
-                pass
-        if al_p is not None:
-            try:
-                al_val = float(str(al_p))
-                if eff_p is None or al_val > eff_p:
-                    eff_p = al_val
-            except (ValueError, TypeError):
-                pass
+        eff_p = progress_snapshot
 
         if eff_p is not None and eff_p > 0:
             if ep_entry and ep_entry.get("number", 0.0) > 0:
@@ -453,9 +441,13 @@ def handle_episode_state(
                 watched_snapshot = tuple((db.get("shows", {}).get(folder_name) or {}).get("watched_episodes") or ())
             except Exception:
                 pass
-        progress_snapshot = show.get("_local_progress")
-        if progress_snapshot is None:
-            progress_snapshot = app_core.get_local_progress(show, ttype)
+        from ..domain.metadata import resolved_watched_progress
+        progress_show = show
+        if show.get("_local_progress") is None:
+            progress_show = dict(show, _local_progress=app_core.get_local_progress(show, ttype))
+        progress_snapshot = resolved_watched_progress(
+            progress_show, local_only=bool(getattr(ms, "_is_downloads", False)), ttype=ttype,
+        )
         return tuple(_build_ep_option(i) for i in display_order)
 
     if len(display_order) > 80:
@@ -572,15 +564,33 @@ def handle_episode_state(
             feedback=app_core.get_active_feedback(show), show_cover=show_cover,
         )
 
+    episode_presentation = None
+    if getattr(ms, "_is_downloads", False):
+        from ..ui.library_info import library_info_lines
+        def episode_shortcuts(index):
+            downloaded = 0 <= index < len(ep_opts) and ep_opts[index].downloaded
+            base = (("enter", "play" if downloaded else "download"), ("↑↓", "move"), ("/", "filter"))
+            if downloaded:
+                base += (("del", "delete"),)
+            return base + (("^R", "flip"), ("esc", "back"), ("?", "help"))
+        episode_presentation = {
+            "layout": cfg.get("tui_layout", "bottom"), "badge": provider_label(show),
+            "screen_title": "Downloads · Episodes", "summary_noun": "episodes",
+            "placeholder": "Filter episodes…", "empty": "No matching episodes",
+            "info_fn": lambda _index, width: library_info_lines(show, ttype, width),
+            "shortcuts_fn": episode_shortcuts,
+        }
+
     def _confirm_delete(reference):
         index = next((i for i, option in enumerate(ep_opts) if option.episode_id == reference), None)
         if index is None or not _can_delete_ep(index):
             return
-        from ..state.theme import APPLICATION_THEME
+        from ..state.theme import APPLICATION_THEME, MINT_SCREEN_THEME
         view = _episode_view()
         if confirm_view_action(
             flags, ui, view, item_id=view.items[index].id,
-            question=_ep_delete_prompt(index), theme=APPLICATION_THEME,
+            question=_ep_delete_prompt(index), theme=MINT_SCREEN_THEME if episode_presentation else APPLICATION_THEME,
+            presentation=episode_presentation,
         ):
             _delete_ep_file(index)
 
@@ -594,6 +604,7 @@ def handle_episode_state(
                 information=lambda: app_core.make_single_show_info_fn(show, ui)(0),
                 action_handlers={"flip": _ep_reverse_fn, "delete": _confirm_delete},
                 initial_selected_id=f"episode:{ttype}:{ep_opts[init_sel].episode_id}",
+                presentation=episode_presentation,
             )
             if outcome.kind != "selected":
                 return "QUIT" if outcome.kind == "quit" else ui.ep_prev_state or "DETAILS"

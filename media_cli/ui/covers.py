@@ -2,6 +2,11 @@
 
 import os
 import re
+import subprocess
+import shutil
+import tempfile
+import threading
+from collections import OrderedDict
 import urllib.error
 import urllib.request
 
@@ -43,17 +48,136 @@ def enforce_cache_limits(
         pass
 
 
-def chafa_cover_command(path):
+def chafa_cover_command(path, *, width=POSTER_WIDTH, height=POSTER_HEIGHT):
     return [
         "chafa",
         "--probe=off",
         "--relative=on",
         "--animate=off",
-        f"--size={POSTER_WIDTH}x{POSTER_HEIGHT}",
+        f"--size={width}x{height}",
         "--stretch",
         "--colors=full",
         path,
     ]
+
+
+_compact_covers = {}
+_info_cover_shape = "portrait"
+INFO_COVER_SIZES = {"portrait": (8, 5), "square": (10, 5)}
+
+
+def configure_info_cover(shape):
+    global _info_cover_shape
+    shape = str(shape).strip().lower()
+    _info_cover_shape = shape if shape in INFO_COVER_SIZES else "portrait"
+
+
+def info_cover_size():
+    return INFO_COVER_SIZES[_info_cover_shape]
+
+
+def _render_compact(path, *, timeout, shape=None):
+    shape = shape or _info_cover_shape
+    width, height = INFO_COVER_SIZES[shape]
+    command = chafa_cover_command(path, width=width, height=height)
+    if shape == "portrait":
+        return subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+    # Crop cached image bytes in the worker; no extra cover download is needed.
+    with tempfile.TemporaryDirectory(prefix="anyplay-cover-") as directory:
+        cropped = os.path.join(directory, "crop.png")
+        pixels = width * 50
+        pixel_height = height * 100
+        if shutil.which("magick"):
+            crop_command = ["magick", path, "-resize", f"{pixels}x{pixel_height}^", "-gravity", "center",
+                            "-extent", f"{pixels}x{pixel_height}", cropped]
+        elif shutil.which("ffmpeg"):
+            crop_command = ["ffmpeg", "-v", "error", "-y", "-i", path, "-vf",
+                            f"scale={pixels}:{pixel_height}:force_original_aspect_ratio=increase,crop={pixels}:{pixel_height}",
+                            "-frames:v", "1", cropped]
+        else:
+            crop_command = None
+        if crop_command:
+            crop = subprocess.run(crop_command, capture_output=True, timeout=timeout)
+            if crop.returncode == 0:
+                command[-1] = cropped
+            else:
+                command.remove("--stretch")
+        else:
+            command.remove("--stretch")
+        return subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+
+
+_rendered_covers = OrderedDict()
+_rendered_cover_lock = threading.Lock()
+
+
+def render_cover_variants(path, *, timeout=5):
+    """Render both layouts in the existing cover worker, never on UI navigation."""
+    key = None
+    try:
+        stat = os.stat(path)
+        key = (os.path.abspath(path), stat.st_mtime_ns, stat.st_size, _info_cover_shape,
+               os.environ.get('TERM'), os.environ.get('TERM_PROGRAM'))
+        with _rendered_cover_lock:
+            if key in _rendered_covers:
+                result, compact = _rendered_covers[key]
+                _rendered_covers.move_to_end(key)
+                _compact_covers[result.stdout.rstrip('\n')] = compact
+                return result
+    except OSError:
+        pass
+    result = subprocess.run(chafa_cover_command(path), capture_output=True, text=True, timeout=timeout)
+    if result.returncode == 0 and result.stdout.strip():
+        raw = result.stdout.rstrip("\n")
+        try:
+            compact = _render_compact(path, timeout=timeout)
+            if compact.returncode == 0 and compact.stdout.strip():
+                _compact_covers[raw] = compact.stdout.rstrip("\n")
+                if key is not None:
+                    with _rendered_cover_lock:
+                        _rendered_covers[key] = (result, compact.stdout.rstrip('\n'))
+                        while len(_rendered_covers) > 32:
+                            _rendered_covers.popitem(last=False)
+                while len(_compact_covers) > 128:
+                    _compact_covers.pop(next(iter(_compact_covers)))
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return result
+
+
+def compact_cover(raw):
+    return _compact_covers.get(raw, "")
+
+
+_placeholder_renders = {}
+_placeholder_pending = set()
+_placeholder_lock = threading.Lock()
+
+
+def placeholder_cover():
+    """Render the bundled asset once per shape/session, off the UI thread."""
+    shape = _info_cover_shape
+    with _placeholder_lock:
+        if shape in _placeholder_renders:
+            return _placeholder_renders[shape]
+        if shape in _placeholder_pending:
+            return ""
+        _placeholder_pending.add(shape)
+    def render():
+        raw = ""
+        try:
+            result = _render_compact(os.path.join(os.path.dirname(__file__), 'assets', 'no-cover.png'),
+                                     timeout=5, shape=shape)
+            if result.returncode == 0:
+                raw = result.stdout.rstrip('\n')
+        except (OSError, subprocess.SubprocessError):
+            pass
+        finally:
+            with _placeholder_lock:
+                _placeholder_renders[shape] = raw
+                _placeholder_pending.discard(shape)
+    threading.Thread(target=render, daemon=True).start()
+    return ""
 
 
 def poster_uses_native_protocol(raw):

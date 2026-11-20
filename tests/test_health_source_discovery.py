@@ -5,19 +5,8 @@ import json
 import pytest
 
 from media_cli.health import catalogue
-from media_cli.providers.senshi import Senshi
 
 
-def test_senshi_discovery_uses_embeds_without_extracting(monkeypatch):
-    provider = Senshi()
-    monkeypatch.setattr(provider, '_fetch_json', lambda url: [
-        {'status': 'sub', 'remote_source_id': 'remote', 'server2': 'https://embed.test/s'},
-        {'status': 'dub', 'serverFM': 'https://embed.test/d'},
-    ])
-    monkeypatch.setattr(provider, '_extract_embed_sources', lambda *args, **kwargs: pytest.fail('Discovery must not extract'))
-    assert hasattr(provider, 'discover_episode_sources'), 'Provider needs a discovery-only boundary'
-    assert provider.discover_episode_sources('20', '1', 'sub') == ['Vidcloud', 'StreamNin']
-    assert provider.discover_episode_sources('20', '1', 'dub') == ['FileMoon']
 
 
 def search(pid, title):
@@ -106,15 +95,3 @@ def test_no_passed_catalogues_reports_reduced_source_coverage():
     stages = report['providers'][0]['stages']
     assert any(s['name'] == 'source_coverage' and '0/3' in s['reason'] for s in stages)
     assert all(s['status'] == 'not_verified' for s in stages if s['name'] == 'source_discovery')
-
-
-def test_discovery_retains_direct_routes_but_rejects_unexpected_response(monkeypatch):
-    provider = Senshi()
-    monkeypatch.setattr(provider, '_fetch_json', lambda *args: [
-        {'status': 'sub', 'embedUrl': 'https://embed.test/item'},
-        {'status': 'sub', 'remoteSourceId': 'opaque'},
-        {'status': 'sub', 'irrelevant': True},
-    ])
-    assert provider.discover_episode_sources('20', '1') == ['Direct link', 'Vidcloud']
-    monkeypatch.setattr(provider, '_fetch_json', lambda *args: {'error': 'blocked'})
-    assert provider.discover_episode_sources('20', '1') == []

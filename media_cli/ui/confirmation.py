@@ -70,6 +70,7 @@ def confirm_view_action(
     item_id: str,
     question: str,
     theme: Theme = DEFAULT_THEME,
+    presentation: dict | None = None,
     input_fn: Callable[[str], str] = input,
 ) -> bool:
     """Present immutable shared view data with the existing default-No decision."""
@@ -87,6 +88,21 @@ def confirm_view_action(
             flags, ui, view.prompt, rows, selected_index=selected_index, question=question, input_fn=input_fn,
         )
 
+    if presentation is None:
+        from ..state.theme import MINT_SCREEN_THEME
+        from .detail_panel import render_detail_lines
+        from .view_model import resolve_details
+        theme = MINT_SCREEN_THEME
+        def details(index, width):
+            item = view.items[index] if 0 <= index < len(view.items) else None
+            fields = resolve_details(view.details, item.details if item else None)
+            return render_detail_lines(primary=fields.title, secondary=fields.secondary,
+                                       details=fields.metadata, width=width, theme=theme)
+        from .screen_chrome import list_header_context
+        title, badge, _context = list_header_context(view.screen_title or view.prompt, view.context, badge=view.screen_badge)
+        presentation = {"screen_title": title, "badge": badge, "layout": getattr(ui, "tui_layout", "bottom"),
+                        "info_fn": details, "shortcuts_fn": lambda _index: ()}
+
     from .view_picker import active_view_session, run_view_session
     from .view_session import ExitSession, UiEvent, ViewSession
 
@@ -99,6 +115,10 @@ def confirm_view_action(
 
     def pick(flags: Any, ui: Any, prompt: str, options: Sequence[str], **kwargs: Any) -> int:
         kwargs["auto_select_single_when_done"] = False
+        if presentation is not None:
+            from .action_picker import action_picker
+            return action_picker(flags, ui, prompt, options,
+                                 presentation=dict(presentation, confirmation_question=question), **kwargs)
         decision = confirm_picker_action(
             flags, ui, prompt, options, selected_index=selected_index,
             question=question, input_fn=input_fn, **kwargs,

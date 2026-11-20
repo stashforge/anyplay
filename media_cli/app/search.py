@@ -11,6 +11,8 @@ import time
 from concurrent.futures import as_completed
 from copy import deepcopy
 from dataclasses import replace
+from .loading_messages import catalog_loading_message
+
 from ..core.workers import DaemonExecutor
 from typing import TYPE_CHECKING, Any
 
@@ -79,6 +81,52 @@ def prompt_search_query(flags, ui, *, provider_name, search_title="Search Anime"
     )
 
 
+def prompt_search_home(flags, ui, args, cfg):
+    """Keep the query while visiting the session provider picker."""
+    from ..providers import available_providers, get_provider_registry, provider_display_name
+    from ..ui.search_home import SearchHomeState, run_search_home
+
+    state = SearchHomeState(history=tuple([] if flags.incognito_mode else app_core.load_search_history()))
+    while True:
+        requested = getattr(args, "provider", None) or cfg.get("provider") or app_core._DEFAULT_PROVIDER_ID
+        provider = requested if requested in ("animethemes", "anilist") else app_core.provider_key(requested)
+        provider_name = {"animethemes": "AnimeThemes", "anilist": "AniList"}.get(provider) or provider_display_name(provider)
+        provider_type = "music" if provider == "animethemes" else str(get_provider_registry().get(provider, {}).get("type") or "anime").lower()
+        state.menu = (("lists", "Lists", "Browse AniList library"), ("airing", "Airing", "Upcoming episodes"), ("providers", "Providers", "AniList")) if provider == "anilist" else SearchHomeState().menu
+        action = call_on_ui_thread(lambda: run_search_home(state, provider_name, provider_type=provider_type, image_config=cfg, message=ui.search_error or ("INCOGNITO · History is paused" if flags.incognito_mode else "")))
+        if action is None:
+            return prompt_search_query(flags, ui, provider_name=provider_name)
+        if action == "quit":
+            return -2
+        if action == "downloads":
+            return -7
+        if action == "history":
+            return -8
+        if action == "lists":
+            return -9
+        if action == "airing":
+            return -10
+        if action == "search":
+            return state.query.strip()
+        keys = list(available_providers())
+        keys.extend(key for key in ("animethemes", "anilist") if key not in keys)
+        from ..ui.provider_selection import run_provider_selection
+        entries = [(key, (dict(get_provider_registry().get(key, {}), name="AnimeThemes", type="music")
+                          if key == "animethemes" else {"name": "AniList", "type": "tracker", "description": "Search anime and browse library lists.", "account_linked": bool(cfg.get("anilist_token"))}
+                          if key == "anilist" else dict(get_provider_registry().get(key, {}), name=provider_display_name(key)))) for key in keys]
+        chosen = call_on_ui_thread(lambda: run_provider_selection(entries, provider, layout=cfg.get("tui_layout", "bottom")))
+        if chosen is None:
+            labels = [({"animethemes": "AnimeThemes", "anilist": "AniList"}.get(key) or provider_display_name(key)) + (" ✓" if key == provider else "") for key in keys]
+            chosen = tui_pick(flags, ui, "Select provider", labels)
+        if chosen == -2:
+            return -2
+        if isinstance(chosen, int) and 0 <= chosen < len(keys):
+            if keys[chosen] == "anilist" and provider not in ("anilist", "animethemes"):
+                args._anilist_stream_provider = provider
+            args.provider = keys[chosen]
+        state.focus = 0
+
+
 # ---------------------------------------------------------------------------
 # HISTORY
 # ---------------------------------------------------------------------------
@@ -98,6 +146,9 @@ def handle_history_state(
         app_core.warn("Watch history is empty.")
         return "QUIT"
     diagnostics = HistoryDiagnostics()
+    from .history_activity import history_activity
+    from ..core.storage import load_prefs, load_downloads_db
+    activity = history_activity(hist, load_prefs(), load_downloads_db(), now=time.time())
 
     history_loading = BackgroundLoadingStatus(
         LoadingTaskSpec(
@@ -215,6 +266,10 @@ def handle_history_state(
         nonlocal _history_open_time
         _history_open_time = time.time()
         entries = list(entries or [])
+        # An explicit single-title request is separate from bulk/automatic checks.
+        if not (force and status_key == "SINGLE"):
+            entries = [entry for entry in entries
+                       if history_domain.history_entry_supports_background_refresh(entry)]
         if not force:
             entries = [
                 entry for entry in entries
@@ -237,6 +292,7 @@ def handle_history_state(
 
             def refresh_provider(entry):
                 before = deepcopy(entry)
+                began, cpu_began = time.perf_counter(), time.thread_time()
                 try:
                     return app_core.refresh_history_entry_provider_catalog(entry)
                 except Exception:
@@ -244,8 +300,17 @@ def handle_history_state(
                     entry.clear()
                     entry.update(before)
                     return False
+                finally:
+                    from ..domain.titles import title_provider_key
+                    logging.getLogger(__name__).debug(
+                        "History provider work: provider=%s elapsed_ms=%.1f cpu_ms=%.1f",
+                        title_provider_key(entry.get("show", {})),
+                        (time.perf_counter()-began)*1000,
+                        (time.thread_time()-cpu_began)*1000)
 
-            with DaemonExecutor(max_workers=4, max_pending=max(4, len(provider_entries) + 1)) as executor:
+            # Keep Python-heavy provider parsing from competing across four threads
+            # while the owner handles navigation. Other worker pools are independent.
+            with DaemonExecutor(max_workers=1, max_pending=max(1, len(provider_entries))) as executor:
                 futures = [executor.submit(refresh_provider, entry) for entry in provider_entries]
                 for future in as_completed(futures):
                     changed = bool(future.result()) or changed
@@ -368,6 +433,7 @@ def handle_history_state(
                     filtered_hist, mode=history_mode, total_count=len(hist),
                     incognito=flags.incognito_mode, now=_history_open_time,
                     show_cover=flags.show_image,
+                    activity=activity,
                 )
         return (replace(history_base_view, footer_statuses=(status,))
                 if status is not None else history_base_view)
@@ -421,6 +487,7 @@ def handle_history_state(
     if outcome.kind == "quit":
         return "QUIT"
     if outcome.kind == "back":
+        ms.query_str = ""
         return "SEARCH"
     hidx = next((index for index, entry in enumerate(filtered_hist)
                  if HistoryEntryReference.from_entry(entry) == outcome.reference), -1)
@@ -469,10 +536,35 @@ def handle_search_state(
     args: Any,
     ttype: str,
     resolve_tracking_fn,) -> str:
+    ms._is_downloads = False
     ui.ui_show_ctx = {}
     ms.ep_cache_key = None
     ms.ep_cache_data = None
     app_core._clear_poster_downloads()
+    if not ms.query_str and not flags.plain_mode and sys.stdin.isatty():
+        res = prompt_search_home(flags, ui, args, cfg)
+        ui.search_error = ""
+        if res == -2:
+            return "QUIT"
+        if res == -7:
+            ui.downloads_parent = "SEARCH"
+            return "DOWNLOADS"
+        if res == -8:
+            return "HISTORY"
+        if res == -9:
+            return "ANILIST_MENU"
+        if res == -10:
+            ms.anilist_airing_parent = "SEARCH"
+            return "ANILIST_AIRING"
+        if not res:
+            return "SEARCH"
+        ms.query_str = str(res).strip()
+        ms.just_searched = True
+    if getattr(args, "provider", None) == "anilist":
+        ms.anilist_search_parent = "SEARCH"
+        return "ANILIST_SEARCH"
+    if getattr(args, "provider", None) == "animethemes":
+        return "ANIMETHEMES_SEARCH"
     provider_id = app_core.provider_key(
         getattr(args, "provider", None) or cfg.get("provider") or app_core._DEFAULT_PROVIDER_ID
     )
@@ -550,7 +642,7 @@ def handle_search_state(
         from ..ui.transition import PreparationCancelled
         try:
             prepared = app_core.with_loading(
-                f"Loading {ttype.upper()} episodes…", prepare_details_transition, s, ttype
+                catalog_loading_message(s, ttype), prepare_details_transition, s, ttype
             )
         except PreparationCancelled:
             return False
@@ -571,6 +663,7 @@ def handle_search_state(
         get_error=get_error, provider_id=provider_id, provider_name=provider_name,
         query=ms.query_str, ttype=ttype, prompt=search_title, auto_single=ms.just_searched,
         restore_position=not ms.just_searched,
+        presentation={"layout": cfg.get("tui_layout", "bottom")},
         badges=tuple(_session_badges(flags, args, search_context=True)), select=_on_select,
         information=lambda show: app_core.make_info_fn(lambda: [show], ui)(0),
     )

@@ -37,6 +37,7 @@ _REANIME_ANILIST_IDS = {20:20, 1:1, 1535:1535, 38000:101922, 40748:113415, 50265
 REANIME_SAMPLES = tuple({**sample, 'anilist_id': _REANIME_ANILIST_IDS[sample['mal_id']]} for sample in SENSHI_SAMPLES)
 ANIKOTO_SAMPLES = tuple(dict(sample) for sample in REANIME_SAMPLES)
 ANIMEPAHE_SAMPLES = tuple(dict(sample) for sample in SENSHI_SAMPLES)
+GOTAKU_SAMPLES = tuple(dict(sample) for sample in SENSHI_SAMPLES)
 ANIDB_SAMPLES = tuple(dict(sample) for sample in SENSHI_SAMPLES)
 ANIZONE_SAMPLES = tuple(dict(sample) for sample in SENSHI_SAMPLES)
 ANIMEGG_SAMPLES = tuple(dict(sample) for sample in SENSHI_SAMPLES)
@@ -49,7 +50,7 @@ MOVIE_SAMPLES = tuple({'title': title, 'year': year, 'native_id': 'movie:' + str
     ('Parasite',2019,496243), ('Dune',2021,438631), ('The Batman',2022,414906),
     ('Everything Everywhere All at Once',2022,545611), ('Oppenheimer',2023,872585),
     ('Dune: Part Two',2024,693134), ('Inside Out 2',2024,1022789)))
-HEALTH_SAMPLES = {'torrent': tuple({'title': s['title'], 'year': s['year']} for s in MOVIE_SAMPLES), 'animethemes': tuple(dict(s) for s in SENSHI_SAMPLES), 'movies': MOVIE_SAMPLES, 'animekhor': tuple(dict(sample) for sample in DONGHUA_SAMPLES), 'lucifer': tuple(dict(sample) for sample in DONGHUA_SAMPLES), 'animexin': DONGHUA_SAMPLES, 'animegg': ANIMEGG_SAMPLES, 'anizone': ANIZONE_SAMPLES, 'anidb': ANIDB_SAMPLES, 'animepahe': ANIMEPAHE_SAMPLES, 'anikoto': ANIKOTO_SAMPLES, 'senshi': SENSHI_SAMPLES, 'anipm': ANIPM_SAMPLES, 'reanime': REANIME_SAMPLES}
+HEALTH_SAMPLES = {'torrent': tuple({'title': s['title'], 'year': s['year']} for s in MOVIE_SAMPLES), 'animethemes': tuple(dict(s) for s in SENSHI_SAMPLES), 'movies': MOVIE_SAMPLES, 'animekhor': tuple(dict(sample) for sample in DONGHUA_SAMPLES), 'lucifer': tuple(dict(sample) for sample in DONGHUA_SAMPLES), 'animexin': DONGHUA_SAMPLES, 'animegg': ANIMEGG_SAMPLES, 'anizone': ANIZONE_SAMPLES, 'anidb': ANIDB_SAMPLES, 'animepahe': ANIMEPAHE_SAMPLES, 'anikoto': ANIKOTO_SAMPLES, 'senshi': SENSHI_SAMPLES, 'anipm': ANIPM_SAMPLES, 'reanime': REANIME_SAMPLES, 'gotaku': GOTAKU_SAMPLES}
 
 
 def age_group(year: int, current_year: int) -> str:

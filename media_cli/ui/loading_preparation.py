@@ -34,6 +34,8 @@ class LoadingPreparation:
         active: Callable[[], bool],
         bindings: Callable[[], ActionBindings],
         clock: Callable[[], float] = time.monotonic,
+        on_key: Callable[[str], bool] | None = None,
+        start_delay: float = 0.0,
     ) -> None:
         if spec.interaction is not LoadingInteraction.BLOCKING or spec.transition:
             raise ValueError("Preparation driver requires a blocking action, not a frame transition")
@@ -46,6 +48,8 @@ class LoadingPreparation:
         self._bindings = bindings
         self._cancelled = False
         self._used = False
+        self._custom_key = on_key
+        self._start_delay = max(0.0, start_delay)
 
     def update(self, message: MessageInput) -> None:
         """Safe worker callback; lifecycle state changes only on the UI pump."""
@@ -57,6 +61,8 @@ class LoadingPreparation:
 
     def _on_key(self, key: str) -> None:
         if not key:
+            return
+        if self._custom_key is not None and self._custom_key(key):
             return
         snapshot = self._snapshot()
         if snapshot is not None:
@@ -104,6 +110,15 @@ class LoadingPreparation:
             raise RuntimeError("Loading preparation can only be run once")
         self._used = True
         try:
+            # Keep input on the terminal owner while waiting for selection to settle.
+            # No worker/request exists yet, so skipped tabs cost no network work.
+            deadline = time.monotonic() + self._start_delay
+            while time.monotonic() < deadline:
+                self._tick()
+                if self._cancelled:
+                    raise PreparationCancelled()
+                self._paint()
+                time.sleep(min(0.02, max(0.0, deadline - time.monotonic())))
             result = run_preparation(
                 lambda: prepare(self.update), tick=self._tick,
                 cancelled=lambda: self._cancelled, status_cb=self.update,

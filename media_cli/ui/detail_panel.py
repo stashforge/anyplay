@@ -38,6 +38,9 @@ def render_detail_lines(
         bounded = truncate_display(sanitize_terminal_text(text), max(1, width - 1))
         return f"{theme.prefix(style)}{bounded}{theme.reset}"
 
+    if isinstance(details, StyledText) and any(role == "library.value" for role, _style in theme.extensions):
+        from .metadata_styles import metadata_content
+        details = metadata_content((run.text, run.role) for run in details.runs)
     return (
         line(primary, theme.primary),
         line(secondary, theme.secondary),

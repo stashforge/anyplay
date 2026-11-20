@@ -23,7 +23,7 @@ _ANSI_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
 COMMAND_NAMES = {
     "search", "download", "downloads", "anilist", "history", "continue",
-    "auth", "companion", "providers", "completion", "config", "health",
+    "auth", "companion", "providers", "completion", "config", "health", "theme",
 }
 
 COMPLETION_SHELLS = ("bash", "zsh", "fish")
@@ -54,28 +54,104 @@ class MinimalHelpFormatter(argparse.RawDescriptionHelpFormatter):
         super()._set_color(False)
         self._decolor = lambda value: _ANSI_RE.sub("", value)
 
+    def _paint(self, text, role):
+        if not self._minimal_color:
+            return text
+        colors = {
+            "help.heading": "\033[1;34m",
+            "help.option": "\033[1;32m",
+            "help.example": "\033[1;36m",
+            "help.program": "\033[1;35m",
+        }
+        return colors[role] + text + "\033[0m"
+
     def start_section(self, heading):
-        if self._minimal_color:
-            heading = f"\033[1;34m{heading}\033[0m"
-        super().start_section(heading)
+        heading = {"positional arguments": "Arguments", "arguments": "Arguments", "options": "Options", "Main commands": "Commands"}.get(heading, heading)
+        if heading.endswith(" options"):
+            heading = heading[:-8]
+        super().start_section(self._paint(heading, "help.heading"))
 
     def _format_action_invocation(self, action):
-        if not action.option_strings:
-            return super()._format_action_invocation(action)
-        return ", ".join(action.option_strings)
+        if action.option_strings:
+            return ', '.join(action.option_strings)
+        return super()._format_action_invocation(action)
+
+    def _format_action(self, action):
+        import textwrap
+        # Use the same description column for every section on this page.
+        position = 20 + max(0, self._current_indent - 2)
+        stacked = self._width - position < 32
+        if stacked:
+            position = self._current_indent + 4
+        width = max(8, self._width - position)
+        name = self._format_action_invocation(action)
+        available = max(8, (self._width - self._current_indent) if stacked else position - self._current_indent - 2)
+        names = textwrap.wrap(name, available, break_long_words=False, break_on_hyphens=False) or ['']
+        result = ''.join(' ' * self._current_indent + self._paint(part, 'help.option') + '\n' for part in names[:-1])
+        last = names[-1]
+        result += ' ' * self._current_indent + self._paint(last, 'help.option')
+        if not action.help:
+            result += '\n'
+        else:
+            description = self._expand_help(action)
+            if action.option_strings and action.nargs != 0:
+                if description and description[-1] not in '.!?':
+                    description += '.'
+                if action.choices is not None:
+                    description += " Values: " + ', '.join(str(value) for value in action.choices) + '.'
+                else:
+                    value = action.metavar or action.dest.upper()
+                    description += f" {'Optional value' if action.nargs == '?' else 'Value'}: {value}."
+            lines = self._split_lines(description, width)
+            if stacked or len(last) > available:
+                result += '\n'
+                result += ''.join(' ' * position + line + '\n' for line in lines)
+            elif lines:
+                result += ' ' * max(2, position - self._current_indent - len(last)) + lines[0] + '\n'
+                result += ''.join(' ' * position + line + '\n' for line in lines[1:])
+            else:
+                result += '\n'
+        for subaction in self._iter_indented_subactions(action):
+            result += self._format_action(subaction)
+        return result
+
+    def _format_usage(self, usage, actions, groups, prefix):
+        text = super()._format_usage(usage, actions, groups, prefix)
+        if self._minimal_color:
+            text = re.sub(r'^usage:', lambda _: self._paint('Usage:', 'help.heading'), text)
+            text = text.replace(self._prog, self._paint(self._prog, 'help.program'))
+        return text
 
     def _fill_text(self, text, width, indent):
+        import textwrap
         lines = []
-        for line in text.splitlines(keepends=True):
-            plain = line.rstrip("\r\n")
-            ending = line[len(plain):]
-            if (
-                self._minimal_color
-                and plain in ("Lists:", "Actions:", "Examples:", "Commands:")
-            ):
-                line = f"\033[1;34m{plain}\033[0m{ending}"
-            lines.append(indent + line)
-        return "".join(lines)
+        for line in text.splitlines():
+            plain = line.rstrip()
+            if plain in ("Lists:", "Actions:", "Examples:", "Commands:", "Quick start:"):
+                lines.append(indent + self._paint(plain, "help.heading"))
+            elif plain.lstrip().startswith(APP_NAME + ' '):
+                wrapped = textwrap.fill(plain, max(8, width), initial_indent=indent, subsequent_indent=indent + '    ')
+                lines.append(self._paint(wrapped, "help.example"))
+            elif plain.startswith('  '):
+                match = re.match(r'(\s*\S+)(\s{2,})(.*)', plain)
+                if match:
+                    label = match[1].strip()
+                    position = 20
+                    stacked = width - position < 32
+                    if stacked:
+                        lines.append(indent + '  ' + self._paint(label, 'help.option'))
+                        lines.append(textwrap.fill(match[3], max(8, width), initial_indent=indent + '      ', subsequent_indent=indent + '      '))
+                    else:
+                        parts = textwrap.wrap(match[3], max(8, width - position))
+                        lines.append(indent + '  ' + self._paint(label, 'help.option') + ' ' * max(2, position - 2 - len(label)) + (parts[0] if parts else ''))
+                        lines.extend(indent + ' ' * position + part for part in parts[1:])
+                else:
+                    lines.append(indent + plain)
+            elif plain:
+                lines.append(textwrap.fill(plain, max(8, width), initial_indent=indent, subsequent_indent=indent))
+            else:
+                lines.append('')
+        return '\n'.join(lines)
 
 class CommandHelpFormatter(MinimalHelpFormatter):
     def _format_action(self, action):
@@ -90,6 +166,8 @@ class CommandHelpFormatter(MinimalHelpFormatter):
         return text
 
 def _configure_help_parser(parser):
+    parser._positionals.title = "Arguments"
+    parser._optionals.title = "Options"
     if hasattr(parser, "color"):
         parser.color = False
     return parser
@@ -98,6 +176,20 @@ class CLIParser(argparse.ArgumentParser):
     def __init__(self, *args, **kwargs):
         kwargs.setdefault("allow_abbrev", False)
         super().__init__(*args, **kwargs)
+
+    def _parse_optional(self, arg_string):
+        # argparse otherwise treats -expanded as -e with value "xpanded".
+        # Reject misspelled long-option syntax before short-option expansion.
+        if (arg_string.startswith('-') and not arg_string.startswith('--')
+                and arg_string not in self._option_string_actions):
+            flag = arg_string.partition('=')[0]
+            short = self._option_string_actions.get(arg_string[:2])
+            attached_text = (short is not None and short.nargs != 0
+                             and len(arg_string) > 2 and arg_string[2] != '='
+                             and not re.fullmatch(r'[+-]?\d+(?:\.\d+)?', arg_string[2:]))
+            if '-' + flag in self._option_string_actions or attached_text:
+                self.error('unrecognized arguments: ' + arg_string)
+        return super()._parse_optional(arg_string)
 
     def error(self, message):
         if message.startswith("unrecognized arguments: "):

@@ -40,9 +40,11 @@ finish(dict(state=result,episode=ms.current_ep))
 def test_details_opens_while_catalog_is_blocked_and_blocks_playback_only(tmp_path):
     calls, gate = tmp_path/'calls', tmp_path/'release'
     with Terminal(tmp_path, script(gate,calls)) as terminal:
-        terminal.send_after(b'Select action', b'Mirrors\r')
+        terminal.send_after(b'Search \xc2\xb7 Details', b'/Mirrors\r')
         terminal.until(b'Episodes are still loading')
         assert calls.read_text() == '1'
+        os.write(terminal.master, b'\x1b')
+        time.sleep(.05)
         os.write(terminal.master, b'\x1b')
         assert terminal.result()['state'] == 'SEARCH'
 
@@ -60,9 +62,9 @@ def test_loading_footer_animates_with_configured_spinner(tmp_path):
 def test_ready_catalog_rebuilds_details_without_another_provider_fetch(tmp_path):
     calls, gate = tmp_path/'calls', tmp_path/'release'
     with Terminal(tmp_path, script(gate,calls)) as terminal:
-        terminal.until(b'Select action')
+        terminal.until(b'Search \xc2\xb7 Details')
         gate.touch()
-        terminal.send_after(b'Catalog ready', b'Play\r')
+        terminal.send_after(b'Catalog ready', b'/Play\r')
         assert terminal.result() == {'state':'PLAY','episode':'1'}
         assert calls.read_text() == '1'
 
@@ -72,16 +74,20 @@ def test_failed_catalog_survives_settings_return_and_retries_only_explicitly(tmp
     gate.touch()
     code = script(gate,calls).replace("snapshot.update(name=", "raise TimeoutError('Lookup failed')\n    snapshot.update(name=")
     with Terminal(tmp_path, code) as terminal:
-        terminal.send_after(b'Retry Episodes', b'Playback\r')
+        terminal.send_after(b'Retry Episodes', b'/Playback\r')
         terminal.send_after(b'Auto-Delete Buffer', b'\x1b')
-        terminal.until(b'Select action')
+        terminal.until(b'Search \xc2\xb7 Details')
         assert calls.read_text() == '1'
-        # Clear the restored Playback filter, then explicitly retry the catalog.
-        os.write(terminal.master, b'\x7f'*8 + b'Retry\r')
+        # Clear the restored filter, then explicitly filter to Retry Episodes.
+        os.write(terminal.master, b'\x1b')
+        time.sleep(.05)
+        os.write(terminal.master, b'/Retry\r')
         deadline = time.monotonic() + 3
         while calls.read_text() != '2' and time.monotonic() < deadline:
             time.sleep(.01)
         assert calls.read_text() == '2'
+        os.write(terminal.master, b'\x1b')
+        time.sleep(.05)
         os.write(terminal.master, b'\x1b')
         assert terminal.result()['state'] == 'SEARCH'
 
@@ -106,6 +112,6 @@ def test_explicit_refresh_survives_history_style_runtime_field_stripping(tmp_pat
     ).replace('episode=ms.current_ep)', 'episode=ms.current_ep,total=ms.total_eps)')
     with Terminal(tmp_path,code) as terminal:
         terminal.send_after(b'Catalog ready',b'\x12')
-        terminal.send_after(b'Refreshed catalog',b'Play\r')
+        terminal.send_after(b'Refreshed catalog',b'/Play\r')
         assert terminal.result() == {'state':'PLAY','episode':'1','total':3}
         assert calls.read_text() == '1'

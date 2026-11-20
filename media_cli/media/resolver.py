@@ -151,6 +151,8 @@ def _pre_resolved_stream(source, name, priority, warn):
         "dailymotion_bandwidth",
         "flixcloud_w_payload",
         "flixcloud_xor_mask",
+        "gotaku_key_seed",
+        "gotaku_segment_bytes",
     ):
         if key in source:
             stream_dict[key] = source[key]

@@ -50,6 +50,7 @@ include = ["media_cli*"]
 "*" = ["*.json"]
 "media_cli.services.browser_access" = ["assets/*.js"]
 "media_cli.extractors" = ["*.cjs"]
+"media_cli.ui" = ["assets/*.png"]
 
 [tool.ruff]
 target-version = "py310"

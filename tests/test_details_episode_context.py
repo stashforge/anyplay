@@ -115,6 +115,7 @@ def test_progress_picker_anchors_details_to_the_chosen_watched_episode(episode_c
     from media_cli.app import details_modals
 
     c = episode_context
+    c.r.flags.plain_mode = True
     c.r.ms.current_ep, c.r.ms.current_ep_index = "3", 2
     monkeypatch.setattr(details_modals, "tui_pick", lambda flags, ui, title, opts, **kw:
                         next(i for i, label in enumerate(opts) if "Episode 2" in label))
@@ -137,6 +138,7 @@ def test_cancel_or_reset_progress_has_explicit_episode_context(episode_context, 
     from media_cli.app import details_modals
 
     c = episode_context
+    c.r.flags.plain_mode = True
     c.r.ms.current_ep, c.r.ms.current_ep_index = "2", 1
     monkeypatch.setattr(details_modals, "tui_pick", lambda flags, ui, title, opts, **kw:
                         next(i for i, label in enumerate(opts) if "0 / Unwatched" in label)
@@ -152,6 +154,7 @@ def test_synced_progress_changes_context_only_after_success(episode_context, mon
     from media_cli.app import details_modals
 
     c = episode_context
+    c.r.flags.plain_mode = True
     c.r.flags.incognito_mode = False
     c.r.ms.current_ep, c.r.ms.current_ep_index = "3", 2
     monkeypatch.setattr(app_core, "get_show_anilist_id", lambda *a: "42")

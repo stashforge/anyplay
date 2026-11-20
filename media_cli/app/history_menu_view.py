@@ -8,12 +8,14 @@ from typing import Any
 
 from ..core.terminal import sanitize_terminal_text
 from ..domain.history import format_history_entry, format_relative_time
+from ..domain.metadata import genre_text
 from ..providers.shared.models import title_provider_key
 from ..ui.footer import FooterStatus
 from ..ui.help import picker_help
 from ..ui.poster import PosterManager
 from ..ui.styled_text import StyledText, TextRun
 from ..ui.view_model import Blank, DetailLines, ImageSpec, ViewAction, ViewItem, ViewSpec, ViewTab
+from .title_filter_data import HISTORY_FIELDS, title_filter_values
 from .footer import provider_label
 from .show_view_data import build_show_detail_lines
 
@@ -44,6 +46,7 @@ class HistoryEntryReference:
 
 def build_history_items(
     entries: Sequence[dict[str, Any]], *, show_cover: bool = True, now: float | None = None,
+    activity=None,
 ) -> tuple[ViewItem, ...]:
     """Caller owns filtering, progress preparation, refreshes and persistence."""
     if type(show_cover) is not bool:
@@ -61,19 +64,35 @@ def build_history_items(
             raise TypeError("History has_new_release requires a boolean")
         image_key = f"{reference.provider_id}:{reference.show_id}"
         url = PosterManager._get_cover_url(show) if show_cover else None
-        image = (ImageSpec(image_key, "available", url) if url else ImageSpec(image_key, "unavailable")) if show_cover else None
+        image = (ImageSpec(image_key, "available", url) if url else ImageSpec(image_key, "unavailable")) if show_cover and reference.provider_id != "torrent" else None
         updated = format_relative_time(entry.get("timestamp"), now=now)
+        info_lines = ()
+        if reference.provider_id == "torrent":
+            from ..ui.torrent_results import information_content
+            context = " · ".join(part for part in (
+                provider_label(show), f"Updated {updated}" if updated else "",
+                (activity or {}).get((reference.provider_id, reference.show_id, reference.translation_type), ""),
+            ) if part)
+            info_lines = information_content(show, watched=show.get("_local_progress", 0), context=context)
+        values = title_filter_values(show)
+        values.update(provider=(reference.provider_id, provider_label(show)),
+                      watched=show.get('_local_progress'), new=new_release,
+                      downloaded=getattr(activity, 'download_counts', {}).get(
+                          (reference.provider_id, reference.show_id), 0) if hasattr(activity, 'download_counts') else None,
+                      translation=reference.translation_type)
         rows.append(ViewItem(
             f"history:{image_key}:{reference.translation_type}",
             sanitize_terminal_text(format_history_entry(entry)), kind="submenu",
             details=build_show_detail_lines(
                 show, reference.translation_type, primary=show.get("name") or None, local_only=True,
             ),
-            image=image, reference=reference,
+            image=image, reference=reference, info_lines=info_lines, filter_values=tuple(values.items()),
+            activity=(activity or {}).get((reference.provider_id, reference.show_id, reference.translation_type), ""),
+            extra_details=sanitize_terminal_text(genre_text(show)),
             prefix=StyledText((TextRun("\u25c6 ", "history.new_release"),)) if new_release else "",
             info=sanitize_terminal_text(show.get("description") or ""),
             footer_context=tuple(sanitize_terminal_text(part) for part in (
-                provider_label(show), f"Updated {updated}" if updated else "",
+                provider_label(show, include_unlinked=True), f"Updated {updated}" if updated else "",
             ) if part),
         ))
     return tuple(rows)
@@ -90,6 +109,7 @@ def build_history_view(
     entries: Sequence[dict[str, Any]], *, mode: str, total_count: int,
     incognito: bool = False, show_cover: bool = True, now: float | None = None,
     footer_statuses: Sequence[FooterStatus] = (),
+    activity=None,
 ) -> ViewSpec:
     """Assemble caller-filtered, prepared history; no categorization or refresh."""
     if mode not in HISTORY_MODES:
@@ -98,7 +118,7 @@ def build_history_view(
         raise TypeError("History incognito requires a boolean")
     if type(total_count) is not int:
         raise TypeError("History total_count requires an integer")
-    items = build_history_items(entries, show_cover=show_cover, now=now)
+    items = build_history_items(entries, show_cover=show_cover, now=now, activity=activity)
     actions: tuple[ViewAction, ...] = (
         ViewAction("select", "open", ("ENTER", "RIGHT")),
         ViewAction("tab", "next", ("TAB", "CTRL_N")),
@@ -111,15 +131,19 @@ def build_history_view(
     actions += (
         ViewAction("help", "Help", ("?",), footer=False),
         ViewAction("information", "Information", ("CTRL_O",), footer=False),
-        ViewAction("back", "search", ("LEFT",), footer=False),
-        ViewAction("quit", "quit", ("ESC",)),
+        ViewAction("back", "search", ("ESC", "LEFT")),
     )
     help_data = picker_help(
-        "Open details", "Search", "Quit", "Next filter", "Previous filter",
+        "Open details", "Search", "Search", "Next filter", "Previous filter",
         delete_label=None if incognito else "Remove from history", reverse_label="Refresh selected title",
         info_label="Title information",
     )
     help_data.update({"F5": "Refresh visible titles", "Alt+R": "Refresh visible titles"})
+    help_data.update({
+        "Filters": 'title:"oshi no ko" year:>=2008 genre:magic provider:anipm,anikoto',
+        "Fields": ', '.join(field.name for field in HISTORY_FIELDS),
+        "Combine": 'Space/and combines conditions; commas select alternatives in text fields. downloaded:>0 new:true',
+    })
     return ViewSpec(
         "history", "Watch History", items, details=DetailLines(Blank, Blank, Blank),
         tabs=tuple(ViewTab(name, name) for name in HISTORY_MODES), active_tab_id=mode,
@@ -127,5 +151,5 @@ def build_history_view(
         message="" if items else _EMPTY_MESSAGES[HISTORY_MODES.index(mode)],
         context=("History", "INCOGNITO (READ-ONLY)") if incognito else ("History",),
         actions=actions, help=tuple(help_data.items()),
-        footer_statuses=footer_statuses,
+        footer_statuses=footer_statuses, filter_schema=HISTORY_FIELDS,
     )

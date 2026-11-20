@@ -21,12 +21,6 @@ def build_show_detail_lines(
     """Read prepared values only; enrichment/progress preparation stays with callers."""
     title = sanitize_terminal_text(primary if primary is not None else get_show_display_title(show))
     secondary = get_display_titles(show, title)
-    if not secondary:
-        genres = show.get("genres") or show.get("_provider_genres")
-        if isinstance(genres, list):
-            secondary = " • ".join(str(genre) for genre in genres if genre)
-        elif isinstance(genres, str):
-            secondary = genres.strip().replace(", ", " • ")
     metadata = StyledText(
         tuple(TextRun(text, role) for text, role in format_info_metadata_parts(show, ttype, local_only=local_only))
     )

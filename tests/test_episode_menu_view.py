@@ -107,3 +107,11 @@ def test_empty_and_duplicate_episode_data_are_not_ambiguous():
 def test_invalid_episode_data_fails_early(kwargs):
     with pytest.raises((TypeError, ValueError)):
         EpisodeMenuOption(**({"episode_id": "one", "label": "Episode 1"} | kwargs))
+
+
+def test_watched_labels_are_distinct_from_dim_column_heading():
+    from media_cli.state.theme import MINT_SCREEN_THEME
+    from media_cli.ui.screen_chrome import role_prefix
+    view = build((EpisodeMenuOption('one', 'Episode 1', watched=True),))
+    assert view.items[0].label.runs[0].role == 'episode.watched'
+    assert role_prefix(MINT_SCREEN_THEME, 'episode.watched') != role_prefix(MINT_SCREEN_THEME, 'screen.column')

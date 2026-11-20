@@ -23,7 +23,7 @@ def test_anikoto_metadata():
     p = AnikotoProvider()
     assert p.id == "anikoto"
     assert p.name == "Anikoto"
-    assert "anikototv.to" in p.anikoto_url
+    assert "anikototv.bz" in p.anikoto_url
 
 
 def test_default_install_includes_megaplay_crypto_backend():
@@ -77,7 +77,7 @@ def test_anikoto_episode_catalog_site_parsing():
     </div>
     """
 
-    with patch.object(p, "_get_anime_page", return_value=("8691", "https://anikototv.to/watch/slime/ep-1")):
+    with patch.object(p, "_get_anime_page", return_value=("8691", "https://anikototv.bz/watch/slime/ep-1")):
         mock_resp = MagicMock()
         mock_resp.read.return_value = json.dumps({"result": mock_episodes_html}).encode("utf-8")
         mock_resp.__enter__.return_value = mock_resp
@@ -112,7 +112,7 @@ def test_anikoto_resolves_anime_id_from_generic_data_id():
         return mock_resp
 
     with patch("urllib.request.urlopen", side_effect=fake_urlopen):
-        assert p._get_anime_page("154587") == ("9999", "https://anikototv.to/watch/frieren-journey")
+        assert p._get_anime_page("154587") == ("9999", "https://anikototv.bz/watch/frieren-journey")
 
 
 def test_anikoto_get_anime_page_retries_search_without_vrf():
@@ -139,7 +139,7 @@ def test_anikoto_get_anime_page_retries_search_without_vrf():
         return mock_resp
 
     with patch("urllib.request.urlopen", side_effect=fake_urlopen):
-        assert p._get_anime_page("154587") == ("9999", "https://anikototv.to/watch/frieren-journey")
+        assert p._get_anime_page("154587") == ("9999", "https://anikototv.bz/watch/frieren-journey")
 
     assert any("vrf=" in url for url in seen_urls)
     assert any("/filter" in url and "vrf=" not in url for url in seen_urls)
@@ -181,7 +181,7 @@ def test_anikoto_get_anime_page_tries_native_and_slug_candidates():
     with patch("urllib.request.urlopen", side_effect=fake_urlopen):
         assert p._get_anime_page("184872") == (
             "8765",
-            "https://anikototv.to/watch/against-the-gods-2nd-season-ghmos/ep-1",
+            "https://anikototv.bz/watch/against-the-gods-2nd-season-ghmos/ep-1",
         )
 
     assert any("%E9%80%86" in url for url in seen_urls)

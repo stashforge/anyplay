@@ -167,6 +167,7 @@ def run_details_menu(
     initial_selected_id: str | None = None,
     ready: Callable[[], bool] | None = None,
     can_activate: Callable[[str], bool] | None = None,
+    presentation: dict | None = None,
 ) -> DetailsMenuResult:
     controller = DetailsMenuController(
         ui=ui, read_view=read_view, switch_translation=switch_translation, information=information,
@@ -178,7 +179,23 @@ def run_details_menu(
         if item is None or not item.selectable:
             raise ValueError("Initial menu selection must identify a selectable item")
         controller.session.position.selected_id = initial_selected_id
-    result = run_view_session(flags, ui, controller.session, theme=APPLICATION_THEME, updates_fn=controller.updates,
+    picker = None
+    theme = APPLICATION_THEME
+    if presentation is not None and not flags.plain_mode:
+        from ..state.theme import MINT_SCREEN_THEME
+        from ..ui.action_picker import action_picker
+        from ..ui.footer import Footer, render_footer
+        theme = MINT_SCREEN_THEME
+        def status(index, width):
+            footer = controller.session.current.footer or Footer()
+            if controller.session.current.image is not None and flags.show_image:
+                from ..ui.display import _poster_footer_line
+                return _poster_footer_line(ui.hovered_show_obj or {}, Footer(statuses=footer.statuses), width)
+            return render_footer(Footer(statuses=footer.statuses, include_cover_status=False), width, theme=theme)
+        options = dict(presentation, status_fn=status)
+        def picker(*args, **kwargs):
+            return action_picker(*args, presentation=options, **kwargs)
+    result = run_view_session(flags, ui, controller.session, picker=picker, theme=theme, updates_fn=controller.updates,
                               position_key=(controller.session.current.id,))
     if not isinstance(result, DetailsMenuResult):
         raise TypeError("Details session must return a typed menu outcome")

@@ -329,8 +329,13 @@ def handle_config_command(args: Any) -> None:
     action = getattr(args, "config_action", None)
     if action is None:
         editor_override = getattr(args, "config_editor", None)
+        if editor_override is None:
+            from ..state.config import print_saved_config
+            print_saved_config()
+            return
         from ..state.config import open_config_editor
-        code = open_config_editor(editor_override)
+        code = (open_config_editor(editor_override, expanded=True) if getattr(args, "expanded", False)
+                else open_config_editor(editor_override))
         if code != 0:
             sys.exit(code)
         return
@@ -433,7 +438,7 @@ def handle_logs_command(args: Any) -> None:
         print(line.rstrip("\n"))
 
 
-def _resolve_quit_with_active_downloads() -> str:
+def _resolve_quit_with_active_downloads(cancel_state="SEARCH") -> str:
     """Return the next app state after handling active-download quit choices."""
     from media_cli.media.download_worker import has_active_downloads
 
@@ -451,7 +456,7 @@ def _resolve_quit_with_active_downloads() -> str:
             invalidate_screen_buffer()
         except Exception:
             pass
-        return "SEARCH"
+        return cancel_state
 
     if act == "FINISH_QUIT":
         w = get_global_worker()
@@ -463,7 +468,7 @@ def _resolve_quit_with_active_downloads() -> str:
                 invalidate_screen_buffer()
             except Exception:
                 pass
-            return "SEARCH"
+            return cancel_state
         stop_global_worker()
         return "QUIT"
 
@@ -692,15 +697,8 @@ def main(parsed=None) -> None:
     runtime_flags.debug_mode = args.debug
     configure_file_logging(debug=bool(args.debug), max_bytes=int(cfg.get("log_max_bytes", 1_048_576) or 1_048_576), backup_count=int(cfg.get("log_backup_count", 5) or 5))
     runtime_flags.incognito_mode = bool(args.incognito)
-    if args.incognito:
-        allow_history = bool(
-            getattr(args, "history", False)
-            or getattr(args, "cont", False)
-            or getattr(args, "command", None) in ("history", "continue")
-        )
-        set_incognito_history_allowed(allow_history)
-    else:
-        set_incognito_history_allowed(False)
+    # Saved titles can be browsed privately; storage keeps all writes in memory.
+    set_incognito_history_allowed(bool(args.incognito))
     if args.incognito and (
         args.download or args.downloads or args.login or args.logout
     ):
@@ -782,7 +780,9 @@ def main(parsed=None) -> None:
 
     runtime_flags.spinner_style = display._spinner_style
     flags = runtime_flags
-    ui = UiState()
+    ui = UiState(tui_layout=cfg.get("tui_layout", "bottom"))
+    from ..ui.covers import configure_info_cover
+    configure_info_cover(cfg.get("info_cover_shape", "portrait"))
 
     def warn_before_tui(message):
         print(f"\n\033[33m{message}\033[0m")
@@ -893,6 +893,7 @@ def main(parsed=None) -> None:
     if args.anilist is not None:
         if args.anilist == "search":
             state = "ANILIST_SEARCH"
+            args.anilist = "menu"
         elif args.anilist == "airing":
             state = "ANILIST_AIRING"
             args.anilist = "menu"
@@ -941,19 +942,15 @@ def main(parsed=None) -> None:
     elif args.history:
         state = "HISTORY"
 
-    from .terminal_controller import run_screen_controller
+    from .terminal_controller import preparation_parent, run_screen_controller
 
     def screen(handler, *handler_args):
-        fallback = {
-            "DETAILS": ui.search_prev_state,
-            "ACTION_MENU": ui.action_prev_state,
-            "EPISODE": ui.ep_prev_state,
-            "MIRRORS": "DETAILS",
-        }.get(state, state)
+        fallback = preparation_parent(state, ui, ms)
         return run_screen_controller(handler, *handler_args, fallback=fallback)
 
     startup_checkpoint("runtime_setup")
     while state != "QUIT":
+        quit_origin = state
         cur_ttype = ui.ui_ttype_ctx if ui.ui_ttype_ctx is not None else ttype
         if state == "DOWNLOADS":
             from media_cli.app.downloads import handle_downloads_state
@@ -1022,6 +1019,6 @@ def main(parsed=None) -> None:
             state = "QUIT"
 
         if state == "QUIT":
-            state = _resolve_quit_with_active_downloads()
+            state = _resolve_quit_with_active_downloads(cancel_state=quit_origin)
 
     app_core._ipc_player.quit()

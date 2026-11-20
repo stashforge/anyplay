@@ -29,15 +29,6 @@ from ..domain.sorting import (
     sort_anilist_shows,
 )
 from ..domain.titles import get_show_display_title
-from ..ui.anilist_menu import (
-    LIST_STATUSES as ANILIST_LIST_STATUSES,
-)
-from ..ui.anilist_menu import (
-    menu_header as anilist_menu_header,
-)
-from ..ui.anilist_menu import (
-    menu_navigation as anilist_menu_navigation,
-)
 from ..ui.help import picker_help, search_input_help
 
 # ---------------------------------------------------------------------------
@@ -80,6 +71,24 @@ def _anilist_list_label(status):
     return ANILIST_LIST_LABELS.get(normalized, "Browse")
 
 
+def _anilist_chrome(title, *, shows=None, ttype="sub", tabs=(), active=None, context=""):
+    """AniList supplies data to the same list frame used by other modes."""
+    from ..ui.navigation_tabs import NavigationTabs
+    from ..ui.view_model import ViewTab
+    from ..ui.library_info import library_info_lines
+    def info(index, width):
+        rows = shows() if callable(shows) else (shows or [])
+        show = rows[index] if 0 <= index < len(rows) else None
+        return library_info_lines(show, ttype, width, context=context or "AniList") if show else ()
+    from .title_filter_data import ANILIST_FIELDS, anilist_filter_values
+    data = shows() if callable(shows) else (shows or [])
+    return dict(title=title, badge="AniList",
+                **({'filter_schema': tuple(field for field in ANILIST_FIELDS if field.name != 'list' or active == 'ALL'),
+                    'filter_values': tuple(anilist_filter_values(show) if show else () for show in data)} if shows is not None else {}),
+                tabs=NavigationTabs(tuple(ViewTab(key, label) for key, label in tabs), active) if tabs else None,
+                **({"info_fn": info} if shows is not None else {}))
+
+
 def handle_anilist_menu_state(
     flags: CliFlags,
     ui: UiState,
@@ -89,7 +98,6 @@ def handle_anilist_menu_state(
     ttype: str,
     resolve_tracking_fn,
 ) -> str:
-    valid_statuses = ANILIST_LIST_STATUSES
     if args.anilist and args.anilist.lower() != "menu":
         req_stat = args.anilist.upper()
         stat_map = {
@@ -110,37 +118,17 @@ def handle_anilist_menu_state(
             return "QUIT"
         ui.anilist_browse_status = mapped
         args.anilist = "menu"
-        return "ANILIST_BROWSE"
+        return "ANILIST_AIRING" if mapped == "ANILIST_AIRING" else "ANILIST_BROWSE"
 
-    opts = list(valid_statuses.keys())
-
-    def _menu_hdr(si):
-        return anilist_menu_header()
-
-    idx = tui_pick(
-        flags,
-        ui,
-        "AniList Lists",
-        opts,
-        header_fn=_menu_hdr,
-        help_dict=picker_help("Open list", "Search AllAnime", "Quit"),
-    )
-
-    navigation = anilist_menu_navigation(idx)
-    if navigation:
-        if navigation == "SEARCH":
-            ms.query_str = ""
-        return navigation
-
-    stat_val = valid_statuses[opts[idx]]
-    if stat_val == "ANILIST_SEARCH":
-        ms.query_str = ""
-        ms.anilist_search_parent = "ANILIST_MENU"
-        return "ANILIST_SEARCH"
-    if stat_val == "ANILIST_AIRING":
-        return "ANILIST_AIRING"
-
-    ui.anilist_browse_status = stat_val
+    if not cfg.get("anilist_token"):
+        ui.search_error = "Link AniList to browse library lists; anime search is available without login."
+        args.provider = "anilist"
+        return "SEARCH"
+    if getattr(ui, "anilist_browse_status", "CURRENT") not in ("CURRENT", "PLANNING", "COMPLETED", "REPEATING", "PAUSED", "DROPPED", None):
+        ui.anilist_browse_status = "CURRENT"
+    elif not hasattr(ui, "_anilist_library_opened"):
+        ui.anilist_browse_status = "CURRENT"
+    ui._anilist_library_opened = True
     return "ANILIST_BROWSE"
 
 
@@ -167,7 +155,10 @@ def _open_anilist_show_from_picker(
 ):
     from ..providers import is_provider_active
 
-    p_id = getattr(args, "provider", None) or (cfg or {}).get("provider")
+    p_id = getattr(args, "provider", None)
+    if p_id in ("anilist", "animethemes"):
+        p_id = getattr(args, "_anilist_stream_provider", None)
+    p_id = p_id or (cfg or {}).get("provider")
 
     # Check if a previous provider link exists for this AniList ID
     al_id = str(source_show.get("_id") or source_show.get("id") or "")
@@ -256,6 +247,10 @@ def handle_anilist_airing_state(
     ttype: str,
     resolve_tracking_fn,
 ) -> str:
+    if not cfg.get("anilist_token"):
+        ui.search_error = "Link AniList to view the airing schedule; anime search is available without login."
+        args.provider = "anilist"
+        return "SEARCH"
     base_shows = _load_anilist_airing_shows(cfg["anilist_token"], force_refresh=True)
     tab = getattr(ui, "anilist_airing_tab", "today")
     rows = airing_rows(base_shows, tab)
@@ -363,6 +358,8 @@ def handle_anilist_airing_state(
         lambda: f"AniList Airing · {airing_tab_label(tab)}",
         opts,
         header_fn=_airing_hdr,
+        chrome_fn=lambda: _anilist_chrome("AniList · Airing", shows=lambda: row_shows, ttype=ttype,
+            tabs=((key, airing_tab_label(key)) for key in ("today", "tomorrow", "week")), active=tab),
         top_header_fn=_airing_top_hdr,
         tab_fn=_airing_tab,
         reverse_fn=_airing_refresh,
@@ -371,8 +368,8 @@ def handle_anilist_airing_state(
         info_fn=app_core.make_info_fn(lambda: row_shows, ui),
         help_dict=picker_help(
             "Open title",
-            "Back to lists",
-            "Back to lists",
+            "Back to search" if ms.anilist_airing_parent in ("SEARCH", "ANILIST_SEARCH", "ANIMETHEMES_SEARCH") else "Back to lists",
+            "Back to search" if ms.anilist_airing_parent in ("SEARCH", "ANILIST_SEARCH", "ANIMETHEMES_SEARCH") else "Back to lists",
             "Next tab",
             "Previous tab",
             reverse_label="Refresh schedule",
@@ -381,14 +378,14 @@ def handle_anilist_airing_state(
     if idx in (-2, -3):
         app_core._clear_poster_downloads()
         app_core.clear_terminal_images()
-        return "ANILIST_MENU"
+        return ms.anilist_airing_parent
     if idx < 0:
         return "ANILIST_AIRING"
     selected = row_shows[idx] if 0 <= idx < len(row_shows) else None
     if not selected:
         return "ANILIST_AIRING"
     return _open_anilist_show_from_picker(
-        flags, ui, ms, args, ttype, selected, "ANILIST_AIRING"
+        flags, ui, ms, args, ttype, selected, "ANILIST_AIRING", cfg
     )
 
 
@@ -401,11 +398,13 @@ def handle_anilist_browse_state(
     ttype: str,
     resolve_tracking_fn,
 ) -> str:
+    if not cfg.get("anilist_token"):
+        ui.search_error = "Link AniList to browse library lists; anime search is available without login."
+        args.provider = "anilist"
+        return "SEARCH"
     stat = ui.anilist_browse_status
     al_base_shows = app_core.load_anilist_browse(cfg["anilist_token"], stat)
-    if not al_base_shows:
-        app_core.err("No anime found in this AniList list.")
-        return "ANILIST_MENU"
+    al_base_shows = al_base_shows or []
     app_core.batch_prepare_shows_display_state(al_base_shows, ttype)
     if hasattr(app_core, "_poster_manager") and hasattr(
         app_core._poster_manager, "prewarm_shows"
@@ -466,7 +465,20 @@ def handle_anilist_browse_state(
         _al_hdr_cache[cache_key] = res
         return res
 
+    requested_state = ""
+    from ..ui.anilist_menu import LIBRARY_TABS
+    library_tabs = LIBRARY_TABS
+
     def _al_tab(_selected=None, direction=1):
+        nonlocal requested_state
+        keys = [key for key, _label in library_tabs]
+        current = stat or "ALL"
+        chosen = keys[(keys.index(current) + direction) % len(keys)]
+        ui.anilist_browse_status = None if chosen == "ALL" else chosen
+        requested_state = "ANILIST_BROWSE"
+        return None
+
+    def _al_sort(_selected=None, direction=1):
         nonlocal sort_mode, al_shows, opts
         if direction < 0:
             sort_mode = previous_anilist_sort_mode(sort_mode)
@@ -491,6 +503,27 @@ def handle_anilist_browse_state(
         opts = [f"{app_core.get_show_display_title(show)}" for show in al_shows]
         return opts, _al_hdr(0)
 
+    def _library_key(key, _selected):
+        nonlocal requested_state
+        if getattr(ui, "active_picker_query", ""):
+            return False
+        if key in ("s", "a"):
+            requested_state = "ANILIST_SEARCH" if key == "s" else "ANILIST_AIRING"
+            ms.query_str = ""
+            ms.anilist_search_parent = "ANILIST_BROWSE"
+            if key == "a":
+                ms.anilist_airing_parent = "ANILIST_BROWSE"
+            return True
+        if key == "o":
+            from ..ui.input_result import KeyResult
+            _al_sort()
+            return KeyResult.CONSUMED
+        return False
+
+    from ..ui.picker_state import PickerState
+    positions = getattr(ui, "_anilist_library_positions", {})
+    ui._anilist_library_positions = positions
+    position = positions.setdefault(stat or "ALL", PickerState())
     list_title = _anilist_list_label(stat)
     idx = tui_pick(
         flags,
@@ -498,22 +531,27 @@ def handle_anilist_browse_state(
         lambda: f"AniList - {list_title} · {anilist_sort_label(sort_mode, sort_reverse)}",
         opts,
         header_fn=_al_hdr,
+        chrome_fn=lambda: _anilist_chrome("AniList", shows=lambda: al_shows, ttype=ttype,
+            tabs=library_tabs, active=stat or "ALL",
+            context="AniList · " + anilist_sort_label(sort_mode, sort_reverse)) | {"shortcuts": (("enter", "open"), ("tab", "next list"), ("s", "search"), ("?", "help"), ("esc", "back"))},
         top_header_fn=_al_top_hdr,
         tab_fn=_al_tab,
+        state=position, key_fn=_library_key, exit_fn=lambda: bool(requested_state), keep_empty=True,
+        live_fn=lambda _q="": (opts, _al_hdr(0), True),
         reverse_fn=_al_reverse,
         info_fn=app_core.make_info_fn(lambda: al_shows, ui),
-        help_dict=picker_help(
-            "Open title",
-            "Back to lists",
-            "Back to lists",
-            "Next sort",
-            "Previous sort",
-            reverse_label="Reverse order",
-        ),
+        help_dict={**picker_help("Open title", "Search", "Search", "Next list", "Previous list", reverse_label="Reverse order"),
+                   "s": "Search AniList", "a": "Airing schedule", "o": "Cycle sort order"},
     )
 
+    if requested_state:
+        return requested_state
     if idx in (-2, -3):
-        return "ANILIST_MENU"
+        ms.query_str = ""
+        if getattr(args, "provider", None) not in (None, "anilist", "animethemes"):
+            args._anilist_stream_provider = args.provider
+        args.provider = "anilist"
+        return "SEARCH"
     if idx < 0:
         return "ANILIST_BROWSE"
 
@@ -596,19 +634,29 @@ def handle_anilist_search_state(
     # Step 1: Input Page
     if not ms.query_str:
         esc_action = "back" if ms.anilist_search_parent != "QUIT" else "quit"
-        res = tui_pick(
-            flags,
-            ui,
-            "Search Anime",
-            [],
-            header_fn=_search_input_header("AniList", esc_action),
-            return_query_on_enter=True,
-            query_history=app_core.load_search_history(),
-            is_search=True,
-            help_dict=search_input_help(
-                "Back" if ms.anilist_search_parent != "QUIT" else "Quit"
-            ),
-        )
+        from .search import prompt_search_home
+        result = None
+        if not flags.plain_mode:
+            if getattr(args, "provider", None) not in (None, "anilist", "animethemes"):
+                args._anilist_stream_provider = args.provider
+            args.provider = "anilist"
+            res = prompt_search_home(flags, ui, args, cfg)
+            result = res
+            if res == -9:
+                return "ANILIST_MENU"
+            if res == -10:
+                ms.anilist_airing_parent = "ANILIST_SEARCH"
+                return "ANILIST_AIRING"
+            if res == -2:
+                return "QUIT"
+            if getattr(args, "provider", None) != "anilist":
+                ms.query_str = str(res or "").strip()
+                return "SEARCH"
+        if result is None:
+            res = tui_pick(flags, ui, "Search Anime", [],
+                header_fn=_search_input_header("AniList", esc_action), return_query_on_enter=True,
+                query_history=app_core.load_search_history(), is_search=True,
+                help_dict=search_input_help("Back" if ms.anilist_search_parent != "QUIT" else "Quit"))
         ui.search_error = ""
         if res == -2:
             return ms.anilist_search_parent
@@ -746,6 +794,7 @@ def handle_anilist_search_state(
         "Search Anime",
         initial_opts,
         header_fn=_cached_header_fn,
+        chrome_fn=lambda: _anilist_chrome("Results · " + ms.query_str, shows=get_results, ttype=ttype),
         top_header_fn=_search_cover_header(get_results),
         live_fn=live_fn,
         initial_query="",

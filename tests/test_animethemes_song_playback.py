@@ -494,9 +494,11 @@ finish(dict(kind=result, played=played))
 '''
     with Terminal(tmp_path, source) as terminal:
         terminal.until(b"PLAYED:1")
-        terminal.send_after(b"Select action", b"\x15Songs\r")
-        terminal.send_after(b"Select song", b"Ending\r")
-        terminal.send_after(b"PLAYED:2", b"\x1b")
+        terminal.send_after(b"Select action", b"/Songs\r")
+        terminal.send_after(b"Select song", b"/Ending\r")
+        terminal.until(b"PLAYED:2")
+        terminal.send_after("Songs▏".encode(), b"\x1b")
+        terminal.send_after(b"esc", b"\x1b")
         assert terminal.result() == {"kind": "back", "played": [
             "https://example.test/op1080.webm", "https://example.test/ed.webm"]}
 

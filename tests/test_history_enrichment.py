@@ -534,3 +534,19 @@ def test_refresh_history_anilist_airing_batch_respects_cooldown_unless_forced():
         fetch_mock.assert_called_once()
 
     assert history_domain.history_refresh_last_checked_at(history_entries[0]["show"]) == now
+
+
+def test_torrent_history_skips_background_refresh_without_mutating_saved_data():
+    from copy import deepcopy
+    from media_cli.domain import history as history_domain
+
+    for identity in ({"_provider": "torrent"}, {"_torrent": {"name": "Batch"}}):
+        entry = {"show": {"_id": "hash", "name": "Batch", **identity,
+                          "availableEpisodes": {"sub": 12}, "status": "RELEASING"},
+                 "episode": "1", "translation_type": "sub"}
+        before = deepcopy(entry)
+        assert not history_domain.history_entry_supports_background_refresh(entry)
+        assert not history_domain.history_entry_should_auto_refresh(entry, now=2000)
+        assert entry == before
+    assert history_domain.history_entry_supports_background_refresh(
+        {"show": {"_provider": "anipm", "_id": "show"}})

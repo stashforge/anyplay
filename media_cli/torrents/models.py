@@ -121,6 +121,7 @@ class TorrentResult:
     tracker_urls: tuple[str, ...] = ()
     added_unix: int = 0
     raw: dict[str, Any] | None = None
+    trusted: bool | None = None
 
     @property
     def magnet(self) -> str:

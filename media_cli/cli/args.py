@@ -52,11 +52,18 @@ def build_command_parser(search_provider=None):
     global_options.add_argument(
         "-v", "--version", action="version", version=f"%(prog)s {__version__}", help="Show program's version number and exit"
     )
+    global_options.add_argument("--incognito", action="store_true", help="Do not save activity or update AniList")
     _add_debug_option(global_options)
     _add_plain_option(global_options)
     _add_mpv_window_option(global_options)
 
     register_all_subcommands(commands, search_provider)
+    for command_parser in commands.choices.values():
+        if command_parser.prog.endswith(" config"):
+            continue
+        if "--incognito" not in command_parser._option_string_actions:
+            command_parser.add_argument("--incognito", action="store_true",
+                                        help="Do not save activity or update AniList")
     return parser
 
 
@@ -83,6 +90,11 @@ def build_anilist_search_parser():
 
 def parse_cli_args(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    # Recognize global privacy mode on either side of a subcommand. Preserve
+    # literal query arguments after --.
+    boundary = argv.index("--") if "--" in argv else len(argv)
+    incognito = "--incognito" in argv[:boundary]
+    argv = [arg for arg in argv[:boundary] if arg != "--incognito"] + argv[boundary:]
     meaningful = [arg for arg in argv if arg != "--debug"]
 
     if meaningful[:2] == ["anilist", "search"]:
@@ -91,7 +103,9 @@ def parse_cli_args(argv=None):
         if debug_enabled:
             nested_argv.append("--debug")
         parser = build_anilist_search_parser()
-        return parser.parse_args(nested_argv), parser
+        args = parser.parse_args(nested_argv)
+        args.incognito = incognito
+        return args, parser
     parser = build_command_parser()
     search_provider = None
     command_index = next((i for i, word in enumerate(argv) if not word.startswith("-")), None)
@@ -159,8 +173,11 @@ def parse_cli_args(argv=None):
             error_parser.error(f"unrecognized arguments: {shlex.join(extra)}")
 
     if args.command is None:
-        parser.print_help()
-        parser.exit()
+        # Bare invocation uses the same defaults as an explicit search command.
+        args = parser.parse_args(["search", *argv])
+    if args.command == "theme":
+        if (args.theme_action == "preview") != bool(args.theme_name):
+            parser.error("Use theme list or theme preview <name>")
     if args.command == "health":
         from ..health.profiles import PROFILES
         if args.health_verify is not None and args.health_action not in (*PROFILES, "all"):
@@ -195,6 +212,8 @@ def parse_cli_args(argv=None):
             parser.error("auth --raw is only valid with auth token")
         del args.action
     elif args.command == "config":
+        if getattr(args, "expanded", False) and (getattr(args, "action", None) or getattr(args, "editor", None) is None):
+            parser.error("--expanded requires config -e and cannot be used with get/set")
         args.config_action = getattr(args, "action", None)
         args.config_key = getattr(args, "key", None)
         args.config_value = getattr(args, "value", None)
@@ -215,4 +234,5 @@ def parse_cli_args(argv=None):
         del args.completion_args
     elif args.command == "logs":
         args.logs = True
+    args.incognito = incognito or bool(getattr(args, "incognito", False))
     return args, parser

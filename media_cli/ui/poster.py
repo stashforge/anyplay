@@ -15,14 +15,14 @@ from ..core.terminal import sanitize_terminal_text
 from .actions import ActionBindings
 from .background_loading import BackgroundLoadingStatus
 from .covers import (
-    chafa_cover_command,
+    render_cover_variants,
     enforce_cache_limits,
     fetch_cover_bytes,
 )
 from .footer import Footer, FooterStatus, StatusKind, render_footer, render_legacy_footer, render_legacy_overlay
 from .loading_model import LoadingInteraction, LoadingOwner, LoadingPlacement, LoadingTaskSpec
 
-COVER_DOWNLOAD_DWELL_SECONDS = 0.25
+COVER_DOWNLOAD_DWELL_SECONDS = 0.45
 
 
 class PosterManager:
@@ -67,6 +67,7 @@ class PosterManager:
             if show.get("_poster_status") != status:
                 show["_poster_status"] = status
                 show["_poster_status_time"] = time.time()
+                show.pop("_poster_notice_expired", None)
 
     def footer_line(self, show, default_text, width, *, persistent=False):
         if isinstance(default_text, Footer):
@@ -89,10 +90,11 @@ class PosterManager:
         return render_legacy_overlay(status, navigation, width)
 
     def _cover_loading_status(self, show, active):
-        identity = (self._get_cover_url(show), show.get("_poster_status_time")) if active else None
+        url = self._get_cover_url(show) if active else ""
+        identity = (url or id(show)) if active else None
         previous = self._cover_loading
         if previous is not None and (
-            not active or previous[0] is not show or previous[1] != identity
+            not active or previous[1] != identity
         ):
             previous[2].read(False)
             self._cover_loading = None
@@ -117,6 +119,8 @@ class PosterManager:
         with self.poster_lock:
             status = show.get("_poster_status")
             status_time = float(show.get("_poster_status_time", 0) or 0)
+            if status in ("missing", "failed", "no_chafa") and not status_time:
+                status_time = show["_poster_status_time"] = time.time()
             has_raw = bool(show.get("_poster_raw"))
             if not has_raw:
                 url = self._get_cover_url(show)
@@ -144,6 +148,7 @@ class PosterManager:
             return replace(loading, message=described("Loading cover")) if loading is not None else None
         self._cover_loading_status(None, False)
         if not persistent and status_time and time.time() - status_time > 3:
+            show["_poster_notice_expired"] = (status, status_time)
             return None
         if status == "failed":
             return FooterStatus(described("Cover failed"), StatusKind.ERROR)
@@ -157,7 +162,13 @@ class PosterManager:
         if not self.enabled() or not show:
             return False
         with self.poster_lock:
-            return show.get("_poster_status") == "loading"
+            status = show.get("_poster_status")
+            if status == "loading":
+                return True
+            # Keep the UI pumping until a paint has actually retired the notice.
+            return status in ("missing", "failed", "no_chafa") and show.get("_poster_notice_expired") != (
+                status, float(show.get("_poster_status_time", 0) or 0),
+            )
 
     @staticmethod
     def _get_cover_url(show):
@@ -204,7 +215,7 @@ class PosterManager:
 
         # Cache discovery and executable checks can block too. Only schedule from
         # the UI; repeated header/poster reads share the same pending lookup.
-        self.set_status(show, "loading")
+        self.set_status(show, "pending")
         if self._mark_download(url_hash):
             try:
                 threading.Thread(
@@ -219,6 +230,13 @@ class PosterManager:
 
     def _prepare_cover(self, show, url, url_hash):
         try:
+            time.sleep(COVER_DOWNLOAD_DWELL_SECONDS)
+            hovered = self.hovered_show_id()
+            target = show.get("_id") or show.get("id") or show.get("title") or show.get("name")
+            if hovered and target and str(hovered) != str(target):
+                return
+            self.set_status(show, "loading")
+            self.request_redraw()
             if not shutil.which("chafa"):
                 self.set_status(show, "no_chafa")
                 self.request_redraw()
@@ -230,7 +248,7 @@ class PosterManager:
                     return
             write_dir = self.cache_dir()
             cached_path = os.path.join(write_dir, f"{url_hash}.jpg")
-            self._download(show, url, url_hash, write_dir, cached_path, release_pending=False)
+            self._download(show, url, url_hash, write_dir, cached_path, release_pending=False, settled=True)
         except Exception as exc:
             with self.poster_lock:
                 show["_poster_failed"] = True
@@ -250,12 +268,7 @@ class PosterManager:
             return
 
         try:
-            process = subprocess.run(
-                chafa_cover_command(path),
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
+            process = render_cover_variants(path, timeout=5)
             if process.returncode == 0 and process.stdout.strip():
                 raw = process.stdout.rstrip("\n")
                 with self.poster_lock:
@@ -297,12 +310,7 @@ class PosterManager:
                         break
                 if found_path:
                     try:
-                        process = subprocess.run(
-                            chafa_cover_command(found_path),
-                            capture_output=True,
-                            text=True,
-                            timeout=5,
-                        )
+                        process = render_cover_variants(found_path, timeout=5)
                         if process.returncode == 0 and process.stdout.strip():
                             raw = process.stdout.rstrip("\n")
                             with self.poster_lock:
@@ -314,8 +322,9 @@ class PosterManager:
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _download(self, show, url, url_hash, cache_dir, cached_path, *, release_pending=True):
-        time.sleep(COVER_DOWNLOAD_DWELL_SECONDS)
+    def _download(self, show, url, url_hash, cache_dir, cached_path, *, release_pending=True, settled=False):
+        if not settled:
+            time.sleep(COVER_DOWNLOAD_DWELL_SECONDS)
         hovered = self.hovered_show_id()
         target_id = show.get("_id") or show.get("id") or show.get("title") or show.get("name")
         if hovered and target_id and str(hovered) != str(target_id):
@@ -380,12 +389,7 @@ class PosterManager:
                 render_src_jpg = cached_path
 
             enforce_cache_limits(cache_dir)
-            process = subprocess.run(
-                chafa_cover_command(render_src_jpg),
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
+            process = render_cover_variants(render_src_jpg, timeout=10)
             if process.returncode == 0 and process.stdout.strip():
                 raw = process.stdout.rstrip("\n")
                 with self.poster_lock:

@@ -7,7 +7,7 @@ import pytest
 from media_cli.media.provider_skips import normalize_provider_skips
 from media_cli.providers.anikoto import AnikotoProvider
 
-WATCH = "https://anikototv.to/watch/selected/ep-1"
+WATCH = "https://anikototv.bz/watch/selected/ep-1"
 MASTER = "https://media.test/master.m3u8"
 NATIVE = normalize_provider_skips({"op": {"start": 10, "end": 90}, "ed": {"start": 1200, "end": 1290}})
 

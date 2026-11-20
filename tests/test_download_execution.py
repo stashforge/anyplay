@@ -258,62 +258,21 @@ def test_download_episode_ffmpeg_commits_only_after_partial_success():
         assert not os.path.exists(captured_cmd[-1])
 
 
-def test_download_episode_yt_dlp_with_embedded_subs_remux():
-    stream = {
-        "link": "https://stream.example.com/video.mp4",
-        "subtitles": [
-            {"url": "https://stream.example.com/en.vtt", "label": "English", "language": "en"},
-        ],
-    }
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        captured_cmd = []
-
-        def mock_popen(cmd, *args, **kwargs):
-            nonlocal captured_cmd
-            captured_cmd = cmd
-            # Simulate yt-dlp creating the output file
-            temp_path = cmd[cmd.index("-o") + 1]
-            with open(temp_path, "wb") as f:
-                f.write(b"fake-video-from-ytdlp")
-            mock_proc = MagicMock()
-            mock_proc.wait.return_value = 0
-            mock_proc.returncode = 0
-            return mock_proc
-
-        dummy_sub_file = os.path.join(tmpdir, "sub.en.vtt")
-        with open(dummy_sub_file, "w") as f:
-            f.write("WEBVTT\n")
-
-        with patch("subprocess.Popen", side_effect=mock_popen), \
-             patch("shutil.which", return_value="/usr/bin/ffmpeg"), \
-             patch("media_cli.media.download.download_sidecar_subtitles", return_value=[dummy_sub_file]) as mock_sidecar, \
-             patch("media_cli.media.download.remux_subtitles_into_mkv", return_value=True) as mock_remux:
-
-            ok = download_episode(
-                "Slime S04",
-                1,
-                stream,
-                download_dir=tmpdir,
-                downloader="yt-dlp",
-                subtitle_mode="embed",
-                download_sub_langs="eng",
-                quiet=True,
-            )
-
-            assert ok is True
-            # yt-dlp was called
-            assert captured_cmd[0] == "yt-dlp"
-            assert "-o" in captured_cmd
-            temp_file = captured_cmd[captured_cmd.index("-o") + 1]
-            assert temp_file.endswith(".temp.mp4")
-
-            # Sidecar downloader was called to fetch subs for remuxing
-            assert mock_sidecar.called
-
-            # Remuxer was called with temp video and sidecar files
-            assert mock_remux.called
-            call_args = mock_remux.call_args[0]
-            assert call_args[0] == temp_file
-            assert call_args[1] == [dummy_sub_file]
-            assert call_args[2].endswith(".mkv")
+def test_download_episode_ytdlp_uses_shared_track_pipeline(tmp_path, monkeypatch):
+    from media_cli.media import track_pipeline
+    from unittest.mock import Mock
+    sub = tmp_path / "sub.en.vtt"
+    sub.write_text("WEBVTT\n")
+    run = Mock(return_value=str(tmp_path / "final.mkv"))
+    monkeypatch.setattr(track_pipeline, "run_track_pipeline", run)
+    monkeypatch.setattr("shutil.which", lambda tool: "/usr/bin/" + tool)
+    monkeypatch.setattr("media_cli.media.download.download_sidecar_subtitles", lambda *a, **kw: [str(sub)])
+    assert download_episode("Title", 1, {"link": "https://cdn.test/video.mp4", "subtitles": [
+        {"url": "https://cdn.test/en.vtt", "language": "en"}]},
+        download_dir=str(tmp_path), downloader="yt-dlp", quiet=True)
+    args, kwargs = run.call_args
+    assert args[0] == "https://cdn.test/video.mp4"
+    assert args[1].endswith(".mkv")
+    assert kwargs["subtitle_files"] == [str(sub)]
+    assert "anyplay_episode=1" in kwargs["metadata_args"]
+    assert not sub.exists()

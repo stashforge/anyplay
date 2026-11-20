@@ -219,3 +219,36 @@ def test_valid_original_total_is_shown_once_in_both_contexts():
     detailed = strip_ansi(format_info_metadata_line(show))
     assert listed == detailed
     assert "Watched 3/24" in listed and "EP 24" not in listed
+
+
+@pytest.mark.parametrize('status', ['RELEASING', 'FINISHED'])
+@pytest.mark.parametrize('mode', ['Active', 'All'])
+def test_caught_up_release_marker_independent_of_status_and_history_tab(status, mode):
+    from media_cli.domain.history import filter_history_entries
+    entry = dict(show=dict(_id='sample', _provider='example', name='Example', status=status,
+                          episodeCount=219, availableEpisodes={'sub':219}),
+                 episode='218', progress=218, translation_type='sub',
+                 was_caught_up=True, has_new_release=False, release_available=218)
+    assert filter_history_entries([entry], mode) == [entry]
+    assert entry['has_new_release'] is True
+    entry['episode'], entry['progress'] = '219', 219
+    entry['show'].pop('_local_progress', None)
+    history_entry_category(entry)
+    assert entry['has_new_release'] is False
+
+
+def test_ordinary_backlog_does_not_gain_new_release_marker():
+    entry = dict(show=dict(_id='sample', name='Example', status='FINISHED',
+                          episodeCount=219, availableEpisodes={'sub':219}),
+                 episode='100', progress=100, translation_type='sub')
+    assert history_entry_category(entry) == 'Active'
+    assert not entry.get('has_new_release')
+
+
+def test_old_catchup_does_not_mark_existing_backlog_on_new_release():
+    entry = dict(show=dict(_id='sample', name='Example', status='RELEASING', availableEpisodes={'sub':218}),
+                 episode='200', progress=200, translation_type='sub', was_caught_up=True)
+    history_entry_category(entry)
+    entry['show']['availableEpisodes']['sub'] = 219
+    history_entry_category(entry)
+    assert not entry.get('has_new_release')

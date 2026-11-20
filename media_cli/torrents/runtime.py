@@ -354,7 +354,18 @@ def prepare_torrent_stream(
 
         info = handle.torrent_file()
         files = info.files()
-        selected_idx, selected_size, selected_path = select_video_file(info)
+        requested = (stream.get("torrent") or {}).get("file_index")
+        if requested is None:
+            selected_idx, selected_size, selected_path = select_video_file(info)
+        else:
+            if type(requested) is not int or not 0 <= requested < files.num_files():
+                raise ValueError("Selected torrent file index is invalid")
+            selected_idx = requested
+            selected_size = int(files.file_size(requested))
+            selected_path = str(files.file_path(requested))
+            expected = (stream.get("torrent") or {}).get("file_path")
+            if expected and expected != selected_path:
+                raise ValueError("Torrent file metadata changed; reload its video list")
         _emit(progress_callback, f"Torrent: selected {Path(selected_path).name}")
         for idx in range(files.num_files()):
             handle.file_priority(idx, 0)

@@ -50,11 +50,24 @@ def test_failed_catalog_still_opens_details_and_safe_actions(recovery, source):
     assert items["ANIME_SONGS"].hint == "openings & endings for this title"
     assert items["RETRY_CATALOG"].selectable
     assert items["CHANGE_PROVIDER" if source != "ANILIST_BROWSE" else "CHANGE_MATCH"].selectable
-    assert not items["PLAY_CURRENT"].selectable
-    assert not items["EPISODES"].selectable
-    assert not items["MIRRORS"].selectable
-    assert not items["DOWNLOAD_MENU"].selectable
+    for action in ("PLAY_CURRENT", "EPISODES", "MIRRORS", "DOWNLOAD_MENU"):
+        assert items[action].selectable
+        assert items[action].hint == "load episodes with Retry Episodes"
     assert "Provider is unreachable" in view.footer.statuses[0].message
+    assert r.ms.current_ep == "4"
+
+
+@pytest.mark.parametrize("action", ["PLAY_CURRENT", "EPISODES", "MIRRORS", "DOWNLOAD_MENU"])
+def test_failed_catalog_explains_but_does_not_activate_dependent_action(recovery, monkeypatch, action):
+    r = recovery
+    def menu(*args, read_view, can_activate, **kwargs):
+        view = read_view()
+        assert next(item for item in view.items if item.reference == action).selectable
+        assert can_activate(action) is False
+        assert can_activate("RETRY_CATALOG") is True
+        return DetailsMenuResult("back")
+    monkeypatch.setattr(playback_menu, "run_details_menu", menu)
+    assert details.handle_details_state(r.flags, r.ui, r.ms, {}, r.args, "sub", lambda *a: False) == "HISTORY"
     assert r.ms.current_ep == "4"
 
 

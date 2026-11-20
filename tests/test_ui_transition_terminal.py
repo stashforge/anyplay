@@ -284,7 +284,7 @@ finish(application())
         terminal.until(b"Preparing screen")
         terminal.cursor = len(terminal.output)
         os.write(terminal.master, b"\x1b")
-        restored = terminal.until(b"SOURCE FOOTER")
+        restored = terminal.until("be▏".encode())
         assert b"2/2" not in restored
         os.write(terminal.master, b"\x03")
         assert terminal.result() == ["QUIT", "be"]
@@ -334,8 +334,8 @@ finish(result)
         os.write(terminal.master, b'\x03')
         assert terminal.result() == -5
         assert b'Loading Watching list' in before_ready
-        assert b'AniList Lists' in before_ready
-        assert b'Plan to Watch' in before_ready
+        assert b'AniList' in before_ready
+        assert b'Planning' in before_ready
 
 
 def test_anilist_loading_does_not_hide_cached_destination_rows(tmp_path):
@@ -365,3 +365,48 @@ finish(application())
         os.write(terminal.master, b'\x03')
         assert terminal.result() == -5
         assert b'PRESERVED DETAILS' in destination
+
+
+def test_preparation_can_clear_images_after_anilist_airing_returns(tmp_path):
+    script = '''
+from media_cli.app.terminal_controller import run_screen_controller
+from media_cli.context import MachineState
+from media_cli.ui import display, terminal_images
+from media_cli.ui.terminal_runtime import terminal_application
+
+def controller(flags, ui, ms, cfg, args):
+    picker_module.tui_pick(flags, ui, 'AniList Airing', ['Example'],
+        header='AIRING READY', return_on_quit=True)
+    display.clear_terminal_images()
+    return 'ANILIST_MENU'
+
+@terminal_application
+def application():
+    return run_screen_controller(controller, flags, ui, MachineState(), {}, SimpleNamespace(), fallback='ANILIST_AIRING')
+finish(application())
+'''
+    with Terminal(tmp_path, script) as terminal:
+        terminal.send_after(b'AIRING READY', b'\x1b')
+        assert terminal.result() == 'ANILIST_MENU'
+        assert b'Only the UI thread' not in terminal.output
+
+
+def test_anilist_loader_escape_returns_to_search_before_request_finishes(tmp_path):
+    script = """
+from media_cli.app.terminal_controller import run_screen_controller, preparation_parent
+from media_cli.ui.terminal_runtime import terminal_application
+from media_cli.context import MachineState, UiState
+from media_cli.ui.display import with_anilist_menu_loading
+def controller(flags, ui, ms, cfg, args):
+    with_anilist_menu_loading('CURRENT', 'Loading AniList titles...', lambda: time.sleep(30))
+    return 'ANILIST_BROWSE'
+@terminal_application
+def application():
+    ms = MachineState()
+    return run_screen_controller(controller, flags, UiState(), ms, {}, SimpleNamespace(),
+        fallback=preparation_parent('ANILIST_BROWSE', UiState(), ms))
+finish(application())
+"""
+    with Terminal(tmp_path, script) as terminal:
+        terminal.send_after(b'Loading AniList titles', b'\x1b')
+        assert terminal.result() == 'SEARCH'

@@ -144,6 +144,22 @@ def download_episode(
         _error("No valid stream URL found in stream object.")
         return False
 
+    if raw_url.startswith("magnet:?"):
+        from ..torrents.download import download_torrent_file
+        metadata = stream.get("torrent") or {}
+        if not download_dir:
+            from media_cli.core.storage import get_default_download_dir
+            download_dir = get_default_download_dir()
+        folder = os.path.join(os.path.expanduser(download_dir), sanitize_filename(title) or title)
+        filename = os.path.basename(str(metadata.get("file_name") or episode))
+        try:
+            download_torrent_file(raw_url, metadata, os.path.join(folder, filename),
+                                  message=None if quiet else console_status)
+            return True
+        except Exception as exc:
+            _error(f"Torrent download failed: {exc}")
+            return False
+
     # Extract audio tracks
     audio_tracks = list(stream.get("audio_tracks") or [])
     audio_url = stream.get("audio_url", "")
@@ -233,6 +249,8 @@ def download_episode(
                 title=safe_title,
                 flixcloud_w_payload=stream.get("flixcloud_w_payload"),
                 flixcloud_xor_mask=stream.get("flixcloud_xor_mask"),
+                gotaku_key_seed=stream.get("gotaku_key_seed"),
+                gotaku_segment_bytes=stream.get("gotaku_segment_bytes"),
                 **bound_proxy_options({**stream, "audio_url": audio_url, "audio_tracks": audio_tracks}),
             )
             if stream.get("ip_version") == 4:
@@ -261,6 +279,29 @@ def download_episode(
 
     skip_intervals = resolve_download_skips(stream, mal_id, episode)
     metadata_args = anyplay_metadata_args(title=title, episode=str(episode), skip_intervals=skip_intervals)
+
+    if downloader == "yt-dlp" and shutil.which("ffmpeg"):
+        from .track_pipeline import run_track_pipeline
+        from ..services.requirements import require_executable
+        try:
+            require_executable("ffprobe", "Downloaded track verification")
+            run_track_pipeline(url, final_filename, headers=headers, audio_tracks=audio_tracks,
+                subtitle_files=downloaded_sidecars, metadata_args=metadata_args, identity=raw_url,
+                cache_context={"quality": stream.get("quality"), "title": title, "episode": str(episode)},
+                message=(lambda message: None) if quiet else console_status, extra_args=extra_args)
+            for sidecar in downloaded_sidecars:
+                try:
+                    os.remove(sidecar)
+                except OSError:
+                    pass
+            return True
+        except Exception as exc:
+            _error(f"Download failed; partial tracks retained: {exc}")
+            return False
+        finally:
+            if proxy_server:
+                from .local_proxy import stop_local_proxy
+                stop_local_proxy(proxy_server)
 
     if downloader == "ffmpeg":
         command = [

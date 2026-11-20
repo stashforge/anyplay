@@ -345,3 +345,29 @@ def test_decoder_respects_exact_cancel_bindings(monkeypatch):
     assert not ui._cancelled
     ui.keys.feed(b"q")
     assert ui._cancelled
+
+
+def test_selection_dwell_can_leave_without_starting_worker(driver, monkeypatch):
+    from media_cli.ui.anilist_menu import AniListTabChanged
+    ui, _, _, _, _ = driver
+    ui._start_delay = .25
+    def leave():
+        raise AniListTabChanged('PLANNING')
+    monkeypatch.setattr(ui.keys, 'poll', leave)
+    monkeypatch.setattr(loading_preparation, 'run_preparation', lambda *a, **k: pytest.fail('Skipped tab started work'))
+    with pytest.raises(AniListTabChanged):
+        ui.run(lambda status: pytest.fail('Skipped tab fetched data'))
+    assert ui.lifecycle.snapshots(ui.token.owner) == ()
+
+
+def test_selection_dwell_starts_work_after_deadline(driver, monkeypatch):
+    ui, _, _, _, _ = driver
+    ui._start_delay = .25
+    elapsed = [0.0]
+    monkeypatch.setattr(loading_preparation.time, 'monotonic', lambda: elapsed[0])
+    monkeypatch.setattr(loading_preparation.time, 'sleep', lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds))
+    def run(work, **hooks):
+        assert elapsed[0] >= .25
+        return work()
+    monkeypatch.setattr(loading_preparation, 'run_preparation', run)
+    assert ui.run(lambda status: 42) == 42

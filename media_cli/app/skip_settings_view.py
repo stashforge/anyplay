@@ -100,6 +100,7 @@ def build_skip_settings_view(
     return replace(
         view,
         prompt="Skip Settings",
+        screen_title=view.screen_title.removesuffix("Details") + "Skip Settings",
         items=tuple(replace(controlled[item.id], reference=item.reference) if item.id in controlled
                     else replace(item, adjustable=option.action_id.startswith("TOGGLE_"))
                     for item, option in zip(view.items, options, strict=True)),

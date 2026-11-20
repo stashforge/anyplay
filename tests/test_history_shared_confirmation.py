@@ -41,7 +41,7 @@ def test_shared_history_delete_requires_confirmation_and_keeps_filter(tmp_path, 
     with Terminal(tmp_path, SOURCE, columns=140) as terminal:
         terminal.send_after(b"Watch History", key)
         terminal.send_after(b"Delete this history entry? y/N", decision)
-        terminal.send_after(b"Watch History", b"\x1b")
+        terminal.send_after(b"Watch History", b"\x03")
         result = terminal.result()
     assert result == dict(deleted=["second"] if decision == b"y" else [], kind="quit",
                           query="Same", cursor=2,
@@ -58,7 +58,7 @@ def test_shared_history_confirmation_preserves_interrupt(tmp_path):
 def test_readonly_shared_history_does_not_delete(tmp_path):
     source = SOURCE.replace("CliFlags(show_image=False)", "CliFlags(show_image=False, incognito_mode=True)")
     with Terminal(tmp_path, source, columns=140) as terminal:
-        terminal.send_after(b"Watch History", b"\x04\x1b[3~\x1b")
+        terminal.send_after(b"Watch History", b"\x04\x1b[3~\x03")
         result = terminal.result()
     assert result["deleted"] == [] and result["selected"] == "history:second:same:sub"
 
@@ -76,6 +76,6 @@ try:
     with Terminal(tmp_path, source, columns=140) as terminal:
         terminal.send_after(b"Watch History", b"\x04")
         terminal.send_after(b"Delete this history entry? y/N", b"y")
-        terminal.send_after(b"Watch History", b"\x1b")
+        terminal.send_after(b"Watch History", b"\x03")
         result = terminal.result()
     assert result["deleted"] == ["second"] and result["query"] == "Same"

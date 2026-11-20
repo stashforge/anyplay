@@ -9,7 +9,7 @@ from media_cli.provider_manifest import PROVIDER_REGISTRY
 from media_cli.state.config import DEFAULT_CONFIG, migrate_config_keys
 
 
-@pytest.mark.parametrize('key', ['miruro', 'mkissa', 'allanime'])
+@pytest.mark.parametrize('key', ['miruro', 'mkissa', 'allanime', 'senshi'])
 def test_retired_provider_is_not_selectable_or_silently_replaced(key):
     assert key not in PROVIDER_REGISTRY
     assert key not in providers.PROVIDERS
@@ -20,7 +20,7 @@ def test_retired_provider_is_not_selectable_or_silently_replaced(key):
         providers.get_provider(key)
 
 
-@pytest.mark.parametrize('key', ['miruro', 'mkissa', 'allanime'])
+@pytest.mark.parametrize('key', ['miruro', 'mkissa', 'allanime', 'senshi'])
 def test_removed_saved_default_migrates_without_changing_unrelated_settings(key):
     config = {'provider': key, 'quality': '720p', 'anilist_token': 'test-token'}
     assert migrate_config_keys(config)
@@ -40,8 +40,14 @@ def test_retired_history_refresh_never_fetches_from_replacement_provider(monkeyp
     from media_cli.services import catalog
     monkeypatch.setattr(catalog, 'get_allanime_show', lambda *a: pytest.fail('Retired history used default provider'))
     monkeypatch.setattr(catalog, 'fetch_episode_catalog', lambda *a, **kw: pytest.fail('Retired history requested catalogue'))
-    for key in ('miruro', 'mkissa', 'allanime'):
+    for key in ('miruro', 'mkissa', 'allanime', 'senshi'):
         entry = {'show': {'_id': 'one', '_provider': key, 'name': 'Saved', 'watched_episodes': 3}}
         refresh_history_entry_provider_catalog(entry)
         assert entry['show']['_provider'] == key
         assert entry['show']['watched_episodes'] == 3
+
+
+def test_senshi_source_is_archived():
+    assert importlib.util.find_spec('media_cli.providers.senshi') is None
+    archive = Path(__file__).resolve().parents[1] / 'archive/providers/2026-11-16'
+    assert (archive / 'media_cli/providers/senshi.py').is_file()

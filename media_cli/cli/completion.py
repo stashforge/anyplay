@@ -4,11 +4,12 @@ import os
 from pathlib import Path
 
 from ..constants import APP_NAME
+from ..state.theme_catalog import THEME_NAMES
 from ..provider_manifest import available_provider_metadata
 
 BASE_COMMANDS = (
     "search", "downloads", "anilist", "history", "continue",
-    "auth", "companion", "providers", "completion", "config", "logs", "health",
+    "auth", "companion", "providers", "completion", "config", "logs", "health", "service", "theme",
 )
 ANILIST_LISTS = (
     "airing", "watching", "planning", "completed", "dropped", "paused", "rewatching",
@@ -16,6 +17,8 @@ ANILIST_LISTS = (
 )
 AUTH_ACTIONS = ("login", "logout", "status", "token")
 COMPANION_ACTIONS = ("pair", "status")
+SERVICE_ACTIONS = ("install", "start", "restart", "stop", "status", "check")
+SERVICE_OPTIONS = ("--help", "--debug")
 SHELLS = ("bash", "zsh", "fish")
 QUALITIES = ("best", "1080p", "720p", "480p")
 PLAYERS = ("mpv", "rex", "mpvrx", "mpvrex", "vlc", "next")
@@ -30,7 +33,7 @@ SEARCH_PROVIDERS = PROVIDERS + ("animethemes",)
 PROVIDER_PREFIXES = tuple(provider + ":" for provider in SEARCH_PROVIDERS)
 COMMANDS = BASE_COMMANDS
 
-ROOT_OPTIONS = ("-h", "--help", "-v", "--version", "--debug", "--plain", "--no-tui")
+ROOT_OPTIONS = ("--incognito", "-h", "--help", "-v", "--version", "--debug", "--plain", "--no-tui")
 
 SEARCH_OPTIONS = (
     "-e", "--episode", "-q", "--quality", "--dub", "--sub", "-b", "--binge",
@@ -77,7 +80,7 @@ PROVIDERS_OPTIONS = ("--debug", "--plain", "--no-tui", "-h", "--help")
 COMPLETION_OPTIONS = ("install", "--debug", "--plain", "--no-tui", "-h", "--help")
 
 CONFIG_ACTIONS = ("set", "get")
-CONFIG_OPTIONS = ("set", "get", "-e", "--editor", "--debug", "--plain", "--no-tui", "-h", "--help")
+CONFIG_OPTIONS = ("set", "get", "--expanded", "-e", "--editor", "--debug", "--plain", "--no-tui", "-h", "--help")
 LOGS_OPTIONS = ("--tail", "--debug", "--plain", "--no-tui", "-h", "--help")
 CONFIG_KEYS = (
     "quality", "translation_type", "player", "provider", "title_language",
@@ -238,6 +241,20 @@ def bash_completion():
         auth)
             COMPREPLY=( $(compgen -W "{_words(AUTH_ACTIONS)} {_words(AUTH_OPTIONS)}" -- "$cur") )
             ;;
+        theme)
+            if [[ $COMP_CWORD -eq 2 ]]; then
+                COMPREPLY=( $(compgen -W "list preview --help" -- "$cur") )
+            elif [[ ${{COMP_WORDS[2]}} == preview ]]; then
+                COMPREPLY=( $(compgen -W "{_words(THEME_NAMES)}" -- "$cur") )
+            fi
+            ;;
+        service)
+            if [[ $COMP_CWORD -eq 2 ]]; then
+                COMPREPLY=( $(compgen -W "{_words(SERVICE_ACTIONS)} {_words(SERVICE_OPTIONS)}" -- "$cur") )
+            else
+                COMPREPLY=( $(compgen -W "{_words(SERVICE_OPTIONS)}" -- "$cur") )
+            fi
+            ;;
         companion)
             if [[ $COMP_CWORD -eq 2 ]]; then
                 COMPREPLY=( $(compgen -W "{_words(COMPANION_ACTIONS)} {_words(COMPANION_OPTIONS)}" -- "$cur") )
@@ -246,7 +263,7 @@ def bash_completion():
             fi
             ;;
         health)
-            COMPREPLY=( $(compgen -W "reports report latest all senshi anipm reanime anikoto animepahe anidb anizone animegg animexin lucifer animekhor movies torrent animethemes --seed --verify catalogue extraction http mpv --translation sub dub both --delete --help --debug --plain" -- "$cur") )
+            COMPREPLY=( $(compgen -W "reports report latest all anipm reanime anikoto animepahe anidb anizone animegg gotaku animexin lucifer animekhor movies torrent animethemes --seed --verify catalogue extraction http mpv --translation sub dub both --delete --help --debug --plain" -- "$cur") )
             ;;
         providers)
             COMPREPLY=( $(compgen -W "{_words(PROVIDERS_OPTIONS)}" -- "$cur") )
@@ -279,6 +296,8 @@ commands=(
   'auth:Login or logout from AniList'
   'companion:Pair or check the Android WebView companion'
   'health:List saved provider health reports'
+  'theme:List or preview themes'
+  'service:Manage scheduled History refresh'
   'providers:List available providers'
   'completion:Generate shell completion'
   'config:Manage or open configuration'
@@ -287,13 +306,23 @@ commands=(
 
 case $words[2] in
   health)
-    _arguments '*:: :((reports report latest all senshi anipm reanime anikoto animepahe anidb anizone animegg animexin lucifer animekhor movies torrent animethemes --seed --verify catalogue extraction http mpv --translation sub dub both --delete --help --debug --plain))'
+    _arguments '*:: :((reports report latest all anipm reanime anikoto animepahe anidb anizone animegg gotaku animexin lucifer animekhor movies torrent animethemes --seed --verify catalogue extraction http mpv --translation sub dub both --delete --help --debug --plain))'
     ;;
   anilist)
     _arguments '*:: :(({_words(ANILIST_LISTS)} {_words(ANILIST_OPTIONS)}))'
     ;;
   auth)
     _arguments '*:: :(({_words(AUTH_ACTIONS)} {_words(AUTH_OPTIONS)}))'
+    ;;
+  theme)
+    _arguments '*:: :((list preview {_words(THEME_NAMES)} --help))'
+    ;;
+  service)
+    if [[ $CURRENT -eq 3 ]]; then
+      _arguments '*:: :(({_words(SERVICE_ACTIONS)} {_words(SERVICE_OPTIONS)}))'
+    else
+      _arguments '*:: :(({_words(SERVICE_OPTIONS)}))'
+    fi
     ;;
   companion)
     if [[ $CURRENT -eq 3 ]]; then
@@ -354,6 +383,13 @@ def fish_completion():
             "'__fish_seen_subcommand_from auth' -a "
             f"{item}"
         )
+    lines.append(f"complete -c {APP_NAME} -n '__fish_seen_subcommand_from theme; and not __fish_seen_subcommand_from list preview' -a 'list preview --help'")
+    lines.append(f"complete -c {APP_NAME} -n '__fish_seen_subcommand_from theme; and __fish_seen_subcommand_from preview' -a '{_words(THEME_NAMES)}'")
+    for item in SERVICE_ACTIONS:
+        lines.append(
+            f"complete -c {APP_NAME} -n "
+            f"'__fish_seen_subcommand_from service; and not __fish_seen_subcommand_from {_words(SERVICE_ACTIONS)}' -a {item}"
+        )
     for item in COMPANION_ACTIONS:
         lines.append(
             f"complete -c {APP_NAME} -n "
@@ -361,7 +397,7 @@ def fish_completion():
             f"{item}"
         )
     lines.append(
-        f"complete -c {APP_NAME} -n '__fish_seen_subcommand_from health' -a 'reports report latest all senshi anipm reanime anikoto animepahe anidb anizone animegg animexin lucifer animekhor movies torrent animethemes --seed --verify catalogue extraction http mpv --translation sub dub both --delete'"
+        f"complete -c {APP_NAME} -n '__fish_seen_subcommand_from health' -a 'reports report latest all anipm reanime anikoto animepahe anidb anizone animegg gotaku animexin lucifer animekhor movies torrent animethemes --seed --verify catalogue extraction http mpv --translation sub dub both --delete'"
     )
     for item in SHELLS:
         lines.append(
@@ -390,6 +426,7 @@ def fish_completion():
         "continue": RESUME_OPTIONS,
         "auth": AUTH_OPTIONS,
         "companion": COMPANION_OPTIONS,
+        "service": SERVICE_OPTIONS,
         "providers": PROVIDERS_OPTIONS,
         "completion": COMPLETION_OPTIONS,
         "config": CONFIG_OPTIONS,

@@ -70,6 +70,7 @@ def probe_entries(entries):
                                     timeout=8, stream_type=entry.get('type') or 'mp4', title='health-sample',
                                     audio_url=entry.get('audio_url'), audio_tracks=entry.get('audio_tracks'), subtitles=None, target_player='mpv',
                                     flixcloud_w_payload=entry.get('flixcloud_w_payload'), flixcloud_xor_mask=entry.get('flixcloud_xor_mask'),
+                                    gotaku_key_seed=entry.get('gotaku_key_seed'), gotaku_segment_bytes=entry.get('gotaku_segment_bytes'),
                                     ip_version=entry.get('ip_version'))
     try:
         checks = run_sample(executable, url, timeout=max(0, MPV_BUDGET-(time.monotonic()-before)))

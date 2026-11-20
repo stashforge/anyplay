@@ -2,13 +2,22 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
+import io
 import json
+import secrets
+import time
+from email.utils import parsedate_to_datetime
 import logging
 import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any
 
+from ..core.api import MAX_API_JSON_BYTES, ProviderDependencyError, read_json_response
+from ..services.http import SSL_CTX_SECURE
 from .shared.base import Provider
 from .shared.hls import resolved_hls_streams_to_sources
 from .shared.models import (
@@ -21,7 +30,15 @@ from .shared.models import (
 log = logging.getLogger(__name__)
 
 API_BASE = "https://anilab2.amdapi.click"
-PLAY_BASE = "https://play.anidb.app"
+# Request format follows the Apache-2.0 AniDB extension's KyotoSigner.kt:
+# https://github.com/yuzono/anime-extensions/tree/master/src/en/anidb
+PLAY_BASE = "https://api.kyotoplayer.com"
+KYOTO_VERSION = "135"
+KYOTO_CERT = "482a900b2906766b2e8d3cf19fcf6d06d0b6c9569cb6305c9c43200a8e20979e"
+KYOTO_KEY = hmac.new(
+    bytes.fromhex("91839183e0d9ac1975d62cc3f250935a630cdca8e711fdd95919b636aa4544ed"),
+    bytes.fromhex(KYOTO_CERT), hashlib.sha256,
+).digest()
 POST_ID_OFFSET = 1_000_000_000
 
 NAV_HEADERS = {
@@ -30,11 +47,6 @@ NAV_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
 }
 
-PLAY_HEADERS = {
-    **NAV_HEADERS,
-    "Referer": "https://play.app/",
-    "X-Requested-With": "PLAY",
-}
 
 LANGUAGE_NAMES = {
     "jpn": "Japanese",
@@ -110,6 +122,9 @@ class AniDBApp(Provider):
 
     def __init__(self, request_json_fn=None):
         self._request_json = request_json_fn
+        self._clock_offset = 0
+        self._episode_servers = {}
+        self._prefer_curl = False
         if not hasattr(self, "metadata"):
             self.metadata = {}
         if not hasattr(self, "domains"):
@@ -130,8 +145,6 @@ class AniDBApp(Provider):
                 return response.status, response.read().decode("utf-8", errors="ignore")
         except urllib.error.HTTPError as e:
             return e.code, e.read().decode("utf-8", errors="ignore")
-        except Exception as e:
-            return 500, str(e)
 
     def _fetch_json(self, url: str, headers: dict[str, str] | None = None) -> dict[str, Any] | None:
         status, text = self._fetch(url, headers or NAV_HEADERS)
@@ -168,15 +181,95 @@ class AniDBApp(Provider):
         post = self._fetch_post(provider_id)
         return _post_to_title(post, self.name) if post else None
 
+    def _open_play_request(self, request):
+        if not self._prefer_curl:
+            try:
+                return urllib.request.urlopen(request, context=SSL_CTX_SECURE, timeout=12)
+            except urllib.error.HTTPError as exc:
+                if exc.code != 403 or "cloudflare" not in exc.headers.get("Server", "").lower():
+                    raise
+                from ..services.requirements import optional_curl_requests
+                if optional_curl_requests() is None:
+                    exc.close()
+                    from ..services.requirements import MissingPythonDependency
+                    raise MissingPythonDependency(("curl_cffi",), "AniDB protected playback") from None
+                exc.close()
+                self._prefer_curl = True
+                log.debug("AniDB: retrying Cloudflare-blocked playback request with optional curl transport")
+        from ..services.requirements import optional_curl_requests
+        transport = optional_curl_requests()
+        response = transport.post(request.full_url, data=request.data, headers=dict(request.header_items()),
+                                  impersonate="chrome", timeout=12, allow_redirects=False, stream=True)
+        try:
+            if not 200 <= response.status_code < 300:
+                raise urllib.error.HTTPError(request.full_url, response.status_code, "Playback request rejected",
+                                             response.headers, io.BytesIO())
+            body = bytearray()
+            for chunk in response.iter_content(65536):
+                body.extend(chunk)
+                if len(body) > MAX_API_JSON_BYTES:
+                    raise ValueError("AniDB playback response is too large")
+            result = io.BytesIO(body)
+            result.headers = response.headers
+            return result
+        finally:
+            response.close()
+
+    def _play_json(self, path: str, **fields) -> dict[str, Any]:
+        """Signed form requests; retry clock skew once, never generic failures."""
+        body = urllib.parse.urlencode(fields).encode("utf-8")
+        for attempt in range(2):
+            offset = self._clock_offset
+            timestamp = str(int(time.time()) + offset)
+            nonce = base64.urlsafe_b64encode(secrets.token_bytes(16)).rstrip(b"=").decode("ascii")
+            canonical = "\n".join(("POST", path, hashlib.sha256(body).hexdigest(), timestamp, nonce, KYOTO_VERSION))
+            headers = {
+                "Accept": "application/json", "Content-Type": "application/x-www-form-urlencoded",
+                "User-Agent": NAV_HEADERS["User-Agent"], "os-version": "36",
+                "app-id": "com.kyotoplayer", "app-version": KYOTO_VERSION,
+                "device-model": "Google Pixel 8", "X-Kyoto-Ts": timestamp,
+                "X-Kyoto-Nonce": nonce, "X-Kyoto-Cert": KYOTO_CERT,
+                "X-Kyoto-Sig": hmac.new(KYOTO_KEY, canonical.encode(), hashlib.sha256).hexdigest(),
+            }
+            request = urllib.request.Request(PLAY_BASE + path, data=body, headers=headers)
+            try:
+                with self._open_play_request(request) as response:
+                    self._update_clock(response.headers.get("Date"))
+                    result = read_json_response(response)
+                    if not isinstance(result, dict):
+                        raise ValueError("AniDB playback API returned invalid JSON data")
+                    return result
+            except urllib.error.HTTPError as exc:
+                self._update_clock(exc.headers.get("Date"))
+                retry = attempt == 0 and exc.code == 401 and abs(self._clock_offset - offset) >= 2
+                if not retry:
+                    raise
+                exc.close()
+        raise RuntimeError("AniDB playback authentication failed")
+
+    def _update_clock(self, date):
+        if date:
+            try:
+                self._clock_offset = int(parsedate_to_datetime(date).timestamp()) - int(time.time())
+            except (TypeError, ValueError, OverflowError):
+                pass
+
     def _episodes(self, provider_id: str) -> list[dict[str, Any]]:
         post_id = _post_id(provider_id)
-        data = self._fetch_json(f"{PLAY_BASE}/api/anime/{post_id}/episodes")
-        episodes = data.get("list", []) if data else []
-        return [ep for ep in episodes if isinstance(ep, dict)]
+        data = self._play_json("/episodes", id=post_id)
+        episodes = data.get("list") or []
+        result = [ep for ep in episodes if isinstance(ep, dict)]
+        for ep in result:
+            servers = ep.get("servers")
+            self._episode_servers[(post_id, str(ep.get("id")))] = servers if isinstance(servers, list) else []
+        return result
 
-    def _servers(self, episode_id: str) -> list[dict[str, Any]]:
-        data = self._fetch_json(f"{PLAY_BASE}/api/episode/{episode_id}/servers")
-        servers = data.get("list", []) if data else []
+    def _servers(self, episode_id: str, provider_id: str) -> list[dict[str, Any]]:
+        post_id = _post_id(provider_id)
+        servers = self._episode_servers.get((post_id, episode_id))
+        if not servers:
+            data = self._play_json("/servers", id=post_id, episode=episode_id)
+            servers = data.get("list") or []
         unique = []
         seen = set()
         for server in servers:
@@ -191,6 +284,8 @@ class AniDBApp(Provider):
     def episode_catalog(self, provider_id: str, ttype: str = "sub") -> dict[str, Any]:
         try:
             episodes = self._episodes(provider_id)
+        except ProviderDependencyError:
+            raise
         except Exception as exc:
             return normalize_episode_catalog({"state": "error", "error": str(exc)}, provider_id=self.id, provider_title_id=provider_id)
 
@@ -210,7 +305,13 @@ class AniDBApp(Provider):
         dub_ids = []
         first_ep_id = internal_map.get(ids[0]) if ids else ""
         if first_ep_id:
-            servers = self._servers(first_ep_id)
+            try:
+                servers = self._servers(first_ep_id, provider_id)
+            except ProviderDependencyError:
+                raise
+            except Exception as exc:
+                return normalize_episode_catalog({"state": "error", "error": str(exc)},
+                                                 provider_id=self.id, provider_title_id=provider_id)
             if any(str(s.get("id") or "").endswith("/eng") or str(s.get("lang") or "").casefold() == "dub" for s in servers):
                 dub_ids = list(ids)
 
@@ -242,15 +343,21 @@ class AniDBApp(Provider):
 
         desired_lang = "eng" if ttype == "dub" else "jpn"
         source_urls: list[dict[str, Any]] = []
-        for server in self._servers(ep_id):
+        for server in self._servers(ep_id, provider_id):
             server_id = str(server.get("id") or "")
             lang_code = server_id.rsplit("/", 1)[-1].casefold()
             if lang_code != desired_lang:
                 continue
-            iframe = self._fetch_json(f"{PLAY_BASE}/api/episode/{server_id}/iframe", PLAY_HEADERS)
+            iframe = self._play_json("/stream", id=_post_id(provider_id), server=server_id)
             stream_url = str((iframe or {}).get("link") or "")
             if not stream_url:
                 continue
+            subtitles = [
+                {"url": track["file"], "label": track.get("label") or track.get("lang") or "Subtitles",
+                 "lang": track.get("lang") or ""}
+                for track in (iframe.get("subtitles") or [])
+                if isinstance(track, dict) and track.get("file") and track.get("lang") != "OFF"
+            ]
             name = LANGUAGE_NAMES.get(lang_code, lang_code.upper())
             try:
                 from ..extractors.base import BaseExtractor
@@ -260,7 +367,11 @@ class AniDBApp(Provider):
                     headers=NAV_HEADERS,
                     priority=0,
                 )
-                source_urls.extend(resolved_hls_streams_to_sources(expanded))
+                if not expanded:
+                    raise ValueError("AniDB HLS quality expansion returned no variants")
+                for source in resolved_hls_streams_to_sources(expanded):
+                    source["subtitles"] = subtitles
+                    source_urls.append(source)
             except Exception:
                 source_urls.append({
                     "sourceName": name,
@@ -269,6 +380,7 @@ class AniDBApp(Provider):
                     "resolution": "auto",
                     "priority": 0,
                     "headers": dict(NAV_HEADERS),
+                    "subtitles": subtitles,
                 })
 
         return normalize_episode_sources(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import logging
 import shutil
 import time
 from contextvars import ContextVar
@@ -16,6 +17,7 @@ from .poster import PosterManager
 from .renderer_selection import RendererKind
 from .row_text import plain_row_text, render_row_text
 from .styled_text import StyledText, TextRun
+from .smart_filter import accept_field_completion, filter_value_options, field_completion, filter_hint, compile_filter, filter_placeholder
 from .terminal_runtime import terminal_application
 from .theme import DEFAULT_THEME
 from .view_backend import ViewInputContext
@@ -75,6 +77,10 @@ def _run_view_session(flags, ui, session, *, picker=None, poster_manager=None, t
     """
     renderer = ViewRenderer(flags, picker=picker)
     backend = renderer.backend
+    shared_chrome = picker is None and renderer.kind is RendererKind.TUI and not session.current.selection_policy.query_input
+    if shared_chrome:
+        from ..state.theme import MINT_SCREEN_THEME
+        theme = MINT_SCREEN_THEME
     if poster_manager is None:
         from .display import _configured_loading_frame, cover_cache_dir, cover_read_cache_dirs
 
@@ -92,6 +98,10 @@ def _run_view_session(flags, ui, session, *, picker=None, poster_manager=None, t
         # Carry a rendered cover across the legacy/shared picker boundary.
         poster_manager.get(dict(previous_show))
     presentation = ViewPresentation(session, poster_manager, theme=theme)
+    if shared_chrome:
+        from .session_screen import session_screen_picker
+        renderer._picker = lambda *args, **kwargs: session_screen_picker(
+            *args, session=session, view_presentation=presentation, **kwargs)
     focus_target = None
     focus_since = 0.0
     focus_delivered = False
@@ -166,7 +176,10 @@ def _run_view_session(flags, ui, session, *, picker=None, poster_manager=None, t
         def focus(index):
             if changed():
                 return
+            timed = logging.getLogger(__name__).isEnabledFor(logging.DEBUG)
+            began = time.perf_counter() if timed else 0.0
             item = item_at(index)
+            selected_at = time.perf_counter() if timed else 0.0
             if started:
                 selected_id = item.id if item is not None else None
                 if selected_id != frame.position.selected_id:
@@ -174,13 +187,28 @@ def _run_view_session(flags, ui, session, *, picker=None, poster_manager=None, t
                 frame.position.selected_id = selected_id
                 observe_focus()
             selected_id = frame.position.selected_id
+            observed_at = time.perf_counter() if timed else 0.0
             ui.hovered_show_obj = presentation.show_for(selected_id) if selected_id is not None else None
+            show_at = time.perf_counter() if timed else 0.0
             ui.hovered_show_id = presentation.selected_show_id if selected_id is not None else None
+            if timed:
+                finished = time.perf_counter()
+                if finished - began >= .02:
+                    logging.getLogger(__name__).debug(
+                        "Slow view focus: total_ms=%.1f selection_ms=%.1f observe_ms=%.1f show_ms=%.1f identity_ms=%.1f",
+                        (finished-began)*1000, (selected_at-began)*1000,
+                        (observed_at-selected_at)*1000, (show_at-observed_at)*1000,
+                        (finished-show_at)*1000)
 
         def header(index):
             focus(index)
+            if view.filter_schema:
+                error = compile_filter(frame.position.query, view.filter_schema).error
+                if error:
+                    from .screen_chrome import role_prefix
+                    return role_prefix(theme, "muted") + sanitize_terminal_text(error) + "\033[0m"
             item_id = frame.position.selected_id
-            return backend.header(presentation, item_id)
+            return presentation.details(item_id, shutil.get_terminal_size(fallback=(80, 24)).columns, status_only=True) if shared_chrome and renderer.kind is RendererKind.TUI and not view.selection_policy.query_input else backend.header(presentation, item_id)
 
         def poster(index):
             focus(index)
@@ -211,7 +239,7 @@ def _run_view_session(flags, ui, session, *, picker=None, poster_manager=None, t
             if changed():
                 _request_redraw(ui)
                 return options, initial_header, view.state != "loading"
-            return options, header(ids.get(frame.position.selected_id, -1)), view.state != "loading"
+            return options, "" if shared_chrome else header(ids.get(frame.position.selected_id, -1)), view.state != "loading"
 
         def tab(index, direction=1):
             nonlocal pending_event
@@ -284,6 +312,7 @@ def _run_view_session(flags, ui, session, *, picker=None, poster_manager=None, t
                 return None
             return render_row_text(content, columns=max(0, width), query=query, selected=selected, theme=theme)
 
+        value_options = filter_value_options(rows, view.filter_schema) if view.filter_schema else {}
         try:
             result = renderer.pick(
                 flags, ui, prompt, options,
@@ -314,6 +343,17 @@ def _run_view_session(flags, ui, session, *, picker=None, poster_manager=None, t
                 action_labels=backend.action_labels(view, navigation_pending=session.navigation is not None),
                 navigation_prompt=StyledText((TextRun(sanitize_terminal_text(view.prompt), "prompt"),)),
                 navigation_tabs=NavigationTabs(tuple(view.tabs), active_tab_id) if active_tab is not None else None,
+                highlight_query_fn=(lambda query: compile_filter(query, view.filter_schema).highlight)
+                    if view.filter_schema else None,
+                filter_error_fn=(lambda query: compile_filter(query, view.filter_schema).error)
+                    if view.filter_schema else None,
+                filter_accept_fn=(lambda query: accept_field_completion(query, view.filter_schema, value_options))
+                    if view.filter_schema else None,
+                filter_completion_fn=(lambda query: field_completion(query, view.filter_schema, value_options))
+                    if view.filter_schema else None,
+                filter_hint_fn=(lambda query: filter_hint(query, view.filter_schema, value_options))
+                    if view.filter_schema else None,
+                filter_placeholder=filter_placeholder(view.filter_schema) if view.filter_schema else None,
                 filter_fn=filter_rows,
                 adjust_fn=adjust if any(item.adjustable for item in rows) else None,
                 key_fn=key,

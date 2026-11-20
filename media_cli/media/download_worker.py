@@ -35,21 +35,12 @@ from media_cli.media.subtitles import download_sidecar_subtitles
 from media_cli.media.download import anyplay_metadata_args, embed_download_metadata, resolve_download_skips
 from media_cli.media.urls import validate_stream_url
 from media_cli.media.hls import ffmpeg_hls_input_args
+from media_cli.media.track_pipeline import FinalizationError, PipelineCancelled, safe_media_error as _safe_ffmpeg_error
 
 TEST_URL = "https://raw.githubusercontent.com/bower-media-samples/big-buck-bunny-1080p-30s/master/video.mp4"
 TMP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tmp_worker")
 os.makedirs(TMP_DIR, exist_ok=True)
 _logger = logging.getLogger(__name__)
-
-
-def _safe_ffmpeg_error(line: str) -> str:
-    line = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", line)
-    line = re.sub(r"https?://\S+", "[URL]", line, flags=re.I)
-    line = re.sub(
-        r"(authorization|cookie|set-cookie|token|password|secret|api[-_]?key)\s*[:=].*",
-        r"\1=[redacted]", line, flags=re.I,
-    )
-    return " ".join("".join(char for char in line if char >= " " and char != "\x7f").split())[:300]
 
 
 class _DownloadAttemptFailed(RuntimeError):
@@ -174,7 +165,7 @@ class DownloadItem:
     episode: str
     destination_path: str
     url: str = ""
-    engine: str = "auto"  # "yt-dlp", "aria2c", "ffmpeg", or "auto"
+    engine: str = "auto"  # HTTP engine or libtorrent for selected torrent files
     headers: dict = field(default_factory=dict)
     status: DownloadStatus = DownloadStatus.QUEUED
     progress: float = 0.0  # 0.0 to 100.0
@@ -213,6 +204,12 @@ class DownloadItem:
     automatic: bool = False
     ip_version: int | None = None
     _network_source: dict = field(default_factory=dict, repr=False)
+    torrent: dict = field(default_factory=dict)
+    resume_request: dict = field(default_factory=dict)
+    restored: bool = False
+    _resume_existing: bool = False
+    upload_speed: float = 0.0
+    uploaded_bytes: int = 0
 
 
 def prepare_download_proxy(stream, url, headers, referer):
@@ -234,6 +231,8 @@ def prepare_download_proxy(stream, url, headers, referer):
         stream_type=stream.get("type", "mp4"),
         flixcloud_w_payload=stream.get("flixcloud_w_payload"),
         flixcloud_xor_mask=stream.get("flixcloud_xor_mask"),
+        gotaku_key_seed=stream.get("gotaku_key_seed"),
+        gotaku_segment_bytes=stream.get("gotaku_segment_bytes"),
     )
 
 
@@ -391,11 +390,13 @@ class DownloadWorker:
     MIN_CONCURRENT_CAP = 1
     MAX_CONCURRENT_CAP = 4
 
-    def __init__(self, download_dir=TMP_DIR, max_concurrent=1, max_cap=4):
+    def __init__(self, download_dir=TMP_DIR, max_concurrent=1, max_cap=4, queue_store=None):
         self.download_dir = download_dir
         self.MAX_CONCURRENT_CAP = max(1, max_cap)
         self.max_concurrent = max(self.MIN_CONCURRENT_CAP, min(self.MAX_CONCURRENT_CAP, max_concurrent))
-        self.items: list[DownloadItem] = []
+        self._queue_store = queue_store
+        self._last_queue_save = 0.0
+        self.items: list[DownloadItem] = queue_store.load() if queue_store else []
         self.active_items: dict[str, DownloadItem] = {}
         self.lock = threading.RLock()
         self._dismissed_when_idle = False
@@ -403,6 +404,20 @@ class DownloadWorker:
         self._wake_event = threading.Event()
         self._worker_thread = threading.Thread(target=self._run_loop, daemon=True)
         self._worker_thread.start()
+
+    def save_queue(self, *, force=False):
+        store = getattr(self, '_queue_store', None)
+        if store is None:
+            return
+        now = time.monotonic()
+        if not force and now - self._last_queue_save < 1:
+            return
+        try:
+            with self.lock:
+                store.save(self.items)
+            self._last_queue_save = now
+        except (OSError, TypeError, ValueError):
+            _logger.warning('Could not save download queue', exc_info=True)
 
     def start(self):
         """Worker thread starts automatically in __init__, this is a compatibility no-op."""
@@ -450,8 +465,12 @@ class DownloadWorker:
             self._dismissed_when_idle = False
             for existing in self.items:
                 if existing.id == item.id or (existing.destination_path and existing.destination_path == item.destination_path):
+                    if existing.restored:
+                        self.items.remove(existing)
+                        break
                     return existing
             self.items.append(item)
+            self.save_queue(force=True)
             self._wake_event.set()
         return item
 
@@ -493,6 +512,7 @@ class DownloadWorker:
                     item.eta_str = ""
                     if message:
                         item.logs.append(message)
+                    self.save_queue(force=True)
                     self._wake_event.set()
                     return True
         return False
@@ -501,6 +521,9 @@ class DownloadWorker:
         with self.lock:
             for item in self.items:
                 if item.id == item_id:
+                    from .download_resume import bind_restored
+                    if not bind_restored(item):
+                        return False
                     if item.status == DownloadStatus.PAUSED:
                         # User unpauses: item transitions to QUEUED (waiting for its turn)
                         if item.process is None and item.resolve_fn:
@@ -513,6 +536,7 @@ class DownloadWorker:
                         item.eta_str = ""
                         if message:
                             item.logs.append(message)
+                        self.save_queue(force=True)
                         self._wake_event.set()
                         return True
         return False
@@ -522,6 +546,10 @@ class DownloadWorker:
         with self.lock:
             for item in self.items:
                 if item.status != DownloadStatus.PAUSED:
+                    continue
+                from .download_resume import bind_restored
+                if not bind_restored(item):
+                    item.status = DownloadStatus.FAILED
                     continue
                 if item.process is None and item.resolve_fn:
                     if item.proxy_server:
@@ -558,6 +586,7 @@ class DownloadWorker:
                     item.status = DownloadStatus.CANCELLED
                     item.logs.append("✖ Download stopped/cancelled.")
                     item.completed_at = time.time()
+                    self.save_queue(force=True)
                     self._wake_event.set()
                     return True
         return False
@@ -566,6 +595,9 @@ class DownloadWorker:
         with self.lock:
             for item in self.items:
                 if item.id == item_id:
+                    from .download_resume import bind_restored
+                    if not bind_restored(item):
+                        return False
                     if item.status in (DownloadStatus.FAILED, DownloadStatus.CANCELLED):
                         item.status = DownloadStatus.QUEUED
                         item.error = ""
@@ -581,6 +613,7 @@ class DownloadWorker:
                         item.logs.append("↺ Manual retry queued by user.")
                         if item.resolve_fn:
                             item.url = ""
+                        self.save_queue(force=True)
                         self._wake_event.set()
                         return True
         return False
@@ -592,10 +625,12 @@ class DownloadWorker:
             for item in self.items:
                 if item.id == item_id and item.status in terminal:
                     self.items.remove(item)
+                    self.save_queue(force=True)
                     return True
         return False
 
     def stop(self):
+        self.save_queue(force=True)
         self._stop_event.set()
         self._wake_event.set()
         with self.lock:
@@ -650,6 +685,7 @@ class DownloadWorker:
                                 available_slots -= 1
                                 threading.Thread(target=self._process_item, args=(item,), daemon=True).start()
 
+            self.save_queue()
             self._wake_event.wait(timeout=0.3)
             self._wake_event.clear()
 
@@ -657,7 +693,7 @@ class DownloadWorker:
         try:
             # 1. Pre-check: File existence check
             dest = item.destination_path
-            if os.path.exists(dest) and os.path.getsize(dest) > 0:
+            if not item._resume_existing and os.path.exists(dest) and os.path.getsize(dest) > 0:
                 if not is_valid_download_video(dest):
                     try:
                         os.remove(dest)
@@ -745,6 +781,10 @@ class DownloadWorker:
                     return
                 item.status = DownloadStatus.DOWNLOADING
 
+            if item.url.startswith("magnet:?"):
+                self._download_torrent(item)
+                return
+
             # 3. Determine engine
             sub_langs, _, _ = _item_download_preferences(item)
             has_separate_audio = (
@@ -764,10 +804,15 @@ class DownloadWorker:
                 item.logs.append(f"Using {engine} download engine.")
 
             if engine == "yt-dlp":
-                self._download_ytdlp(item)
+                if shutil.which("ffmpeg"):
+                    self._download_tracks(item)
+                else:
+                    self._download_ytdlp(item)
             elif engine == "aria2c":
                 self._download_aria2c(item)
             elif engine == "ffmpeg":
+                if item._resume_existing:
+                    item.logs.append("FFmpeg remux cannot append safely; restarting this item with fresh stream links.")
                 self._download_ffmpeg(item)
             else:
                 raise ValueError(f"Unknown download engine: {engine}")
@@ -775,6 +820,18 @@ class DownloadWorker:
             if item.status == DownloadStatus.FAILED:
                 raise _DownloadAttemptFailed(item.error or f"{engine} download failed")
 
+        except PipelineCancelled:
+            # Paused/cancelled work keeps its partial tracks and status.
+            pass
+        except FinalizationError as exc:
+            _logger.warning("Download finalization failed for item %s: %s", item.id, exc)
+            with self.lock:
+                if item.status not in (DownloadStatus.PAUSED, DownloadStatus.CANCELLED, DownloadStatus.QUEUED):
+                    item.status = DownloadStatus.FAILED
+                    item.error = str(exc)
+                    item.completed_at = time.time()
+                    item.logs.append(str(exc))
+                    item.speed_str = item.eta_str = ""
         except ProviderDependencyError as exc:
             _logger.warning("Download requirements unavailable for item %s: %s", item.id, exc)
             with self.lock:
@@ -817,12 +874,45 @@ class DownloadWorker:
                     item.error = str(e)
                     item.completed_at = time.time()
         finally:
+            item.upload_speed = 0.0
             if item.proxy_server:
                 _stop_proxy_server(item.proxy_server, item_id=item.id, context="download cleanup")
                 item.proxy_server = None
             with self.lock:
                 self.active_items.pop(item.id, None)
                 self._wake_event.set()
+
+    def _download_torrent(self, item):
+        from ..torrents.download import download_torrent_file
+        from ..torrents.runtime import TorrentCancelled
+        def cancelled():
+            return self._stop_event.is_set() or item.status in (DownloadStatus.PAUSED, DownloadStatus.CANCELLED, DownloadStatus.QUEUED)
+        def progress(done, total, speed):
+            with self.lock:
+                item.downloaded_bytes, item.total_bytes = done, total
+                item.progress = 100.0 * done / total if total else 0
+                item.speed_str = format_bytes(speed) + "/s" if speed else ""
+                item.eta_str = f"{int((total-done)/speed)}s" if speed else ""
+        def upload_progress(speed, total):
+            with self.lock:
+                item.upload_speed, item.uploaded_bytes = speed, total
+        item.engine = "libtorrent"
+        item.logs.append("Using libtorrent download engine.")
+        try:
+            path = download_torrent_file(item.url, item.torrent, item.destination_path,
+                progress=progress, upload_progress=upload_progress, message=item.logs.append, cancel_check=cancelled)
+        except TorrentCancelled:
+            return
+        with self.lock:
+            if cancelled():
+                return
+            item.status = DownloadStatus.COMPLETED
+            item.progress = 100.0
+            item.completed_at = time.time()
+            item.speed_str = item.eta_str = ""
+            item.logs.append("✔ Torrent file complete (original audio/subtitles retained).")
+            _set_item_output_files(item, [path])
+        _notify_complete(item)
 
     def _episode_metadata_args(self, item):
         metadata = item.show_metadata or {}
@@ -850,6 +940,53 @@ class DownloadWorker:
             if not cancelled():
                 item.logs.append("Download saved without skip timings. FFmpeg remux unavailable.")
 
+    def _download_tracks(self, item):
+        from .track_pipeline import run_track_pipeline
+        from ..services.requirements import require_executable
+        require_executable("ffprobe", "Downloaded track verification")
+        initial = item.status
+        def cancelled():
+            return self._stop_event.is_set() or item.status in (DownloadStatus.PAUSED, DownloadStatus.CANCELLED) or (
+                item.status == DownloadStatus.QUEUED and initial != DownloadStatus.QUEUED)
+        def process_changed(proc):
+            with self.lock:
+                item.process = proc
+        def progress(done, total, speed, eta):
+            with self.lock:
+                item.downloaded_bytes, item.total_bytes = done, total
+                item.progress = min(99.9, 100 * done / total) if total else item.progress
+                item.speed_str = format_bytes(speed) + "/s" if speed else ""
+                item.eta_str = str(eta or "")
+        sub_langs, audio_langs, _ = _item_download_preferences(item)
+        audio = item.audio_tracks or ([{"url": item.audio_url, "language": "und", "default": True}] if item.audio_url else [])
+        audio = filter_tracks_by_language(audio, audio_langs, is_audio=True)
+        subtitles = _selected_subtitles(item, sub_langs)
+        sidecars = download_sidecar_subtitles(subtitles, _base_output_path(item.destination_path),
+                     headers=item.headers, requested_langs=sub_langs, quiet=True,
+                     cancel_check=cancelled, on_hint=item.logs.append) if subtitles else []
+        if cancelled():
+            raise PipelineCancelled()
+        metadata_args, _ = self._episode_metadata_args(item)
+        identity = item.current_mirror_url or item._network_source.get("url") or item.url
+        path = run_track_pipeline(item.url, item.destination_path, headers=item.headers,
+                    audio_tracks=audio, subtitle_files=sidecars, metadata_args=metadata_args,
+                    identity=identity, cache_context={"mirror": item.current_mirror_name, "request": item.resume_request},
+                    message=item.logs.append, progress=progress,
+                    cancel=cancelled, process_changed=process_changed)
+        with self.lock:
+            item.status = DownloadStatus.COMPLETED
+            item.progress = 100.0
+            item.downloaded_bytes = item.total_bytes = os.path.getsize(path)
+            item.completed_at = time.time()
+            item.speed_str = item.eta_str = ""
+            _set_item_output_files(item, [path])
+        for sidecar in sidecars:
+            try:
+                os.remove(sidecar)
+            except OSError:
+                pass
+        _notify_complete(item)
+
     def _download_ytdlp(self, item: DownloadItem):
         cmd = [
             "yt-dlp",
@@ -857,7 +994,7 @@ class DownloadWorker:
             "--progress-template",
             "%(progress._percent_str)s\t%(progress.downloaded_bytes)s\t%(progress.total_bytes_estimate)s\t%(progress._speed_str)s\t%(progress._eta_str)s",
             "-o", item.destination_path,
-            "--force-overwrites",
+            "--continue",
             "--audio-multistreams",
         ]
         if item.headers:
@@ -941,6 +1078,8 @@ class DownloadWorker:
             f"--dir={dest_dir}",
             f"--out={dest_file}",
             "--allow-overwrite=true",
+            "--continue=true",
+            "--always-resume=false",
             "--auto-file-renaming=false",
         ]
         if item.headers:
@@ -1299,7 +1438,10 @@ def get_global_worker(download_dir: str = "", max_concurrent: int = 2) -> Downlo
                 except Exception:
                     _logger.warning("Failed to load download worker configuration; using fallback download directory", exc_info=True)
                     download_dir = os.path.expanduser("~/Videos/anyplay")
-            _GLOBAL_DOWNLOAD_WORKER = DownloadWorker(download_dir, max_concurrent=max_concurrent)
+            from ..state.paths import STATE_DIR
+            from .download_queue_store import QueueStore
+            store = QueueStore(os.path.join(STATE_DIR, 'download_queue.json'))
+            _GLOBAL_DOWNLOAD_WORKER = DownloadWorker(download_dir, max_concurrent=max_concurrent, queue_store=store)
             _GLOBAL_DOWNLOAD_WORKER.start()
             import atexit
             atexit.register(stop_global_worker)
@@ -1311,6 +1453,17 @@ def get_global_worker_if_started() -> DownloadWorker | None:
     global _GLOBAL_DOWNLOAD_WORKER
     with _GLOBAL_WORKER_LOCK:
         return _GLOBAL_DOWNLOAD_WORKER
+
+
+def get_download_manager_worker():
+    """Restore saved rows only when the manager is requested; never start transfers."""
+    worker = get_global_worker_if_started()
+    if worker is not None:
+        return worker
+    from ..state.paths import STATE_DIR
+    if os.path.isfile(os.path.join(STATE_DIR, 'download_queue.json')):
+        return get_global_worker()
+    return None
 
 
 def has_tracked_downloads() -> bool:
@@ -1325,7 +1478,7 @@ def has_tracked_downloads() -> bool:
 
 
 def has_active_downloads() -> tuple[int, int]:
-    """Count unfinished work, excluding a worker already stopped by the user."""
+    """Count running and queued work; paused entries are already safe to exit."""
     worker = get_global_worker_if_started()
     if worker is None:
         return 0, 0
@@ -1334,7 +1487,7 @@ def has_active_downloads() -> tuple[int, int]:
             return 0, 0
         active = sum(
             1 for it in worker.items
-            if it.status in (DownloadStatus.DOWNLOADING, DownloadStatus.RESOLVING, DownloadStatus.PAUSED)
+            if it.status in (DownloadStatus.DOWNLOADING, DownloadStatus.RESOLVING)
         )
         queued = sum(
             1 for it in worker.items

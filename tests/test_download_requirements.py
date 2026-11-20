@@ -15,8 +15,8 @@ def tools(monkeypatch, installed):
 
 @pytest.mark.parametrize("installed,url,worker,expected,hint", [
     ({"ffmpeg", "yt-dlp"}, "https://cdn.example/video.mp4", False, "yt-dlp", False),
-    ({"ffmpeg", "yt-dlp"}, "https://cdn.example/video.mp4", True, "ffmpeg", False),
-    ({"ffmpeg", "yt-dlp"}, "https://cdn.example/video.m3u8", False, "ffmpeg", False),
+    ({"ffmpeg", "yt-dlp"}, "https://cdn.example/video.mp4", True, "yt-dlp", False),
+    ({"ffmpeg", "yt-dlp"}, "https://cdn.example/video.m3u8", False, "yt-dlp", False),
     ({"ffmpeg"}, "https://cdn.example/video.mp4", False, "ffmpeg", False),
     ({"yt-dlp"}, "https://cdn.example/video.m3u8", True, "yt-dlp", True),
     ({"aria2c"}, "https://cdn.example/video.mp4", True, "aria2c", True),
@@ -35,7 +35,7 @@ def test_hls_requires_a_real_stream_downloader(monkeypatch, installed):
     from media_cli.media.download_requirements import plan_download
 
     tools(monkeypatch, installed)
-    with pytest.raises(ProviderDependencyError, match="ffmpeg.*yt-dlp"):
+    with pytest.raises(ProviderDependencyError, match="yt-dlp.*ffmpeg"):
         plan_download("auto", "https://cdn.example/video.m3u8", worker=True)
 
 
@@ -170,3 +170,12 @@ def test_unsupported_engine_gives_configuration_guidance_not_mirror_retry(monkey
     tools(monkeypatch, {"ffmpeg", "yt-dlp"})
     with pytest.raises(ProviderDependencyError, match="Choose"):
         plan_download("unknown-engine", "https://cdn.example/video.mp4")
+
+
+@pytest.mark.parametrize('worker', [True, False])
+def test_auto_prefers_resumable_ytdlp_but_preserves_external_audio_mux(monkeypatch, worker):
+    from media_cli.media.download_requirements import plan_download
+    tools(monkeypatch, {'ffmpeg', 'yt-dlp'})
+    assert plan_download('auto', 'https://cdn.test/master.m3u8', worker=worker).engine == 'yt-dlp'
+    assert plan_download('auto', 'https://cdn.test/master.m3u8', external_audio=True, worker=worker).engine == 'yt-dlp'
+    assert plan_download('ffmpeg', 'https://cdn.test/master.m3u8', worker=worker).engine == 'ffmpeg'

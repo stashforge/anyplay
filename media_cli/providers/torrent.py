@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Callable
 
-from ..torrents import build_torrent_source, search_general_torrents
+from ..torrents import build_torrent_source
 from ..torrents.formatting import human_size
 from ..torrents.models import TorrentResult, torrent_search_config_from_app_config
 from .shared.models import normalize_episode_catalog, normalize_episode_sources, normalize_titles
@@ -19,8 +19,10 @@ class TorrentProvider:
 
     def __init__(self, request_json_fn=None, *, search_fn: TorrentSearchFn | None = None):
         del request_json_fn
-        self._search_fn = search_fn or search_general_torrents
+        self._search_fn = search_fn
         self._result_cache: dict[str, TorrentResult] = {}
+        self._file_cache = {}
+        self._query_cache = {}
         if not hasattr(self, "metadata"):
             self.metadata = {}
         if not hasattr(self, "domains"):
@@ -92,8 +94,13 @@ class TorrentProvider:
             parts.append(result.source)
         return " | ".join(parts)
 
-    def _title_from_result(self, result: TorrentResult) -> dict:
+    def _title_from_result(self, result: TorrentResult, query=None) -> dict:
         self._remember(result)
+        if query is not None:
+            self._query_cache[result.infohash] = query
+        from ..torrents.ranking import assess
+        assessment = assess(result.name, seeders=result.seeders, leechers=result.leechers,
+                            trusted=result.trusted, query=self._query_cache.get(result.infohash, ''))
         summary = self._summary(result)
         return {
             "_id": result.infohash,
@@ -124,25 +131,43 @@ class TorrentProvider:
                 "file_count": result.file_count,
                 "audio_langs": list(result.audio_langs),
                 "sub_langs": list(result.sub_langs),
+                "tracker_urls": list(result.tracker_urls),
+                "trusted": result.trusted,
+                "ranking": assessment,
             },
         }
 
-    def search(self, query: str, ttype: str = "sub") -> list[dict]:
+    def search(self, query: str, ttype: str = "sub", *, progress=None) -> list[dict]:
         del ttype
         try:
             from media_cli.core.storage import load_config
             config = torrent_search_config_from_app_config(load_config())
         except Exception:
             config = torrent_search_config_from_app_config({})
-        try:
-            results = self._search_fn(query, config=config)
-        except TypeError:
-            results = self._search_fn(query)
-        titles = [self._title_from_result(result) for result in results]
+        outcomes = {}
+        if self._search_fn is None:
+            from ..torrents.public_search import search_public_torrents
+            def publish(batch, sources):
+                if progress:
+                    records = [self._title_from_result(result, query) for result in batch]
+                    for record in records:
+                        record["_torrent_sources"] = sources
+                    progress(normalize_titles(records, provider_id=self.id, provider_name=self.name, id_key="_id"))
+            results, outcomes = search_public_torrents(query, config=config, progress=publish)
+        else:
+            try:
+                results = self._search_fn(query, config=config)
+            except TypeError:
+                results = self._search_fn(query)
+        titles = [self._title_from_result(result, query) for result in results]
+        for title in titles:
+            title["_torrent_sources"] = outcomes
         return normalize_titles(titles, provider_id=self.id, provider_name=self.name, id_key="_id")
 
     def get_title(self, provider_id: str) -> dict | None:
-        result = self._get_result(provider_id)
+        result = self._result_cache.get(str(provider_id or "").casefold())
+        if result is None:
+            return None
         return normalize_titles(
             [self._title_from_result(result)],
             provider_id=self.id,
@@ -151,17 +176,18 @@ class TorrentProvider:
         )[0]
 
     def episode_catalog(self, provider_id: str, ttype: str = "sub") -> dict:
-        episode = {
-            "id": "1",
-            "label": "File",
-            "title": self._get_result(provider_id).name,
-        }
+        key = str(provider_id).casefold()
+        if key not in self._file_cache:
+            from ..torrents.metadata import fetch_video_inventory
+            self._file_cache[key] = fetch_video_inventory(self._get_result(provider_id).magnet)
+        episodes = [{"id": str(file["index"] + 1), "label": file["path"].replace("\\", "/").rsplit("/", 1)[-1],
+                     "title": file["path"], "size_bytes": file["size"]} for file in self._file_cache[key]]
         return normalize_episode_catalog(
             {
                 "episodes": {
-                    "sub": [dict(episode, translationType="sub")],
-                    "dub": [dict(episode, translationType="dub")],
-                    "raw": [dict(episode, translationType="raw")],
+                    "sub": [dict(item, translationType="sub") for item in episodes],
+                    "dub": [dict(item, translationType="dub") for item in episodes],
+                    "raw": [dict(item, translationType="raw") for item in episodes],
                 },
                 "translation_type": ttype,
             },
@@ -170,14 +196,22 @@ class TorrentProvider:
         )
 
     def episode_sources(self, provider_id: str, episode: str, ttype: str = "sub") -> dict | None:
-        del episode, ttype
+        del ttype
         result = self._get_result(provider_id)
         source = build_torrent_source(result)
+        key = str(provider_id).casefold()
+        if key in self._file_cache:
+            selected = next((file for file in self._file_cache[key] if str(file["index"] + 1) == str(episode)), None)
+            if selected is None:
+                raise ValueError("Selected video is not in this torrent")
+            source["torrent"].update(file_index=selected["index"], file_path=selected["path"], file_size=selected["size"])
+        elif str(episode) != "1":
+            raise ValueError("Load torrent files before selecting a video")
         return normalize_episode_sources(
             {"episode": {"sourceUrls": [source]}},
             provider_id=self.id,
             provider_title_id=provider_id,
-            episode="1",
+            episode=str(episode),
         )
 
     def browser_url(self, *, provider_id: str = "", episode: str = "") -> str:

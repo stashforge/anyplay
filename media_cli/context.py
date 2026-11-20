@@ -90,6 +90,8 @@ class UiState:
     ``globals()``.
     """
 
+    tui_layout: str = "bottom"
+
     # Hover / poster
     hovered_show_id: str | None = None
     """Provider ID of the show currently highlighted in the picker."""
@@ -98,6 +100,9 @@ class UiState:
     """Full show dict of the currently highlighted show (for poster ticks)."""
 
     # Active search query text inside the picker
+    downloads_parent: str = "QUIT"
+    downloads_selection: tuple[str | None, str, bool, int] | None = None
+
     active_picker_query: str = ""
     """The live filter query string typed inside the current picker."""
 
@@ -208,6 +213,7 @@ class MachineState:
 
     # AniList search parent (for back-navigation)
     anilist_search_parent: str = "QUIT"
+    anilist_airing_parent: str = "ANILIST_MENU"
     """State to return to when Esc-ing from ANILIST_SEARCH."""
 
     # Search UX helpers

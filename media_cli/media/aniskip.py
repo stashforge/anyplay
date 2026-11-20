@@ -56,8 +56,22 @@ def _parsed_interval(item) -> dict | None:
     return dict(item, start=start, end=end, episode_length=reference)
 
 
+def clamp_ending_overrun(interval: dict, duration: float) -> dict | None:
+    """Accept tiny ending overruns without shifting the start or other ranges."""
+    if interval['start'] >= duration:
+        return None
+    overrun = interval['end'] - duration
+    if overrun <= 0:
+        return interval
+    if interval['type'] not in ('ed', 'mixed-ed') or overrun > 2.0:
+        return None
+    log.debug("[skips] Clamped ending %.3fs to runtime %.3fs (overrun %.3fs); start unchanged %.3fs.",
+              interval['end'], duration, overrun, interval['start'])
+    return dict(interval, end=duration)
+
+
 def validated_skip_intervals(intervals: Iterable[dict], duration: float) -> list[dict]:
-    """Filter AniSkip candidates against the actual runtime without adjusting timestamps.
+    """Validate AniSkip candidates; clamp ending overruns of at most two seconds.
 
     Custom skip intervals do not require AniSkip reference metadata and should not
     be passed through this helper.
@@ -81,7 +95,8 @@ def validated_skip_intervals(intervals: Iterable[dict], duration: float) -> list
             )
             continue
         reference = parsed["episode_length"]
-        if parsed["end"] > duration or abs(reference - duration) > 20.0:
+        bounded = clamp_ending_overrun(parsed, duration)
+        if bounded is None or abs(reference - duration) > 20.0:
             log.debug(
                 "[aniskip] Rejected interval %.3fs - %.3fs: reference duration %.3fs, actual duration %.3fs.",
                 parsed["start"],
@@ -90,7 +105,7 @@ def validated_skip_intervals(intervals: Iterable[dict], duration: float) -> list
                 duration,
             )
             continue
-        results.append(parsed)
+        results.append(bounded)
     return results
 
 

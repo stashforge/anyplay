@@ -106,6 +106,7 @@ class Theme:
     rule: TextStyle = field(default=TextStyle(244), kw_only=True)
     tab_active: TextStyle = field(default=TextStyle((203, 166, 247)), kw_only=True)
     tab_inactive: TextStyle = field(default=TextStyle(244), kw_only=True)
+    row_normal: TextStyle = field(default=TextStyle(252), kw_only=True)
     row_selected: TextStyle = field(default=TextStyle(BasicColor.BRIGHT_WHITE, bold=True), kw_only=True)
     row_match: TextStyle = field(default=TextStyle((137, 180, 250)), kw_only=True)
 

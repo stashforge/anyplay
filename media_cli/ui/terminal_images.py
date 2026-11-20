@@ -5,24 +5,32 @@ from __future__ import annotations
 from .picker_render import clear_terminal_images
 
 _active = False
+_generation = 0
+
+
+def generation():
+    return _generation
 
 
 def mark_active() -> None:
     """Remember that the current terminal screen contains a native image."""
-    global _active
+    global _active, _generation
+    _generation += 1
     _active = True
 
 
 def clear_now() -> str:
     """Return the terminal-image clear sequence and reset image state."""
-    global _active
+    global _active, _generation
+    _generation += 1
     _active = False
     return clear_terminal_images()
 
 
 def clear_if_active() -> str:
     """Return a clear sequence only when a previous screen drew an image."""
-    global _active
+    global _active, _generation
+    _generation += 1
     if not _active:
         return ""
     _active = False

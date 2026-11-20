@@ -15,6 +15,7 @@ PROFILES = {
     'senshi': {'name': 'Senshi', 'identity': 'mal_id', 'combined': False, 'default': 'http', 'levels': ('extraction', 'http', 'mpv')},
     'anipm': {'name': 'AniPM', 'identity': 'mal_id', 'combined': True, 'default': 'http', 'levels': ('extraction', 'http', 'mpv')},
     'reanime': {'name': 'Re:ANIME', 'identity': 'anilist_id', 'combined': True, 'default': 'http', 'levels': ('extraction', 'http', 'mpv')},
+    'gotaku': {'name': 'Gotaku', 'identity': 'metadata', 'combined': True, 'default': 'http', 'levels': ('extraction', 'http', 'mpv')},
 }
 
 PROFILES['lucifer'] = {**PROFILES['animexin'], 'name': 'LuciferDonghua', 'url_hosts': ('luciferdonghua.in',), 'default': 'extraction', 'levels': ('extraction',)}
@@ -31,7 +32,7 @@ def valid_title_id(provider_id, value):
             return bool(parsed.scheme == 'https' and parsed.hostname in PROFILES[provider_id]['url_hosts'] and parsed.port in (None, 443) and not parsed.username and not parsed.password and not parsed.query and not parsed.fragment and not any(part in ('.', '..') for part in unquote(parsed.path).split('/')) and not any(ord(c) < 33 or ord(c) == 127 for c in value))
         except ValueError:
             return False
-    if provider_id in ('reanime', 'animepahe', 'anizone', 'animegg'):
+    if provider_id in ('reanime', 'animepahe', 'anizone', 'animegg', 'gotaku'):
         return bool(re.fullmatch(r'[a-zA-Z0-9_-]{1,200}', value))
     if provider_id == 'movies':
         return bool(re.fullmatch(r'(?:movie|tv):[1-9][0-9]*', value))
@@ -117,6 +118,8 @@ def valid_episode_id(provider_id, value, title_id=None):
     if type(value) not in (str, int, float):
         return False
     text = str(value)
+    if provider_id == 'gotaku':
+        return bool(re.fullmatch(r'[a-zA-Z0-9_-]{1,200}', text))
     if PROFILES[provider_id].get('url_hosts'):
         return valid_title_id(provider_id, text)
     if PROFILES[provider_id].get('slug_episode'):

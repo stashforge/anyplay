@@ -394,21 +394,21 @@ def test_live_tabs_use_shared_controller_and_keep_filter(monkeypatch, navigation
     assert expected in modes
 
 
-@pytest.mark.parametrize("key,expected,event", [(b"\x1b", "QUIT", "quit"), (b"\x1b[D", "SEARCH", "back"),
-                                               (b"Second\r", "DETAILS", "select"),
+@pytest.mark.parametrize("key,expected,event", [(b"\x1b", "SEARCH", "back"), (b"\x1b[D", "SEARCH", "back"),
+                                               (b"/Second\r", "DETAILS", "select"),
                                                (b"\x12", "QUIT", "refresh_title"),
                                                (b"\x1b[15~", "QUIT", "refresh_view"),
                                                (b"\x1br", "QUIT", "refresh_view"),
-                                               (b"title\x1b[3~", "QUIT", "delete"),
-                                               (b"title\x04", "QUIT", "delete"),
-                                               (b"title\x1b[3~", "QUIT", "delete_cancel"),
-                                               (b"title\t", "QUIT", "tab_next"),
-                                               (b"title\x0e", "QUIT", "tab_next"),
-                                               (b"title\x1b[Z", "QUIT", "tab_previous"),
-                                               (b"title\x10", "QUIT", "tab_previous"),
-                                               (b"Second\x0f", "QUIT", "information"),
-                                               (b"Second?", "QUIT", "help"),
-                                               (b"Second\r", "DETAILS", "select_without_episode_wait")])
+                                               (b"/title\x1b[3~", "QUIT", "delete"),
+                                               (b"/title\x04", "QUIT", "delete"),
+                                               (b"/title\x1b[3~", "QUIT", "delete_cancel"),
+                                               (b"/title\t", "QUIT", "tab_next"),
+                                               (b"/title\x0e", "QUIT", "tab_next"),
+                                               (b"/title\x1b[Z", "QUIT", "tab_previous"),
+                                               (b"/title\x10", "QUIT", "tab_previous"),
+                                               (b"/Second\x0f", "QUIT", "information"),
+                                               (b"?", "QUIT", "help"),
+                                               (b"/Second\r", "DETAILS", "select_without_episode_wait")])
 def test_real_terminal_history_shared_renderer(tmp_path, key, expected, event):
     source = """
 from copy import deepcopy
@@ -490,18 +490,19 @@ finish(dict(state=first_result, events=events, actions=actions, deleted=deleted,
         terminal.send_after(b"Watch History", key)
         if selection:
             terminal.until(b"REOPEN_BEGIN")
-            terminal.send_after(b"Watch History", b"\x1b")
+            terminal.send_after(b"Watch History", b"\x03")
         if event.startswith("refresh_"):
             message = b"Refreshing this title..." if event == "refresh_title" else b"Refreshing 2 titles..."
-            terminal.send_after(message, b"\x1b")
+            terminal.send_after(message, b"\x03")
         if event.startswith("delete"):
             terminal.send_after(b"Delete this history entry? y/N", b"n" if event == "delete_cancel" else b"y")
-            terminal.send_after(b"Watch History", b"\x1b")
+            terminal.send_after(b"Watch History", b"\x03")
         if event.startswith("tab_"):
-            terminal.send_after(b"Active" if event == "tab_next" else b"Completed", b"\x1b")
+            terminal.send_after(b"Active" if event == "tab_next" else b"Completed", b"\x03")
         if event in ("information", "help"):
-            terminal.send_after(b"Information for second" if event == "information" else b"Title information", b"q")
-            terminal.send_after(b"Watch History", b"\x1b")
+            terminal.send_after(b"Information for second" if event == "information" else b"Title information",
+                                b"q" if event == "information" else b"\x1b")
+            terminal.send_after(b"Watch History", b"\x03")
         result = terminal.result()
         assert result["state"] == expected
         expected_events = ["action", "quit"] if event.startswith("refresh_") else [event]
@@ -522,7 +523,7 @@ finish(dict(state=first_result, events=events, actions=actions, deleted=deleted,
             assert result["query"] == "title"
             assert result["mode"] == ("Active" if event == "tab_next" else "Completed")
         if event in ("information", "help"):
-            assert result["query"] == "Second"
+            assert result["query"] == ("Second" if event == "information" else "")
             assert result["actions"] == (["information"] if event == "information" else [])
         if event == "select_without_episode_wait":
             assert b"Checking episode list" not in terminal.output

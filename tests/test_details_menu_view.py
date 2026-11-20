@@ -112,7 +112,8 @@ def test_missing_cover_and_secondary_have_explicit_fallbacks():
     assert result.image.state == "unavailable"
     assert resolve_details(result.details).secondary == "No alternative title"
     source["genres"] = ["Adventure", "Comedy"]
-    assert resolve_details(build(source).details).secondary == "Adventure • Comedy"
+    assert resolve_details(build(source).details).secondary == "No alternative title"
+    assert build(source).extra_details == "Adventure • Comedy"
 
 
 def test_download_metadata_uses_existing_local_only_decisions():

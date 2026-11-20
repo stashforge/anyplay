@@ -24,6 +24,7 @@ globals, so there is exactly one owner of the flag.
 import atexit
 import logging
 import os
+from .viewport import content_size as _content_size
 import re
 import sys
 import termios
@@ -124,9 +125,14 @@ def _clear_poster_downloads():
 
 
 def clear_terminal_images():
+    """Clear image ownership and terminal pixels together on the UI thread."""
+    from .transition import call_on_ui_thread
     from .terminal_output import write_terminal
-    write_terminal(terminal_images.clear_now())
-    sys.stdout.flush()
+
+    def clear():
+        write_terminal(terminal_images.clear_now())
+
+    return call_on_ui_thread(clear)
 
 
 def _poster_footer_line(show, default_text, width):
@@ -235,7 +241,10 @@ def exit_alt_screen():
 def restore_terminal():
     """Fully restore terminal echo, canonical mode, cursor, alt screen, and clear active terminal images."""
     try:
-        terminal_images.clear_if_active()
+        image_clear = terminal_images.clear_if_active()
+        if image_clear:
+            sys.stdout.write(image_clear)
+            sys.stdout.flush()
     except Exception:
         pass
     try:
@@ -344,7 +353,7 @@ def _invoke_loading_work(fn, args, kwargs, status_cb, *, preserve_callback=False
     return fn(*args, **work_kwargs)
 
 
-def _run_loading_helper(msg, fn, args, kwargs, paint, *, preserve_callback=False):
+def _run_loading_helper(msg, fn, args, kwargs, paint, *, preserve_callback=False, on_key=None, start_delay=0.0):
     from .loading_model import LoadingInteraction, LoadingOwner, LoadingPlacement, LoadingTaskSpec
     from .loading_preparation import LoadingPreparation
     from .picker_actions import picker_bindings
@@ -392,7 +401,7 @@ def _run_loading_helper(msg, fn, args, kwargs, paint, *, preserve_callback=False
         )
         driver = LoadingPreparation(
             spec, fd=runtime.fileno(), render=render,
-            active=is_alt_screen_active, bindings=bindings,
+            active=is_alt_screen_active, bindings=bindings, on_key=on_key, start_delay=start_delay,
         )
 
         def status_sink(formatted_message, ansi_color):
@@ -430,7 +439,7 @@ def _run_loading_helper(msg, fn, args, kwargs, paint, *, preserve_callback=False
 
 def _paint_footer_loading(snapshot, fd, spinner_style):
     try:
-        size = os.get_terminal_size(fd)
+        size = _content_size(fd)
         w, h = size.columns, size.lines
     except OSError:
         w, h = 80, 24
@@ -454,7 +463,7 @@ def render_anilist_menu_loading(status, loading_text=""):
     # This renderer replaces the entire frame outside the picker's row cache.
     invalidate_screen_buffer()
     try:
-        size = os.get_terminal_size()
+        size = _content_size()
         columns, rows = size.columns, size.lines
     except OSError:
         columns, rows = 80, 24
@@ -479,12 +488,24 @@ def with_anilist_menu_loading(status, msg, fn, *args, **kwargs):
 
     def paint(snapshot, fd, spinner_style):
         try:
-            width = os.get_terminal_size(fd).columns
+            width = _content_size(fd).columns
         except OSError:
             width = 80
         render_anilist_menu_loading(status, _loading_line(snapshot.message, width, spinner_style))
 
-    return _run_loading_helper(msg, fn, args, kwargs, paint, preserve_callback=True)
+    def navigate(key):
+        from .anilist_menu import LIBRARY_TABS, AniListTabChanged
+        if status == 'ANILIST_AIRING' or key not in ('TAB', 'CTRL_N', 'SHIFT_TAB', 'BTAB', 'CTRL_P'):
+            return False
+        keys = [value for value, _label in LIBRARY_TABS]
+        current = status or 'ALL'
+        if current not in keys:
+            return False
+        chosen = keys[(keys.index(current) + (-1 if key in ('SHIFT_TAB', 'BTAB', 'CTRL_P') else 1)) % len(keys)]
+        raise AniListTabChanged(None if chosen == 'ALL' else chosen)
+
+    return _run_loading_helper(msg, fn, args, kwargs, paint, preserve_callback=True, on_key=navigate,
+                               start_delay=0.45 if status != "ANILIST_AIRING" else 0.0)
 
 
 def with_footer_loading(msg, fn, *args, **kwargs):

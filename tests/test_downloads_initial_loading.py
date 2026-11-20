@@ -2,7 +2,6 @@
 
 from copy import deepcopy
 import sys
-import re
 from threading import Event, get_ident
 from types import SimpleNamespace
 
@@ -111,7 +110,15 @@ downloads.load_downloads_db = lambda: deepcopy(stored)
 downloads.save_downloads_db = lambda data: None
 downloads.make_info_fn = lambda *a: None
 downloads._get_poster = lambda *a: ''
-downloads.build_info_panel = lambda show, tt, width, parts, **kw: parts.extend([show['name'], 'Secondary', 'Metadata'])
+seen = []
+def info_panel(show, tt, width, parts, **kw):
+    seen.append(show['name'])
+    parts.extend([show['name'], 'Secondary', 'Metadata'])
+downloads.build_info_panel = info_panel
+def library_info(show, tt, width, **kwargs):
+    seen.append(show['name'])
+    return [show['name'], 'Secondary', 'Metadata', 'Genres']
+downloads.library_info_lines = library_info
 downloads._poster_footer_line = lambda show, line, width: render_footer(line, width) if isinstance(line, Footer) else line
 downloads.app_core.get_local_progress = lambda *a: None
 downloads.app_core.get_local_episode_label = lambda *a: None
@@ -126,20 +133,15 @@ with TerminalRuntime():
     result = run_preparation(lambda: downloads.handle_downloads_state(
         CliFlags(show_image=False), UiState(), MachineState(), {{'download_dir': {str(tmp_path)!r}}},
         SimpleNamespace(), 'sub', None), tick=lambda: None)
-finish(result)
+finish(dict(result=result, last=seen[-1]))
 """
-    with Terminal(tmp_path, script, rows=12) as terminal:
+    with Terminal(tmp_path, script, rows=16) as terminal:
         terminal.until(b"Checking downloaded files...")
         assert b"First" in terminal.output and b"Second" in terminal.output
-        terminal.send_after(b"\x1b[12;100H", b"\x1b[A")
-        terminal.until(b"\x1b[9;1H")
-        terminal.until(b"\x1b[12;100H")
+        terminal.send_after(b"Checking downloaded files...", b"\x1b[B")
+        terminal.until("❯ \033[0mSecond".encode())
         gate.write_text("ready")
         terminal.until(b"(2)")
-        terminal.until(b"\x1b[12;100H")
-        # Bottom-up navigation selected Second before the worker reordered rows.
-        headers = re.findall(rb"\x1b\[9;1H\x1b\[2K(?:\x1b\[2K)?([^\x1b\r\n]*)", terminal.output)
-        assert headers[-1] == b"Second"
         import os
         os.write(terminal.master, b"\x1b")
-        assert terminal.result() == "QUIT"
+        assert terminal.result() == {"result": "QUIT", "last": "Second"}

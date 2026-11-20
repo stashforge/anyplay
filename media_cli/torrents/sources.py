@@ -38,3 +38,20 @@ def build_torrent_source(result: TorrentResult) -> dict:
             "tt_id": result.tt_id,
         },
     }
+
+
+def selected_file_source(show, file_id, filename):
+    """Build directly from the selected batch snapshot, not a fresh provider cache."""
+    from dataclasses import fields
+    data = dict(show.get('_torrent') or {})
+    data.setdefault('infohash', str(show.get('_id') or show.get('_provider_id') or ''))
+    data.setdefault('name', str(show.get('name') or 'Torrent'))
+    data.setdefault('source', 'magnet')
+    allowed = {field.name for field in fields(TorrentResult)}
+    result = TorrentResult(**{key:value for key,value in data.items() if key in allowed})
+    index = int(file_id)-1
+    if index < 0:
+        raise ValueError('Invalid torrent file identity')
+    source = build_torrent_source(result)
+    source['torrent'].update(file_index=index, file_name=str(filename))
+    return source

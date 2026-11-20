@@ -50,7 +50,6 @@ def run_fresh(code, home):
     (["completion", "install", "fish"], 0, "Installed fish completion"),
     (["companion", "unknown"], 2, "Unknown companion_action"),
     (["search", "zzzzzz:example"], 2, "Unknown provider"),
-    ([], 0, "Main commands"),
 ])
 def test_utility_commands_work_without_optional_or_media_imports(tmp_path, arguments, exit_code, text):
     result = run_fresh(f"""

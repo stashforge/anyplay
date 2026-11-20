@@ -249,14 +249,24 @@ def history_can_skip_finished_provider_refresh(show, *, require_genres=False):
     return True
 
 
-HISTORY_REFRESH_COOLDOWN_SECONDS = 30 * 60
-HISTORY_REFRESH_FAILURE_COOLDOWN_SECONDS = 60
+HISTORY_REFRESH_COOLDOWN_SECONDS = 60 * 60
+
+
+def configure_history_refresh(config):
+    """One cadence for every automatic history checker in this process."""
+    from ..state.config import normalize_config
+    value = normalize_config(config)['history_refresh_minutes']
+    global HISTORY_REFRESH_COOLDOWN_SECONDS
+    HISTORY_REFRESH_COOLDOWN_SECONDS = value * 60
 
 
 def history_refresh_last_checked_at(show):
     show = show or {}
     values = []
     for key in (
+        "_provider_catalog_attempted_at",
+        "_provider_catalog_failed_at",
+        "_anilist_airing_attempted_at",
         "_provider_catalog_checked_at",
         "_anilist_airing_checked_at",
         "_allanime_checked_at",
@@ -274,26 +284,31 @@ def history_entry_refresh_is_stale(
     entry,
     *,
     now=None,
-    cooldown=HISTORY_REFRESH_COOLDOWN_SECONDS,
+    cooldown=None,
 ):
     now = int(time.time() if now is None else now)
     show = (entry or {}).get("show", {})
-    try:
-        failed_at = int(float(show.get("_provider_catalog_failed_at") or 0))
-    except (TypeError, ValueError):
-        failed_at = 0
-    if failed_at > 0:
-        return (now - failed_at) >= HISTORY_REFRESH_FAILURE_COOLDOWN_SECONDS
     last_checked = history_refresh_last_checked_at(show)
-    return last_checked <= 0 or (now - last_checked) >= int(cooldown)
+    interval = HISTORY_REFRESH_COOLDOWN_SECONDS if cooldown is None else int(cooldown)
+    return last_checked <= 0 or (now - last_checked) >= interval
+
+
+def history_entry_supports_background_refresh(entry):
+    """Torrent inventories are immutable; resolve them only when explicitly needed."""
+    from .titles import title_provider_key
+
+    show = (entry or {}).get("show", {})
+    return title_provider_key(show).casefold() != "torrent" and not show.get("_torrent")
 
 
 def history_entry_should_auto_refresh(
     entry,
     *,
     now=None,
-    cooldown=HISTORY_REFRESH_COOLDOWN_SECONDS,
+    cooldown=None,
 ):
+    if not history_entry_supports_background_refresh(entry):
+        return False
     show = (entry or {}).get("show", {})
     if not (show.get("_id") or show.get("id")):
         return False
@@ -344,6 +359,14 @@ def history_full_episode_count(entry):
         pass
     return history_available_episode_count(entry)
 
+def decimal_progress_at_least(entry, count):
+    from decimal import Decimal, InvalidOperation
+    try:
+        return Decimal(str(history_entry_progress(entry)[1])) >= Decimal(str(count))
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+
+
 def history_entry_category(
         entry,
         *,
@@ -373,6 +396,34 @@ def history_entry_category(
     except decimal.InvalidOperation:
         target_dec = None
 
+    # Marks acknowledge a confirmed release, not an indefinitely sticky flag.
+    event = show.get("_release_notification") or {}
+    previous_available = entry.get("release_available")
+    try:
+        if (previous_available is not None and available_count is not None
+                and float(available_count) > float(previous_available)
+                and not show.get("_provider_catalog_refresh_error")):
+            event = {"previous": float(previous_available), "available": float(available_count),
+                     "progress": str(local_num), "translation": entry.get("translation_type", "sub"),
+                     "detected_at": int(time.time())}
+            show["_release_notification"] = event
+    except (TypeError, ValueError):
+        pass
+    seen = (show.get("_release_seen") or {}).get(entry.get("translation_type", "sub"), 0)
+    previous = event.get("previous")
+    latest = event.get("available")
+    try:
+        entry["has_new_release"] = bool(
+            event.get("translation") == entry.get("translation_type", "sub")
+            and previous is not None and latest is not None
+            and 0 <= decimal.Decimal(str(previous)) - decimal.Decimal(str(event.get("progress", local_num))) <= 3
+            and local_num < decimal.Decimal(str(latest))
+            and decimal.Decimal(str(latest)) > decimal.Decimal(str(seen)))
+    except (decimal.InvalidOperation, TypeError, ValueError):
+        entry["has_new_release"] = False
+    if available_count is not None:
+        entry["release_available"] = available_count
+
     if provider_completed:
         if target_dec is not None and local_num >= target_dec:
             entry["was_caught_up"] = False
@@ -382,8 +433,6 @@ def history_entry_category(
 
     if target_dec is not None:
         if local_num < target_dec:
-            if entry.get("was_caught_up"):
-                entry["has_new_release"] = True
             return "Active"
         entry["was_caught_up"] = True
         entry["has_new_release"] = False
@@ -401,6 +450,8 @@ def filter_history_entries(
     if mode == "Up To Date":
         mode = "Up to date"
     if mode == "All":
+        for entry in history:
+            history_entry_category(entry)
         return list(history)
 
     return [
@@ -439,8 +490,26 @@ def playback_ep_from_history_entry(h, ttype=None, *, episode_ids=None, episode_l
 
 
 def refresh_history_entry_provider_catalog(entry, *, enrich=True):
+    """Serialize provider refreshes across the CLI and scheduled worker."""
+    import os
+    if os.name != "posix":
+        return _refresh_history_entry_provider_catalog(entry, enrich=enrich)
+    import fcntl
+    from pathlib import Path
+    from ..state.paths import STATE_DIR
+    root = Path(STATE_DIR)
+    root.mkdir(parents=True, exist_ok=True)
+    with (root / "history-provider-refresh.lock").open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        return _refresh_history_entry_provider_catalog(entry, enrich=enrich)
+
+
+def _refresh_history_entry_provider_catalog(entry, *, enrich=True):
     import time
-    from contextlib import contextmanager
+    from contextlib import contextmanager, nullcontext
 
     from ..core.reporting import debug_warn
     from ..providers.shared.models import title_provider_key
@@ -455,8 +524,14 @@ def refresh_history_entry_provider_catalog(entry, *, enrich=True):
     ttype = entry.get("translation_type", "sub")
     show_id = show.get("_id")
 
-    changed = False
+    torrent = show.get("_torrent") or {}
+    recovered_name = get_show_display_title(show) if torrent else None
+    changed = bool(recovered_name and recovered_name != show.get("name"))
+    if changed:
+        show["name"] = recovered_name
     catalog_succeeded = False
+    notification_previous = history_available_episode_count(entry)
+    history_entry_category(entry)
     if not show_id:
         return False
 
@@ -486,13 +561,21 @@ def refresh_history_entry_provider_catalog(entry, *, enrich=True):
 
         def cached_fetch(url, *args, **kwargs):
             key = (url, args, tuple(sorted(kwargs.items())))
+            try:
+                hash(key)
+            except TypeError:
+                # API providers may pass mutable headers/payloads. This small
+                # page cache must never change whether a valid request works.
+                return fetch_fn(url, *args, **kwargs)
             if key not in cache:
                 cache[key] = fetch_fn(url, *args, **kwargs)
             return cache[key]
 
         provider._fetch = cached_fetch
         try:
-            yield
+            parsing_cache = getattr(provider, "page_parsing_cache", None)
+            with parsing_cache() if callable(parsing_cache) else nullcontext():
+                yield
         finally:
             provider._fetch = fetch_fn
 
@@ -533,12 +616,16 @@ def refresh_history_entry_provider_catalog(entry, *, enrich=True):
                     labels,
                 )
                 changed = True
-                if old_avail is not None:
-                    try:
-                        if int(new_avail) > int(old_avail) and entry.get("was_caught_up"):
-                            entry["has_new_release"] = True
-                    except (ValueError, TypeError):
-                        pass
+            if notification_previous is not None:
+                try:
+                    if float(new_avail) > float(notification_previous):
+                        show["_release_notification"] = {
+                            "previous": float(notification_previous), "available": float(new_avail),
+                            "detected_at": int(time.time()), "translation": ttype,
+                            "progress": history_entry_progress(entry)[1],
+                        }
+                except (TypeError, ValueError):
+                    pass
             record_success()
         else:
             record_failure((catalog or {}).get("error") or "Episode catalogue unavailable")
@@ -557,6 +644,7 @@ def refresh_history_entry_provider_catalog(entry, *, enrich=True):
         except Exception:
             pass
 
+    history_entry_category(entry)
     return changed
 
 

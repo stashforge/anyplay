@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import base64
 import html
+import logging
 import re
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Callable
 
@@ -17,6 +20,30 @@ from bs4 import BeautifulSoup
 from ...media.source_entries import build_direct_source, build_embed_source
 from ...services.http import UA
 from .schema import build_catalog, build_episode, build_title
+
+
+_page_trees = ContextVar("wordpress_page_trees", default=None)
+
+
+@contextmanager
+def cached_page_parsing():
+    """Reuse read-only trees within one refresh; never retain across requests."""
+    token = _page_trees.set({})
+    try:
+        yield
+    finally:
+        _page_trees.reset(token)
+
+
+def _parse_page(markup):
+    cache = _page_trees.get()
+    if cache is None:
+        return BeautifulSoup(markup, "html.parser")
+    if markup not in cache:
+        if len(cache) >= 4:
+            cache.pop(next(iter(cache)))
+        cache[markup] = BeautifulSoup(markup, "html.parser")
+    return cache[markup]
 
 
 @dataclass(frozen=True)
@@ -99,7 +126,7 @@ def is_media_asset_url(url: str) -> bool:
 
 
 def parse_cards(base_url: str, page_html: str, *, only_main: bool = False, valid_domains: list[str] = None) -> list[Entry]:
-    soup = BeautifulSoup(page_html, "html.parser")
+    soup = _parse_page(page_html)
     source = soup
     if only_main:
         source = soup.select_one("div.listupd") or soup
@@ -136,7 +163,7 @@ def parse_cards(base_url: str, page_html: str, *, only_main: bool = False, valid
 
 
 def parse_series(base_url: str, page_html: str, valid_domains: list[str] = None, fetch_fn = None) -> list[Entry]:
-    soup = BeautifulSoup(page_html, "html.parser")
+    soup = _parse_page(page_html)
     section = soup.select_one("div.eplister, div.episodelist") or soup
     items: list[Entry] = []
     seen: set[str] = set()
@@ -207,7 +234,7 @@ def parse_series(base_url: str, page_html: str, valid_domains: list[str] = None,
                 try:
                     _extra_fetch_done[0] = True
                     ep_page_html = fetch_fn(href)
-                    ep_soup = BeautifulSoup(ep_page_html, "html.parser")
+                    ep_soup = _parse_page(ep_page_html)
                     mirrors = ep_soup.select("select.mirror option[value], div.player-embed iframe, div.megavid iframe, video")
                     has_playable = any(
                         (m.get("value", "").strip() and m.get("value", "").strip() not in ("#", "/"))
@@ -243,7 +270,7 @@ def parse_series(base_url: str, page_html: str, valid_domains: list[str] = None,
 
 
 def parse_episode(base_url: str, page_html: str, valid_domains: list[str] = None) -> EpisodePage:
-    soup = BeautifulSoup(page_html, "html.parser")
+    soup = _parse_page(page_html)
     title_node = soup.select_one("h1.entry-title, h1")
     title = clean_text(title_node.get_text(" ", strip=True) if title_node else "Unknown episode")
 
@@ -268,7 +295,7 @@ def parse_episode(base_url: str, page_html: str, valid_domains: list[str] = None
 
 
 def parse_mirrors(base_url: str, page_html: str) -> list[Mirror]:
-    soup = BeautifulSoup(page_html, "html.parser")
+    soup = _parse_page(page_html)
     mirrors: list[Mirror] = []
     seen: set[str] = set()
     for option in soup.select("select.mirror option[value], option[value]"):
@@ -289,7 +316,7 @@ def parse_mirrors(base_url: str, page_html: str) -> list[Mirror]:
             )
         except Exception:
             continue
-        embed_soup = BeautifulSoup(embed, "html.parser")
+        embed_soup = _parse_page(embed)
         frame = embed_soup.select_one("iframe[src], video[src], source[src]")
         if not frame:
             continue
@@ -301,20 +328,40 @@ def parse_mirrors(base_url: str, page_html: str) -> list[Mirror]:
     return sort_mirrors(mirrors)
 
 
+def mirror_unavailable_reason(page_html: str) -> str:
+    soup = _parse_page(page_html)
+    player = soup.select_one('#pembed, div.player-embed, div.megavid, div.video-content')
+    if player is None:
+        return ''
+    if player.select_one('.tickcounter[data-type="countdown"]'):
+        return 'release countdown; video not published yet'
+    if 'video not available' in player.get_text(' ', strip=True).casefold():
+        return 'site reports Video Not Available'
+    return ''
+
+
 def extract_embed_url(base_url: str, page_html: str) -> str:
-    soup = BeautifulSoup(page_html, "html.parser")
-    meta = soup.select_one('meta[itemprop="embedUrl"][content]')
+    soup = _parse_page(page_html)
+    # Dedicated player content takes precedence over unrelated advertising frames.
+    player = soup.select_one('#pembed, div.player-embed, div.megavid, div.video-content')
+    if mirror_unavailable_reason(page_html):
+        return ''
+    root = player if player is not None else soup
+    meta = root.select_one('meta[itemprop="embedUrl"][content]')
     if meta:
         return normalize_embed_url(normalize_url(base_url, html.unescape(meta.get("content", ""))))
 
     AD_DOMAINS = ("t.co", "twitter.com", "blogspot.com", "blogger.com", "google.com", "disqus.com", "facebook.com", "histats.com", "ads")
     KNOWN_VIDEO = ("dailymotion.com", "ok.ru", "rumble.com", "vidhide", "streamtape", "mp4upload", "dood", "filelions", "megavid", "luluvdo", "yurn", "player", "embed")
 
-    frames = soup.select("div.player-embed iframe[src], div.megavid iframe[src], div.video-content iframe[src], iframe[src]")
+    frames = root.select("iframe[src], video[src], source[src]")
     selected_src = None
     for frame in frames:
         src = frame.get("src", "").strip()
         if not src:
+            continue
+        hidden_style = re.sub(r"\s+", "", frame.get("style", "").casefold())
+        if frame.has_attr("hidden") or re.search(r"(?:^|;)(?:opacity:0(?:\.0+)?|display:none|visibility:hidden|height:0(?:px|%|em)?)(?:;|$)", hidden_style):
             continue
         lower_src = src.lower()
         if any(ad in lower_src for ad in AD_DOMAINS):
@@ -328,7 +375,7 @@ def extract_embed_url(base_url: str, page_html: str) -> str:
     if selected_src:
         return normalize_embed_url(normalize_url(base_url, html.unescape(selected_src)))
 
-    script = soup.select_one("div.player-embed script[src], div.megavid script[src]")
+    script = root.select_one("script[src][data-video]")
     if script and "dailymotion.com" in script.get("src", ""):
         video_id = script.get("data-video", "")
         if video_id:
@@ -447,6 +494,8 @@ class WordPressAnimeProvider:
     def __init__(self, fetch: Callable[[str], str] = fetch_html):
         self._fetch = fetch
 
+    page_parsing_cache = staticmethod(cached_page_parsing)
+
     def search(self, query: str, ttype: str = "sub") -> list[dict]:
         del ttype
         query_str = str(query or "").strip()
@@ -484,7 +533,7 @@ class WordPressAnimeProvider:
                     title["malId"] = int(mal_match.group(1))
 
                 from bs4 import BeautifulSoup
-                soup = BeautifulSoup(html, "html.parser")
+                soup = _parse_page(html)
                 heading = soup.select_one('h1.entry-title, h1[itemprop="name"]')
                 if heading and clean_text(heading.get_text(" ", strip=True)):
                     title["name"] = clean_text(heading.get_text(" ", strip=True))
@@ -593,7 +642,7 @@ class WordPressAnimeProvider:
                     if unreleased_url:
                         try:
                             ep_page_html = self._fetch(unreleased_url)
-                            ep_soup = BeautifulSoup(ep_page_html, "html.parser")
+                            ep_soup = _parse_page(ep_page_html)
                             mirrors = ep_soup.select("select.mirror option[value], div.player-embed iframe, div.megavid iframe, video")
                             has_playable = any(
                                 (m.get("value", "").strip() and m.get("value", "").strip() not in ("#", "/"))
@@ -700,7 +749,11 @@ class WordPressAnimeProvider:
     def _stream_url_for_mirror(self, mirror: Mirror, episode_url: str) -> tuple[str, str]:
         if self.resolve_mirror_pages and mirror.url.startswith(self.base_url):
             try:
-                stream_url = extract_embed_url(self.base_url, self._fetch(mirror.url))
+                page_html = self._fetch(mirror.url)
+                stream_url = extract_embed_url(self.base_url, page_html)
+                if not stream_url:
+                    reason = mirror_unavailable_reason(page_html) or "no video embed in player"
+                    logging.getLogger(__name__).info("[%s] Mirror %s unavailable: %s", self.name, mirror.label, reason)
             except Exception:
                 stream_url = ""
             return stream_url, mirror.url

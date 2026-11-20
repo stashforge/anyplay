@@ -9,6 +9,7 @@ from typing import Literal, TypeVar
 
 from .footer import Footer, FooterStatus, StatusKind
 from .fuzzy import fuzzy_match
+from .smart_filter import FilterField, compile_filter
 from .row_layout import DEFAULT_ROW_INDENTATION, RowIndentation
 from .row_text import plain_row_text
 from .styled_text import StyledText, TextRun
@@ -216,14 +217,28 @@ class ViewItem:
     adjustable: bool = field(default=False, kw_only=True)
     action_hints: Sequence[ActionHint] = field(default=(), kw_only=True)
     footer_context: Sequence[str] = field(default=(), kw_only=True)
+    activity: str = field(default="", kw_only=True)
+    extra_details: str = field(default="", kw_only=True)
+    info_lines: tuple[StyledText, ...] = field(default=(), kw_only=True)
+    filter_values: tuple[tuple[str, object], ...] = field(default=(), kw_only=True)
 
     def __post_init__(self) -> None:
         _nonblank(self.id, "ViewItem.id")
+        if not isinstance(self.filter_values, tuple) or any(
+            not isinstance(pair, tuple) or len(pair) != 2 or not isinstance(pair[0], str)
+            or not (pair[1] is None or isinstance(pair[1], (str, int, float, bool))
+                    or isinstance(pair[1], tuple) and all(isinstance(value, str) for value in pair[1]))
+            for pair in self.filter_values):
+            raise TypeError("ViewItem.filter_values requires immutable named scalar values")
         for name, value in (("label", self.label), ("hint", self.hint), ("prefix", self.prefix)):
             if not isinstance(value, StyledText):
                 _string(value, f"Item {self.id!r}.{name}")
             plain_row_text(value)
         _string(self.info, f"Item {self.id!r}.info")
+        if not isinstance(self.info_lines, tuple) or any(not isinstance(line, StyledText) for line in self.info_lines):
+            raise TypeError("ViewItem.info_lines requires a tuple of StyledText")
+        TextRun(self.activity, "secondary")
+        TextRun(self.extra_details, "secondary")
         _string(self.kind, f"Item {self.id!r}.kind")
         _boolean(self.enabled, f"Item {self.id!r}.enabled")
         _boolean(self.adjustable, f"Item {self.id!r}.adjustable")
@@ -325,10 +340,24 @@ class ViewSpec:
     footer: Footer | None = field(default=None, kw_only=True)
     footer_statuses: Sequence[FooterStatus] = field(default=(), kw_only=True)
     total_count: int | None = field(default=None, kw_only=True)
+    screen_title: str = field(default="", kw_only=True)
+    screen_badge: str = field(default="", kw_only=True)
+    extra_details: str = field(default="", kw_only=True)
+    info_context: str = field(default="", kw_only=True)
+    info_lines: tuple[StyledText, ...] = field(default=(), kw_only=True)
+    filter_schema: tuple[FilterField, ...] = field(default=(), kw_only=True)
 
     def __post_init__(self) -> None:
         _nonblank(self.id, "ViewSpec.id")
+        if not isinstance(self.filter_schema, tuple) or any(not isinstance(field, FilterField) for field in self.filter_schema):
+            raise TypeError("ViewSpec.filter_schema requires a tuple of FilterField")
         _string(self.prompt, f"Screen {self.id!r}.prompt")
+        TextRun(self.screen_title, "secondary")
+        TextRun(self.screen_badge, "secondary")
+        TextRun(self.info_context, "secondary")
+        if not isinstance(self.info_lines, tuple) or any(not isinstance(line, StyledText) for line in self.info_lines):
+            raise TypeError("ViewSpec.info_lines requires a tuple of StyledText")
+        TextRun(self.extra_details, "details")
         _string(self.message, f"Screen {self.id!r}.message")
         _string(self.state, f"Screen {self.id!r}.state")
         _boolean(self.reverse_items, f"Screen {self.id!r}.reverse_items")
@@ -429,6 +458,11 @@ def selectable_items(items: Iterable[ViewItem]) -> tuple[ViewItem, ...]:
 def visible_items(view: ViewSpec, query: str) -> tuple[ViewItem, ...]:
     if not query.strip():
         return tuple(view.items)
-    matched = {item.id for item in view.items if item.kind != "heading" and fuzzy_match(query, item.label_text) is not None}
+    if view.filter_schema:
+        plan = compile_filter(query, view.filter_schema)
+        matched = {item.id for item in view.items if item.kind != "heading"
+                   and plan.matches(item.label_text, dict(item.filter_values))}
+    else:
+        matched = {item.id for item in view.items if item.kind != "heading" and fuzzy_match(query, item.label_text) is not None}
     sections = {item.section_id for item in view.items if item.id in matched}
     return tuple(item for item in view.items if item.id in matched or item.id in sections)

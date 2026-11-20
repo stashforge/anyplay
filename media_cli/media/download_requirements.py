@@ -15,7 +15,7 @@ class DownloadPlan:
 
 def plan_download(preferred: str, url: str = "", *, external_audio: bool = False,
                   embed_subtitles: bool = False, worker: bool = False) -> DownloadPlan:
-    """Worker owns ffmpeg track inputs; classic also supports yt-dlp subtitle remux."""
+    """Prefer resumable acquisition; FFmpeg combines local tracks when available."""
     engine = str(preferred or "auto").strip() or "auto"
     supported = ("ffmpeg", "yt-dlp", "aria2c") if worker else ("ffmpeg", "yt-dlp")
     if engine != "auto" and engine not in supported:
@@ -31,15 +31,17 @@ def plan_download(preferred: str, url: str = "", *, external_audio: bool = False
     if native_mux or embed_subtitles:
         require_executable("ffmpeg", "Single-file audio/subtitle downloads")
     if native_mux:
-        if engine not in ("auto", "ffmpeg"):
+        if engine == "aria2c":
             raise ProviderDependencyError(
-                "This download needs the ffmpeg engine to combine external audio/subtitles into one file. "
-                "Choose 'ffmpeg' or 'auto', then retry."
+                "This download needs yt-dlp plus ffmpeg to combine external tracks. Choose 'auto' or 'yt-dlp'."
             )
+        if engine == "yt-dlp" or (engine == "auto" and shutil.which("yt-dlp")):
+            require_executable("yt-dlp", "Resumable track downloads")
+            return DownloadPlan("yt-dlp")
         return DownloadPlan("ffmpeg")
 
     if engine == "auto":
-        order: tuple[str, ...] = ("ffmpeg", "yt-dlp") if worker or hls else ("yt-dlp", "ffmpeg")
+        order: tuple[str, ...] = ("yt-dlp", "ffmpeg")
         if worker and not hls:
             order += ("aria2c",)
         engine = next((candidate for candidate in order if shutil.which(candidate)), "")

@@ -57,14 +57,15 @@ def test_torrent_provider_summary_is_visible_as_alternate_title():
     assert "412.9MiB" in alternate
 
 
-def test_torrent_provider_episode_catalog_exposes_single_episode_for_each_mode():
+def test_torrent_provider_episode_catalog_exposes_single_episode_for_each_mode(monkeypatch):
+    monkeypatch.setattr("media_cli.torrents.metadata.fetch_video_inventory", lambda magnet: ({"index":0,"path":"Example.mkv","size":100},))
     provider = TorrentProvider(search_fn=lambda query: [_sample_result()])
     result = provider.search("example")[0]
 
     catalog = provider.episode_catalog(result["_provider_id"], "dub")
 
     assert catalog["ids"] == ["1"]
-    assert catalog["episodes_map"]["1"]["label"] == "File"
+    assert catalog["episodes_map"]["1"]["label"] == "Example.mkv"
     assert catalog["episodes_map_by_ttype"]["sub"]["1"]["translation_type"] == "sub"
     assert catalog["episodes_map_by_ttype"]["dub"]["1"]["translation_type"] == "dub"
 
@@ -110,8 +111,8 @@ def test_torrent_provider_ignores_registry_request_json_injection(monkeypatch):
     from media_cli.providers import get_provider
 
     monkeypatch.setattr(
-        "media_cli.providers.torrent.search_general_torrents",
-        lambda query: [_sample_result()],
+        "media_cli.torrents.public_search.search_public_torrents",
+        lambda query, **kwargs: ([_sample_result()], {}),
     )
 
     def fail_if_used(*args, **kwargs):
@@ -123,3 +124,10 @@ def test_torrent_provider_ignores_registry_request_json_injection(monkeypatch):
 
     assert len(results) == 1
     assert results[0]["_provider"] == "torrent"
+
+
+def test_uncached_torrent_metadata_does_not_publish_hash_as_title():
+    provider = TorrentProvider()
+    identity = "a" * 40
+    assert provider.get_title(identity) is None
+    assert provider._get_result(identity).infohash == identity

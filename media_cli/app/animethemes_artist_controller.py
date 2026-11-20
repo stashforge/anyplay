@@ -6,6 +6,7 @@ from itertools import count
 from threading import Condition, Lock, Thread
 
 from ..services import animethemes as service
+from .animethemes_filter_data import SONG_FIELDS, song_filter_values
 from ..ui.view_model import Blank, Content, Count, DetailLines, ImageSpec, Inherit, LabelValue, SelectionPolicy, ViewAction, ViewItem, ViewSpec
 from ..ui.view_session import BeginNavigation, CompleteNavigation, ExitSession, FailNavigation, ReplaceView, UpdateItems, ViewSession
 from .animethemes import _image_url, _row_detail_values
@@ -164,12 +165,12 @@ class ArtistController:
                           "available" if url else "unavailable" if resolved else "resolving", url or None)
         label = service.song_row_label(song.get("title"), raw)
         return ViewItem(f"theme:{raw['id']}", label, kind="submenu", details=details, image=image,
-                        reference=(row, section))
+                        reference=(row, section), filter_values=song_filter_values(row))
 
     def songs_view(self, section):
         section_id = section.get("id") or section.get("group") or "direct"
         items = tuple(self.song_item(row, section) for row in section["rows"])
-        return ViewSpec(f"{self.root_id}:songs:{section_id}", "Select song", items,
+        return ViewSpec(f"{self.root_id}:songs:{section_id}", "Select song", items, filter_schema=SONG_FIELDS,
                         details=DetailLines(Content(LabelValue("Artist", self.artist['name'])), Content(section["label"]),
                                             Content(Count(len(items), "theme"))),
                         context=_CONTEXT, actions=_PLAY, state="ready" if items else "empty",

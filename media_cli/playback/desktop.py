@@ -5,6 +5,7 @@ import time
 from contextlib import nullcontext
 from urllib.parse import urlsplit
 
+from .mpv import MpvStartupError
 from ..media.proxy_rules import proxy_filtered_headers
 from ..media.urls import validate_optional_referer, validate_stream_url
 from ..services.network_affinity import bound_proxy_options
@@ -260,6 +261,8 @@ def play_desktop(
                 target_player="mpv",
                 flixcloud_w_payload=stream.get("flixcloud_w_payload"),
                 flixcloud_xor_mask=stream.get("flixcloud_xor_mask"),
+                gotaku_key_seed=stream.get("gotaku_key_seed"),
+                gotaku_segment_bytes=stream.get("gotaku_segment_bytes"),
                 **bound_proxy_options(stream),
             )
             if stream.get("ip_version") == 4:
@@ -284,9 +287,10 @@ def play_desktop(
                 return ("ERROR", 0, 0, 0, 0)
 
     log.debug(
-        "Playback selection: show_id=%r MAL=%r episode=%r source=%r resolution=%r remote_skips=%s",
+        "Playback selection: show_id=%r MAL=%r episode=%r source=%r resolution=%r remote_skips=%s native_skips=%d skips_enabled=%s",
         show_id, mal_id, episode, stream.get("source_name"), resolution,
         skip_lookup is not None,
+        sum(row.get("source") == "provider" for row in skip_intervals), bool(aniskip_enabled),
     )
     subtitle_job = None
     try:
@@ -353,6 +357,10 @@ def play_desktop(
                 **({"terminal_managed": True} if terminal_managed else {}),
                 **({'poll_subtitles': poll_subtitles} if subtitle_job is not None else {}),
             )
+    except MpvStartupError as exc:
+        ipc_player.startup_error = str(exc)
+        log.warning("mpv startup failed: %s", exc)
+        return ("STARTUP_FAILED", 0, 0, 0, 0)
     except PlaybackPreparationCancelled:
         return ("CANCELLED", 0, 0, 0, 0)
     finally:

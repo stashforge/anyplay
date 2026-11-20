@@ -15,6 +15,7 @@ from ..media.episode_identity import (
     read_episode_identities, read_episode_identity,
 )
 from ..ui.help import picker_help
+from ..ui.library_info import library_info_lines
 from ..ui.picker import tui_pick
 from ..ui.actions import ActionBindings
 from ..ui.background_loading import BackgroundLoadingStatus
@@ -367,23 +368,28 @@ def handle_downloads_state(flags, ui, ms, cfg, args, ttype, resolveTracking):
 
     folder_opts = _build_folder_opts()
 
+    def _folder_show(si):
+        if not 0 <= si < len(valid_titles):
+            return {}
+        title, data = valid_titles[si]
+        show = data.get("metadata", {})
+        show["watched_episodes"] = data.get("watched_episodes", [])
+        show["_folder_name"] = title
+        if show.get("_local_progress") is None:
+            show["_local_progress"] = app_core.get_local_progress(show, "sub")
+        if show.get("_local_episode_label") is None:
+            show["_local_episode_label"] = app_core.get_local_episode_label(show, "sub")
+        return show
+
     def _folders_hdr(si):
         try:
             w = os.get_terminal_size().columns
         except OSError:
             w = 80
         parts = []
-        if 0 <= si < len(valid_titles):
-            title, data = valid_titles[si]
-            show = data.get("metadata", {})
-            show["watched_episodes"] = data.get("watched_episodes", [])
-            show["_folder_name"] = title
-            if show.get("_local_progress") is None:
-                show["_local_progress"] = app_core.get_local_progress(show, "sub")
-            if show.get("_local_episode_label") is None:
-                show["_local_episode_label"] = app_core.get_local_episode_label(show, "sub")
+        show = _folder_show(si)
+        if show:
             build_info_panel(show, "sub", w, parts, local_only=True)
-
 
         show_for_footer = {}
         if 0 <= si < len(valid_titles):
@@ -438,6 +444,29 @@ def handle_downloads_state(flags, ui, ms, cfg, args, ttype, resolveTracking):
         _poll_scan()
         return list(folder_opts), "", scan_ready or scan_error
 
+    def _library_rows():
+        from .title_filter_data import library_filter_values
+        return [{"name": title, "hint": f"({len(data.get('episodes', []))})", "inline_hint": True,
+                 "filter_values": library_filter_values(data.get('metadata') or {}, title, len(data.get('episodes', [])))}
+                for title, data in valid_titles]
+
+    def _library_status(si, width):
+        show = valid_titles[si][1].get("metadata", {}) if 0 <= si < len(valid_titles) else {}
+        status = loading.read(not scan_ready and not scan_error)
+        statuses = (FooterStatus("Couldn't check downloads. Reopen to retry.", StatusKind.ERROR),) if scan_error else ((status,) if status else ())
+        return _poster_footer_line(show, Footer(statuses=statuses), width)
+
+    def _library_info(si, width):
+        from .footer import provider_label
+        if not 0 <= si < len(valid_titles):
+            return ()
+        count = len(valid_titles[si][1].get('episodes', []))
+        show = _folder_show(si)
+        context = ' · '.join(part for part in (provider_label(show, include_unlinked=True),
+                              f'{count} downloaded') if part)
+        return library_info_lines(show, 'sub', width, context=context)
+
+    from .title_filter_data import LIBRARY_FIELDS
     try:
         folder_idx = tui_pick(
             flags, ui, "Downloads", folder_opts,
@@ -449,17 +478,20 @@ def handle_downloads_state(flags, ui, ms, cfg, args, ttype, resolveTracking):
             help_dict=picker_help("Open details", "Quit", "Quit", delete_label="Delete title"),
             live_fn=_live_folders, tick_fn=lambda: scan_future is not None,
             item_key_fn=lambda index: valid_titles[index][0],
+            screen_presentation={"layout": cfg.get("tui_layout", "bottom"), "context": download_dir, "status_fn": _library_status, "rows_fn": _library_rows, "info_fn": _library_info, "filter_schema": LIBRARY_FIELDS},
         )
     finally:
         if executor is not None:
             executor.shutdown(wait=False, cancel_futures=True)
         loading.read(False)
+    if folder_idx == -5:
+        return "QUIT"
     if folder_idx < 0:
         if scan_error:
             warn("Couldn't check downloads. Reopen to retry.")
         elif scan_ready and not valid_titles:
             warn(f"No downloaded videos found in {download_dir}.")
-        return "QUIT"
+        return ui.downloads_parent
 
     title, data = valid_titles[folder_idx]
     folder_path = os.path.join(download_dir, title)

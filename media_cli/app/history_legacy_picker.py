@@ -85,7 +85,7 @@ def run_legacy_history(
             statuses=(status,) if status is not None else (),
             context=tuple(sanitize_terminal_text(part) for part in context if part),
             actions=("Enter open", "Tab/Ctrl+N next", "Ctrl+R refresh title", "F5/Alt+R refresh view")
-            + (() if flags.incognito_mode else ("Del/Ctrl+D delete",)) + ("Esc quit",),
+            + (() if flags.incognito_mode else ("Del/Ctrl+D delete",)) + ("Esc search",),
             status_separator=" • ",
         )
         parts.append(app_core._poster_footer_line(show, footer, width))

@@ -211,11 +211,15 @@ class ViewPresentation:
     def _navigation(self) -> str:
         return _SEPARATOR.join(self._footer().context + self._footer().actions)
 
-    def _footer(self, statuses=(), *, item_id=None) -> Footer:
+    def _footer(self, statuses=(), *, item_id=None, status_only=False) -> Footer:
         statuses = tuple(statuses) + tuple(self.session.current.footer_statuses)
         supplied = self.session.current.footer
         if supplied is not None:
-            return replace(supplied, statuses=tuple(statuses) + supplied.statuses)
+            return replace(supplied, statuses=tuple(statuses) + supplied.statuses,
+                           **({"context": (), "actions": ()} if status_only else {}))
+        if status_only:
+            # Shared chrome renders shortcuts separately; spinner ticks only need statuses.
+            return Footer(statuses=tuple(statuses))
         parts = []
         advertised = set()
         pending = self.session.navigation is not None
@@ -259,15 +263,20 @@ class ViewPresentation:
         bounded = truncate_display(text, max(1, int(width) - 1))
         return f"{color}{bounded}{C_RESET}"
 
-    def details(self, item_id=None, width=80) -> str:
+    def details(self, item_id=None, width=80, *, status_only=False) -> str:
         timed = _log.isEnabledFor(logging.DEBUG)
         started = time.perf_counter() if timed else 0.0
-        fields = self._details(item_id)
-        lines = list(render_detail_lines(
-            primary=fields.title, secondary=fields.secondary, details=fields.metadata, width=width, theme=self.theme,
-        ))
+        def footer_spec(statuses=(), *, item_id=None):
+            return self._footer(statuses, item_id=item_id, status_only=status_only)
+        lines = []
+        if not status_only:
+            fields = self._details(item_id)
+            lines = list(render_detail_lines(
+                primary=fields.title, secondary=fields.secondary, details=fields.metadata, width=width, theme=self.theme,
+            ))
         text_done = time.perf_counter() if timed else 0.0
         show = self.show_for(item_id)
+        show_done = time.perf_counter() if timed else 0.0
         message = self._view_message()
         if self.session.navigation is not None:
             snapshot = self.session.loading_snapshot(feedback=True)
@@ -286,10 +295,10 @@ class ViewPresentation:
         if self.image_enabled() and show["_image_state"] == "available":
             self.poster_manager.get(show)
             cover_done = time.perf_counter() if timed else 0.0
-            footer = self.poster_manager.footer_line(show, self._footer(statuses, item_id=item_id), width, persistent=True)
+            footer = self.poster_manager.footer_line(show, footer_spec(statuses, item_id=item_id), width, persistent=True)
         else:
             status = self._image_status(show)
-            if status and self._footer(item_id=item_id).include_cover_status:
+            if status and footer_spec(item_id=item_id).include_cover_status:
                 resolving = show["_image_state"] == "resolving"
                 if resolving:
                     if cover_status is not None:
@@ -297,17 +306,18 @@ class ViewPresentation:
                 else:
                     kind = StatusKind.ERROR if show["_image_state"] == "failed" else StatusKind.WARNING
                     statuses.append(FooterStatus(status, kind))
-            footer = render_footer(self._footer(statuses, item_id=item_id), width, theme=self.theme)
-        lines.append(footer)
+            footer = render_footer(footer_spec(statuses, item_id=item_id), width, theme=self.theme)
+        if not status_only:
+            lines.append(footer)
         if timed:
             finished = time.perf_counter()
             if finished - started >= 0.05:
                 _log.debug(
-                    "Slow view header: total=%.3fs text=%.3fs status=%.3fs cover_lookup=%.3fs footer=%.3fs",
-                    finished - started, text_done - started, status_done - text_done,
+                    "Slow view header: total=%.3fs text=%.3fs show=%.3fs status=%.3fs cover_lookup=%.3fs footer=%.3fs",
+                    finished - started, text_done - started, show_done - text_done, status_done - show_done,
                     cover_done - status_done, finished - cover_done,
                 )
-        return "\n".join(lines)
+        return footer if status_only else "\n".join(lines)
 
     def plain_details(self, item_id=None) -> list[str]:
         fields = self._details(item_id)

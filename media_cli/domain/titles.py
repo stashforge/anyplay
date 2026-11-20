@@ -221,6 +221,9 @@ def get_display_titles(show, main_title):
 def get_show_display_title(show, fallback="Unknown", sync_enabled=None, title_lang=None):
     if not show:
         return sanitize_terminal_text(fallback)
+    torrent = show.get("_torrent") or {}
+    if torrent.get("name") and (not show.get("name") or str(show["name"]).casefold() == str(torrent.get("infohash") or show.get("_id")).casefold()):
+        return sanitize_terminal_text(torrent["name"])
     if show.get("_anilist_context"):
         sync_enabled = True
     if sync_enabled is None:

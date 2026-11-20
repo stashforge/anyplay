@@ -100,7 +100,7 @@ class TestConfigCommand(unittest.TestCase):
             self.assertEqual(call_cmd[0], "nano")
             self.assertTrue(call_cmd[1].endswith("config.conf"))
 
-    def test_missing_config_keys_are_added_without_overwriting_existing_values(self):
+    def test_missing_config_keys_apply_without_expanding_saved_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "config.conf")
             with open(path, "w", encoding="utf-8") as handle:
@@ -117,7 +117,7 @@ class TestConfigCommand(unittest.TestCase):
 
             with open(path, encoding="utf-8") as handle:
                 saved = handle.read()
-            self.assertIn("torrent_fallback = true", saved)
+            self.assertNotIn("torrent_fallback = true", saved)
             self.assertIn("disabled_providers = animegg", saved)
 
     def test_serialized_config_shows_torrent_and_provider_settings(self):

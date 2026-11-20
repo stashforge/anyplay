@@ -125,6 +125,9 @@ def normalize_titles(
         if item is not None:
             normalized.append(item)
 
+    if provider_id == "torrent":
+        return normalized
+
     # Sort the results so same franchises are grouped together,
     # and seasons are chronologically ordered!
     def get_sort_key(item):

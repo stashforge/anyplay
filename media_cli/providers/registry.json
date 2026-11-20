@@ -5,12 +5,14 @@
       "module": "anikoto",
       "python_requirements": {"import": ["bs4"]},
       "name": "Anikoto",
-      "domains": ["https://megaplay.buzz", "https://anikoto.com"],
+      "domains": ["https://anikototv.bz", "https://anikototv.se", "https://anikoto.me", "https://anikoto.net"],
+      "service_domains": ["https://megaplay.buzz"],
       "type": "anime",
       "languages": ["sub", "dub"],
       "status": "active",
       "engine": "hybrid",
-      "features": ["search"]
+      "features": ["search"],
+      "description": "Browse, stream and download anime."
     },
     "anipm": {
       "module": "anipm",
@@ -20,7 +22,8 @@
       "languages": ["sub", "dub"],
       "status": "active",
       "engine": "api",
-      "features": ["search"]
+      "features": ["search"],
+      "description": "Browse, stream and download anime."
     },
     "animepahe": {
       "module": "animepahe",
@@ -31,7 +34,8 @@
       "languages": ["sub"],
       "status": "active",
       "engine": "hybrid",
-      "features": ["search"]
+      "features": ["search"],
+      "description": "Browse subtitled anime for streaming and downloads."
     },
     "reanime": {
       "module": "reanime",
@@ -41,7 +45,8 @@
       "languages": ["sub", "dub"],
       "status": "active",
       "engine": "api",
-      "features": ["anilist_sync", "search", "fallback_servers"]
+      "features": ["anilist_sync", "search", "fallback_servers"],
+      "description": "Browse anime with subtitled and dubbed episodes."
     },
     "anizone": {
       "module": "anizone",
@@ -52,7 +57,8 @@
       "languages": ["sub", "dub"],
       "status": "active",
       "engine": "scraper",
-      "features": ["search"]
+      "features": ["search"],
+      "description": "Browse anime with subtitled and dubbed episodes."
     },
     "animegg": {
       "module": "animegg",
@@ -63,38 +69,44 @@
       "languages": ["sub", "dub"],
       "status": "active",
       "engine": "scraper",
-      "features": ["search"]
+      "features": ["search"],
+      "description": "Browse anime with subtitled and dubbed episodes."
     },
     "anidb": {
       "module": "anidbapp",
       "name": "AniDB",
       "domains": ["https://anilab2.amdapi.click"],
+      "service_domains": ["https://api.kyotoplayer.com"],
       "type": "anime",
       "languages": ["sub", "dub"],
       "status": "active",
       "engine": "api",
-      "features": ["anilist_sync", "search"]
+      "features": ["anilist_sync", "search"],
+      "description": "Browse the AniDB.app streaming catalogue."
     },
-    "senshi": {
-      "module": "senshi",
-      "python_requirements": {"remote_sources": ["curl_cffi.requests", "m3u8"]},
-      "name": "Senshi",
-      "domains": ["https://senshi.to"],
+    "gotaku": {
+      "module": "gotaku",
+      "python_requirements": {"import": ["cryptography"]},
+      "name": "Gotaku",
+      "domains": ["https://gotaku.to"],
+      "service_domains": ["https://gotakuplay.nl"],
       "type": "anime",
       "languages": ["sub", "dub"],
       "status": "active",
       "engine": "api",
-      "features": ["search"]
+      "features": ["search"],
+      "description": "Browse anime with hardsubbed and dubbed episodes."
     },
     "animethemes": {
       "name": "AnimeThemes",
       "domains": ["https://animethemes.moe", "https://api.animethemes.moe"],
       "type": "songs",
-      "languages": ["video"],
+      "languages": [],
       "status": "active",
       "engine": "api",
       "source": true,
-      "features": ["search", "opening_ending_videos"]
+      "features": ["search", "opening_ending_videos"],
+      "description": "Find and play anime openings and endings."
     },
     "animekhor": {
       "module": "animekhor",
@@ -105,7 +117,8 @@
       "languages": ["sub"],
       "status": "active",
       "engine": "scraper",
-      "features": ["search"]
+      "features": ["search"],
+      "description": "Browse subtitled donghua for streaming and downloads."
     },
     "animexin": {
       "module": "animexin",
@@ -116,7 +129,8 @@
       "languages": ["sub"],
       "status": "active",
       "engine": "scraper",
-      "features": ["search"]
+      "features": ["search"],
+      "description": "Browse donghua episodes and their available mirrors."
     },
     "lucifer": {
       "module": "lucifer",
@@ -127,7 +141,8 @@
       "languages": ["sub"],
       "status": "active",
       "engine": "scraper",
-      "features": ["search"]
+      "features": ["search"],
+      "description": "Browse subtitled donghua episodes."
     },
     "movies": {
       "module": "movies",
@@ -137,17 +152,20 @@
       "languages": ["sub", "dub"],
       "status": "active",
       "engine": "api",
-      "features": ["search"]
+      "features": ["search"],
+      "description": "Search movies and television shows."
     },
     "torrent": {
+      "cover_images": false,
       "module": "torrent",
       "name": "Torrents",
-      "domains": ["https://tsukihime.org", "https://nyaa.si", "https://torrents-csv.com"],
+      "domains": ["https://knaben.org", "https://nyaa.si", "https://yts.mx"],
       "type": "torrent",
       "languages": ["sub", "dub", "raw"],
       "status": "active",
       "engine": "api",
-      "features": ["search", "torrent_streaming"]
+      "features": ["search", "torrent_streaming"],
+      "description": "Search torrent releases for streaming and downloads."
     }
   }
 }

@@ -33,6 +33,10 @@ from .rules import (
 _logger = logging.getLogger(__name__)
 
 
+class MpvStartupError(RuntimeError):
+    """mpv did not establish its control connection."""
+
+
 class MpvStartupCancelled(Exception):
     """The caller retired startup before its IPC connection was ready."""
 
@@ -157,14 +161,23 @@ class MpvIpc:
                   if self.audio_only else []),
             ], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-            for _ in range(20):
+            deadline = time.monotonic() + 15.0
+            while True:
                 check_cancelled()
-                if os.path.exists(self.socket_path): break
+                returncode = self.process.poll()
+                if returncode is not None:
+                    raise MpvStartupError(f"mpv exited during startup (code {returncode}).")
+                if os.path.exists(self.socket_path):
+                    if self.client is None:
+                        self.client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                    try:
+                        self.client.connect(self.socket_path)
+                        break
+                    except (FileNotFoundError, ConnectionRefusedError):
+                        pass  # Socket creation and accepting connections can race.
+                if time.monotonic() >= deadline:
+                    raise MpvStartupError("mpv did not become ready within 15 seconds. Retry playback.")
                 time.sleep(0.1)
-
-            check_cancelled()
-            self.client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            self.client.connect(self.socket_path)
             self.client.setblocking(False)
             self.running = True
             check_cancelled()

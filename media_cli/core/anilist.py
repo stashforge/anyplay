@@ -240,6 +240,15 @@ def fetch_anilist_by_ids(token, anilist_ids=None, mal_ids=None, raise_errors=Fal
 
 
 def load_anilist_browse(token, status):
+    # A cached list, including an empty one, is already ready. Do not enter a
+    # nested loading transition just to discover the same cached value.
+    cache_key = (anilist_account_cache_key(token), str(status or "ALL").upper())
+    import logging
+    if cache_key in _anilist_list_cache:
+        cached = _anilist_list_cache[cache_key]
+        logging.getLogger(__name__).debug("AniList browse cache hit: list=%s titles=%s", cache_key[1], len(cached))
+        return cached
+    logging.getLogger(__name__).debug("AniList browse cache miss: list=%s", cache_key[1])
     from ..ui.display import with_anilist_menu_loading
     return with_anilist_menu_loading(
         status,
@@ -573,7 +582,7 @@ def refresh_history_entry_from_anilist(entry, token):
 def refresh_history_anilist_airing_batch(history_entries, *, force=False, persist=True):
     now = int(_time.time())
 
-    from ..domain.history import HISTORY_REFRESH_COOLDOWN_SECONDS, history_entry_should_auto_refresh
+    from ..domain.history import HISTORY_REFRESH_COOLDOWN_SECONDS, history_entry_should_auto_refresh, history_entry_refresh_is_stale
     COOLDOWN = HISTORY_REFRESH_COOLDOWN_SECONDS
 
     media_ids_to_fetch = []
@@ -614,7 +623,7 @@ def refresh_history_anilist_airing_batch(history_entries, *, force=False, persis
         elif status in ("RELEASING", "NOT_YET_RELEASED", "UNKNOWN", "") and (now - last_checked) > COOLDOWN:
             needs_refresh = True
 
-        if needs_refresh:
+        if needs_refresh and (force or history_entry_refresh_is_stale(entry, now=now)):
             media_ids_to_fetch.append(str(al_id))
             if str(al_id) not in entry_map:
                 entry_map[str(al_id)] = []
@@ -626,6 +635,12 @@ def refresh_history_anilist_airing_batch(history_entries, *, force=False, persis
         # Deduplicate IDs
         media_ids_to_fetch = list(set(media_ids_to_fetch))
 
+        # An unchanged/failed attempt consumes the same interval as an update.
+        # Keep this separate from checked_at, which denotes successful data.
+        for pending in entry_map.values():
+            for item in pending:
+                item['entry']['show']['_anilist_airing_attempted_at'] = now
+                changed = True
         try:
             raw_shows = anilist_service.fetch(
                 anilist_urlopen,

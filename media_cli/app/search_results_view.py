@@ -22,7 +22,13 @@ from ..ui.view_model import (
     ViewSpec,
     ViewState,
 )
+from .title_filter_data import TITLE_FIELDS, title_filter_values
 from .show_view_data import build_show_detail_lines
+
+
+def _torrent_filter_values(show):
+    from ..ui.torrent_results import filter_values
+    return filter_values(show)
 
 
 def _result_item(show: dict[str, Any], provider_id: str, ttype: str) -> ViewItem:
@@ -41,6 +47,7 @@ def _result_item(show: dict[str, Any], provider_id: str, ttype: str) -> ViewItem
         image=ImageSpec(item_id, "available", url) if url else ImageSpec(item_id, "unavailable"),
         info=sanitize_terminal_text(show.get("description") or ""),
         reference=show,
+        filter_values=_torrent_filter_values(show) if provider_id == "torrent" else tuple(title_filter_values(show).items()),
     )
 
 
@@ -70,6 +77,9 @@ def build_search_results_view(
         f"search:{provider_id}",
         prompt,
         items,
+        filter_schema=_torrent_filter_schema() if provider_id == "torrent" else TITLE_FIELDS,
+        screen_title="Results · " + clean_query,
+        screen_badge=provider_name,
         details=DetailLines(
             Blank,
             Content("Use Up/Down to browse previous searches.") if loading and not items else Blank,
@@ -93,6 +103,19 @@ def build_search_results_view(
             ViewAction("back", "search", ("ESC", "LEFT")),
             ViewAction("information", "Information", ("CTRL_O",), footer=False),
         ),
-        help=tuple(picker_help("Select anime", "New search", "New search", info_label="Title information").items()),
+        help=tuple(picker_help("Select anime", "New search", "New search", info_label="Title information").items()) + ((
+            ("Filters", 'title:"oshi no ko" seeds:>20 size:<8GB res:1080p'),
+            ("Fields", "title size seeds leechers res source codec audio subs trusted"),
+            ("Combine", "All conditions must match; optional and; quote phrases"),
+        ) if provider_id == "torrent" else (
+            ("Filters", 'title:"oshi no ko" year:>=2008 genre:magic'),
+            ("Fields", ' '.join(field.name for field in TITLE_FIELDS)),
+            ("Combine", 'Space/and combines conditions; commas select alternatives; quote phrases'),
+        )),
         selection_policy=SelectionPolicy(auto_single=auto_single),
     )
+
+
+def _torrent_filter_schema():
+    from ..ui.smart_filter import TORRENT_FIELDS
+    return TORRENT_FIELDS

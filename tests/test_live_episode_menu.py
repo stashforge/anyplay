@@ -36,7 +36,7 @@ def test_selection_after_flip_uses_provider_identity(monkeypatch, episode_menu):
     def pick(flags, ui, **hooks):
         view = hooks["read_view"]()
         assert hooks["initial_selected_id"] == "episode:sub:second"
-        assert view.items[0].label.runs[0].role == "muted"
+        assert view.items[0].label.runs[0].role == "episode.watched"
         hooks["action_handlers"]["flip"]("second")
         assert hooks["read_view"]().items[0].reference == "third"
         return DetailsMenuResult("selected", "third")
@@ -155,3 +155,17 @@ def test_delete_requires_confirmation_for_selected_identity(monkeypatch, episode
         delete.assert_called_once_with("Example", "2", {})
     else:
         delete.assert_not_called()
+
+@pytest.mark.parametrize("provider", ["anidb", "anipm", "example"])
+def test_episode_watched_uses_header_label_progress(monkeypatch, episode_menu, provider):
+    ui, ms, args = episode_menu
+    ui.ui_show_ctx.update(_provider=provider, watched_episodes=[],
+                          _local_progress="opaque-provider-id", _local_episode_label="Episode 3")
+
+    def pick(flags, ui, **hooks):
+        assert all(item.label.runs[0].role == "episode.watched"
+                   for item in hooks["read_view"]().items)
+        return DetailsMenuResult("back")
+
+    monkeypatch.setattr(playback_episodes, "run_details_menu", pick)
+    assert playback_episodes.handle_episode_state(CliFlags(), ui, ms, {}, args, "sub", None) == "DETAILS"

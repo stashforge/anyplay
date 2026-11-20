@@ -206,6 +206,18 @@ def _progress_display_values(anime, local_only=False, ttype="sub"):
     return None, total
 
 
+def resolved_watched_progress(anime, local_only=False, ttype="sub"):
+    """Numeric season progress using the same authority and labels as the header."""
+    from .episodes import parse_episode_dual_numbers
+
+    progress, _total = _progress_display_values(anime, local_only, ttype)
+    primary, _secondary = parse_episode_dual_numbers(str(progress or ""))
+    try:
+        return float(primary or progress) if progress is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def format_progress(anime, local_only=False, ttype="sub"):
     from .episodes import episode_display_summary, parse_episode_dual_numbers
 
@@ -853,3 +865,13 @@ def apply_provider_metadata_to_history_show(show, provider_show):
 
 
 apply_allanime_metadata_to_history_show = apply_provider_metadata_to_history_show
+
+
+def genre_text(show):
+    """Prepared genre labels for the shared information slot; no fetching."""
+    genres = show.get("genres") or show.get("_provider_genres") or []
+    if isinstance(genres, (list, tuple)):
+        genres = " • ".join(str(value) for value in genres if value)
+    elif not isinstance(genres, str):
+        genres = ""
+    return genres.strip().replace(", ", " • ") or "No genres available"

@@ -15,7 +15,7 @@ from .history_menu_view import HistoryEntryReference
 _LOG = logging.getLogger(__name__)
 
 _PROTECTED_SHOW_FIELDS = frozenset({
-    "_local_progress", "_local_episode_label", "watched_episodes", "_anilist_progress", "_anilist_list",
+    "_release_seen", "_local_progress", "_local_episode_label", "watched_episodes", "_anilist_progress", "_anilist_list",
     "_sync_enabled", "_sync_conflict", "_progress_authority", "_action_feedback", "_action_feedback_time",
 })
 
@@ -46,6 +46,10 @@ def merge_history_refresh(target: dict[str, Any], update: HistoryRefreshUpdate, 
             target.pop(key, None)
     for key in ("was_caught_up", "has_new_release"):
         target[key] = bool(latest.get(key) or target.get(key) or update.entry.get(key))
+    latest_seen = latest.get("show", {}).get("_release_seen", {})
+    if latest_seen:
+        target["show"]["_release_seen"] = deepcopy(latest_seen)
+    history_entry_category(target)
     show = target["show"]
     apply_delta(show, update.before.get("show", {}), update.entry["show"])
     show.pop("_local_progress", None)

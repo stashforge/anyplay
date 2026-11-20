@@ -108,6 +108,7 @@ def build_playback_settings_view(
     return replace(
         view,
         prompt="Playback",
+        screen_title=view.screen_title.removesuffix("Details") + "Playback",
         actions=actions,
         items=items,
         help=tuple(help_data.items()),

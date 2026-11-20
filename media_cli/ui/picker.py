@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+from .viewport import content_size as _content_size
 import select
 import signal
 import sys
@@ -112,6 +113,11 @@ _needs_redraw: bool = True
 _persistent_rendered_lines: list[str] = []
 
 
+def remember_screen_frame(lines):
+    global _persistent_rendered_lines
+    _persistent_rendered_lines = list(lines)
+
+
 def cached_frame_rows() -> int:
     """Report cached frame size for diagnostics, not proof of terminal contents."""
     return len(_persistent_rendered_lines)
@@ -125,6 +131,8 @@ def invalidate_screen_buffer() -> None:
 
 
 def invalidate_screen_row(row: int) -> None:
+    from .frame_surface import invalidate_row
+    invalidate_row(row)
     global _persistent_rendered_lines
     if 0 <= row - 1 < len(_persistent_rendered_lines):
         _persistent_rendered_lines[row - 1] = ""
@@ -237,6 +245,9 @@ def tui_pick(
     input_pending_fn: Callable[[], bool] | None = None,
     item_render_fn: Callable[[int, str, bool, int], str | None] | None = None,
     confirmation_index: int | None = None,
+    screen_presentation: dict | None = None,
+    chrome_fn=None,
+    keep_empty=False,
     item_key_fn: Callable[[int], Hashable] | None = None,
 ):
     """Bottom-anchored alt-screen picker with flipped (bottom-up) item list.
@@ -298,6 +309,26 @@ def tui_pick(
         * ``str`` — when *return_query_on_enter* is True.
     """
     global _needs_redraw
+
+    if screen_presentation is not None:
+        from .library_picker import run_library_picker
+        result = run_library_picker(
+            flags, ui, options, presentation=screen_presentation, live_fn=live_fn,
+            header_fn=header_fn, top_header_fn=top_header_fn, select_fn=select_fn,
+            delete_fn=delete_fn, can_delete_fn=can_delete_fn, info_fn=info_fn,
+            item_key_fn=item_key_fn, delete_prompt=delete_prompt,
+        )
+
+        if result is None:
+            raise RendererUnavailable("No terminal for library screen")
+        return result
+
+    # Keep explicit presentations and the structured migration on their own routes.
+    legacy_framed = not structured and not return_query_on_enter
+    if legacy_framed and getattr(ui, "tui_layout", "bottom") == "top":
+        # The source's leading item belongs at the leading edge of the layout.
+        # Use the same direction for rendering, scrolling and arrow handling.
+        reverse_items = not reverse_items
 
     prompt_key = str(prompt() if callable(prompt) else prompt)
 
@@ -365,6 +396,7 @@ def tui_pick(
     loading_transition = False
     picker_started = time.monotonic()
     query = state.query if state is not None else initial_query
+    smart_filter_editing = bool(query)
     cursor_pos = len(query)
     if state is not None and state.query_cursor is not None:
         cursor_pos = min(state.query_cursor, len(query))
@@ -414,11 +446,21 @@ def tui_pick(
         )
 
     try:
-        last_terminal_size = os.get_terminal_size(tty_fd)
+        last_terminal_size = _content_size(tty_fd)
     except OSError:
         last_terminal_size = None
 
+    def smart_chrome():
+        return (chrome_fn() or {}) if chrome_fn else {}
+
     def filt_list():
+        chrome = smart_chrome()
+        if chrome.get('filter_schema'):
+            from .smart_filter import compile_filter
+            plan = compile_filter(query, chrome['filter_schema'])
+            values = chrome.get('filter_values', ())
+            return [i for i, option in enumerate(options)
+                    if plan.matches(_strip_ansi(option), dict(values[i]) if i < len(values) else {})]
         if filter_fn is not None:
             return list(dict.fromkeys(
                 index for index in filter_fn(query, options) if 0 <= index < len(options)
@@ -488,7 +530,7 @@ def tui_pick(
             sel = max(0, min(sel, len(filt) - 1)) if filt else 0
 
         try:
-            sz = os.get_terminal_size(tty_fd)
+            sz = _content_size(tty_fd)
             rows, cols = sz.lines, sz.columns
         except OSError:
             rows, cols = 24, 80
@@ -665,18 +707,18 @@ def tui_pick(
             kind = RowKind.HEADING if oi in heading_indices else RowKind.DISABLED if disabled else RowKind.OPTION
             indent_width = min(row_indentation.columns_for(kind), max(0, cols - 3))
             indent = " " * indent_width
-            prefix = item_prefix_fn(oi) if item_prefix_fn else ""
+            prefix = item_prefix_fn(oi) if item_prefix_fn and not legacy_framed else ""
             prefix_w = _display_width(prefix)
             eff_max_w = max(10, item_max_w - prefix_w - indent_width)
             if disabled:
                 width = max(0, cols - 2 - prefix_w - indent_width)
-                label = item_render_fn(oi, "", False, width) if item_render_fn else None
+                label = item_render_fn(oi, "", False, width) if item_render_fn and not legacy_framed else None
                 if label is None:
                     label = _truncate_display(str(options[oi] or ""), width)
                 out.append(f"\033[2K{_fit_terminal_line(f'{indent}  {prefix}{label}', cols)}")
                 continue
             ptr = f"{_C_PTR}\u276f{_RST}" if is_sel and not disabled else " "
-            label = item_render_fn(oi, query, is_sel, eff_max_w) if item_render_fn else None
+            label = item_render_fn(oi, query, is_sel, eff_max_w) if item_render_fn and not legacy_framed else None
             if label is None:
                 label = _render_item(options[oi], query, is_sel, max_w=eff_max_w)
             if multi_select:
@@ -690,7 +732,7 @@ def tui_pick(
             if prefix:
                 label = f"{prefix}{label}"
             hint = ""
-            if is_sel and hints:
+            if is_sel and hints and not legacy_framed:
                 kp = _strip_ansi(options[oi])
                 hint_text = ""
                 if callable(hints):
@@ -716,7 +758,7 @@ def tui_pick(
             out.append(f"\033[2K{_fit_terminal_line(f'{indent}{ptr} {label}{hint}', cols)}")
 
         now = time.time()
-        cursor_active, blink_on = cursor_activity.phase(now, filtering=bool(query))
+        cursor_active, blink_on = cursor_activity.phase(now, filtering=bool(query) or smart_filter_editing)
         counters = ()
         scroll_hints = None
         show_counts = not hide_separator and bool(options)
@@ -761,28 +803,95 @@ def tui_pick(
             else:
                 out.append(f"\033[2K{_fit_terminal_line(line, cols)}")
 
-        poster_changed = poster_key != last_poster_key
-        clear_prefix = (
-            terminal_images.clear_now()
-            if poster_changed
-            and (poster_key is not None or last_poster_key is not None)
-            else ""
-        )
-        if first_frame_pending and not clear_prefix:
-            clear_prefix = terminal_images.clear_if_active()
-        last_poster_key = poster_key
-        overlay = ""
-        if poster_changed and native_poster and poster_row is not None:
-            terminal_images.mark_active()
-            overlay = f"\033[{poster_row};1H{native_poster}"
+        if legacy_framed:
+            from .legacy_list_picker import LEGACY_SHORTCUTS, legacy_list_frame, legacy_row
 
-        # Differential write: only send ANSI escape sequences for rows that actually changed
-        if len(_persistent_rendered_lines) != rows:
-            _persistent_rendered_lines = []
-        prev_lines = _persistent_rendered_lines
-        frame = _absolute_terminal_frame(out, rows, cols, previous_lines=prev_lines)
-        if first_frame_pending and not prev_lines:
-            frame = "\033[2J" + frame
+            frame_chrome = smart_chrome() if chrome_fn else {}
+            frame_schema = frame_chrome.get('filter_schema', ())
+            if frame_schema:
+                from .smart_filter import compile_filter
+            paint_query = compile_filter(query, frame_schema).highlight if frame_schema else query
+
+            def framed_name(index, width):
+                disabled = not eligible(index)
+                custom = item_render_fn(index, query, False, width) if item_render_fn else None
+                prefix = item_prefix_fn(index) if item_prefix_fn else ""
+                kind = RowKind.HEADING if index in heading_indices else RowKind.DISABLED if disabled else RowKind.OPTION
+                prefix = " " * row_indentation.columns_for(kind) + prefix
+                if custom is not None:
+                    mark = ("[✔] " if index in marked_indices else "[ ] ") if multi_select else ""
+                    return prefix + mark + custom
+                return legacy_row(options[index], width=width, disabled=disabled, query=paint_query,
+                                  prefix=prefix, marked=(index in marked_indices) if multi_select else None)
+
+            shortcuts = list(LEGACY_SHORTCUTS)
+            if tab_fn:
+                shortcuts.append(("tab", "switch"))
+            if reverse_fn or alt_reverse_fn:
+                shortcuts.append(("ctrl+r", "reverse"))
+            if delete_fn:
+                shortcuts.append(("del", "delete"))
+            if info_fn:
+                shortcuts.append(("ctrl+o", "info"))
+            if multi_select:
+                shortcuts.append(("space/tab", "mark"))
+            if help_dict:
+                shortcuts.append(("?", "help"))
+            framed_header = "\n".join(header_lines)
+            action_hint = ""
+            if filt and hints and pending_delete_index is None and not wait_message and not boundary_hint:
+                index = filt[sel]
+                hint = hints(index) if callable(hints) else next(
+                    (value for label, value in hints.items()
+                     if _strip_ansi(label) == _strip_ansi(options[index])), "")
+                last_rendered_hint_val = str(hint or "")
+                if hint:
+                    action_hint = str(hint)
+            from .navigation_tabs import tab_windows
+            framed, scroll, page_size = legacy_list_frame(
+                current_prompt(), options, filt, filt[sel] if filt else -1,
+                width=cols, height=rows, header=framed_header, query=query,
+                cursor=cursor_pos, scroll=scroll, reverse=reverse_items,
+                tui_layout=getattr(ui, "tui_layout", "bottom"), action_hint=action_hint,
+                poster=actual_top_header if flags.show_image else None,
+                render_name=framed_name, shortcuts=shortcuts,
+                chrome=dict(frame_chrome, filter_editing=smart_filter_editing, cursor_visible=blink_on) if chrome_fn else None, tab_viewports=tab_windows(ui),
+                priority=pending_delete_index is not None or (
+                    bool(boundary_hint) and time.time() - boundary_hint_time < 1.5
+                ),
+            )
+            out = framed.lines
+            native_poster, poster_row = framed.poster, framed.poster_row
+            poster_key = (native_poster, poster_row, cols) if native_poster else None
+
+        if legacy_framed:
+            from .frame_surface import compose
+            frame = compose(framed, rows, cols)
+            clear_prefix, overlay = "", ""
+            last_poster_key = poster_key
+        else:
+            poster_changed = poster_key != last_poster_key
+            clear_prefix = (
+                terminal_images.clear_now()
+                if poster_changed
+                and (poster_key is not None or last_poster_key is not None)
+                else ""
+            )
+            if first_frame_pending and not clear_prefix:
+                clear_prefix = terminal_images.clear_if_active()
+            last_poster_key = poster_key
+            overlay = ""
+            if poster_changed and native_poster and poster_row is not None:
+                terminal_images.mark_active()
+                overlay = f"\033[{poster_row};1H{native_poster}"
+
+            # Differential write: only send ANSI escape sequences for rows that actually changed
+            if len(_persistent_rendered_lines) != rows:
+                _persistent_rendered_lines = []
+            prev_lines = _persistent_rendered_lines
+            frame = _absolute_terminal_frame(out, rows, cols, previous_lines=prev_lines)
+            if first_frame_pending and not prev_lines:
+                frame = "\033[2J" + frame
         _persistent_rendered_lines = list(out)
 
         acknowledge_frame = frame_ack_pending and not loading_input_waiting
@@ -917,7 +1026,7 @@ def tui_pick(
                 _needs_redraw = True
 
             try:
-                terminal_size = os.get_terminal_size(tty_fd)
+                terminal_size = _content_size(tty_fd)
             except OSError:
                 terminal_size = None
             if terminal_size != last_terminal_size:
@@ -1006,7 +1115,7 @@ def tui_pick(
                         result = target_idx
                         break
 
-                if not too_narrow and _done and len(options) == 0 and not structured:
+                if not too_narrow and _done and len(options) == 0 and not structured and not keep_empty:
                     result = -4
                     break
 
@@ -1028,7 +1137,7 @@ def tui_pick(
             if current_live_feedback != last_live_feedback:
                 last_live_feedback = current_live_feedback
                 _needs_redraw = True
-            cursor_active, blink_phase = cursor_activity.phase(now, filtering=bool(query))
+            cursor_active, blink_phase = cursor_activity.phase(now, filtering=bool(query) or smart_filter_editing)
             cur_phase = (cursor_active, blink_phase)
             if cur_phase != last_cursor_phase:
                 last_cursor_phase = cur_phase
@@ -1095,6 +1204,8 @@ def tui_pick(
                     continue
 
                 key = _get_key(tty_fd)
+            if key == "q" and not return_query_on_enter and not smart_filter_editing and not show_help and pending_delete_index is None:
+                key = "CTRL_C"
             if return_on_quit and key in ("", "EOF", "CTRL_C"):
                 result = -5
                 break
@@ -1102,7 +1213,7 @@ def tui_pick(
             # Recheck after input wait: resizing and queued keys may arrive
             # together. Never replay notice input into the restored picker.
             try:
-                input_too_narrow = os.get_terminal_size(tty_fd).columns < MIN_TUI_COLUMNS
+                input_too_narrow = _content_size(tty_fd).columns < MIN_TUI_COLUMNS
             except OSError:
                 input_too_narrow = too_narrow
             if width_notice_active and not input_too_narrow:
@@ -1161,6 +1272,37 @@ def tui_pick(
                         raise KeyboardInterrupt
                     continue
 
+            smart = smart_chrome()
+            if smart.get('filter_schema') and not return_query_on_enter:
+                if key == '/' and not smart_filter_editing:
+                    smart_filter_editing = True
+                    cursor_activity.edit(time.time())
+                    _needs_redraw = True
+                    continue
+                if smart_filter_editing and (key in ('ESC', 'LEFT', 'RIGHT', 'HOME', 'END', 'BACKSPACE', 'DELETE', 'CTRL_U') or (len(key) == 1 and key.isprintable())):
+                    from .list_selection import ListSelection
+                    from .smart_filter import accept_field_completion, filter_value_options
+                    from types import SimpleNamespace
+                    editor = ListSelection([], '', query=query, cursor=cursor_pos, filtering=True)
+                    if key == 'RIGHT' and cursor_pos == len(query):
+                        choices = filter_value_options((SimpleNamespace(filter_values=value) for value in smart.get('filter_values', ())), smart['filter_schema'])
+                        editor.query = accept_field_completion(query, smart['filter_schema'], choices)
+                        editor.cursor = len(editor.query)
+                    else:
+                        editor.key(key)
+                    query, cursor_pos, smart_filter_editing = editor.query, editor.cursor, editor.filtering
+                    filt = filt_list()
+                    sel = first_selectable(filt)
+                    scroll = 0
+                    cursor_activity.edit(time.time())
+                    _needs_redraw = True
+                    # A held key keeps stdin readable: still paint intermediate edits.
+                    if time.monotonic() - last_paint_at >= .05 or not select.select([tty_fd], [], [], 0)[0]:
+                        render(filt)
+                        _needs_redraw = False
+                    continue
+                if not smart_filter_editing and len(key) == 1 and key.isprintable() and key not in ('?', 's', 'a', 'o', 'i'):
+                    continue
             selected_index = filt[sel] if filt and 0 <= sel < len(filt) and eligible(filt[sel]) else -1
             if adjust_fn is not None and not return_query_on_enter and selected_index >= 0:
                 direction = adjustment_direction(key, query, cursor_pos)
@@ -1302,24 +1444,22 @@ def tui_pick(
                 boundary_hint = ""
 
                 boundary_action = ""
-                show_help = True
+                from .key_guide import list_key_groups, show_key_guide
+                guide = dict(help_dict)
+                schema = smart_chrome().get('filter_schema', ())
+                if schema:
+                    guide.update({'/': 'Start filter; Esc clears it',
+                                  'Fields': ', '.join(field.name for field in schema),
+                                  'Filters': ' '.join(example for name, example in (('title', 'title:"search text"'), ('genre', 'genre:"Martial Arts"'), ('year', 'year:>=2008'), ('progress', 'progress:>0'), ('list', 'list:watching')) if any(field.name == name for field in schema)),
+                                  'Combine': 'Space/and combines conditions; commas select text alternatives; Right accepts completion'})
+                show_key_guide(list_key_groups(guide, filtered=False))
                 _persistent_rendered_lines.clear()
                 last_poster_key = None
             elif key == "ALT_D":
-                from media_cli.media.download_worker import get_global_worker_if_started, has_tracked_downloads
+                from media_cli.media.download_worker import get_global_worker_if_started
                 from media_cli.ui.download_manager import run_download_manager
-                if not has_tracked_downloads():
-                    boundary_hint = "No downloads yet"
-                    boundary_hint_time = time.time()
-                    _needs_redraw = True
-                    continue
                 try:
                     w = get_global_worker_if_started()
-                    if w is None:
-                        boundary_hint = "No downloads yet"
-                        boundary_hint_time = time.time()
-                        _needs_redraw = True
-                        continue
                     act = run_download_manager(w, standalone=False)
                 finally:
                     runtime.ensure_raw()

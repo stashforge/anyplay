@@ -48,7 +48,7 @@ def _range_headers(headers, specification):
     return result
 
 
-def _resource(url, headers, fetch, *, hls=False, subtitle=False, depth=0, audio_declarations=None):
+def _resource(url, headers, fetch, *, hls=False, subtitle=False, depth=0, audio_declarations=None, entry=None):
     if depth > 3:
         raise CheckIssue("Playlist nesting limit reached")
     hint = re.search(r'[?&]hls_res=(\d+)p?(?:&|$)', url) if hls else None
@@ -65,6 +65,24 @@ def _resource(url, headers, fetch, *, hls=False, subtitle=False, depth=0, audio_
         if not text:
             raise CheckIssue("Encrypted playlist could not be decoded")
         body = text.encode("utf-8")
+    elif entry and entry.get("gotaku_key_seed") and not body.lstrip(b"\xef\xbb\xbf\r\n ").startswith(b"#EXTM3U"):
+        try:
+            from ..providers.shared.gotaku_crypto import (
+                b64url_decode,
+                derive_playlist_key,
+                decrypt_playlist_body,
+                extract_playlist_token,
+            )
+            key_seed = entry["gotaku_key_seed"]
+            if isinstance(key_seed, str):
+                key_seed = b64url_decode(key_seed)
+            token = extract_playlist_token(result.url)
+            pl_key = derive_playlist_key(key_seed, token)
+            dec_text = decrypt_playlist_body(body, pl_key)
+            if dec_text and dec_text.strip().startswith("#"):
+                body = dec_text.encode("utf-8")
+        except Exception:
+            pass
     if body.lstrip(b"\xef\xbb\xbf\r\n ").startswith(b"#EXTM3U"):
         if result.truncated:
             raise CheckIssue("Manifest exceeds bounded read limit")
@@ -89,7 +107,7 @@ def _resource(url, headers, fetch, *, hls=False, subtitle=False, depth=0, audio_
                     # The manifest references a group but supplied no usable rendition.
                     audio_declarations.append(None)
             return _resource(urljoin(result.url, selected.uri), headers, fetch, hls=True,
-                             subtitle=subtitle, depth=depth+1, audio_declarations=audio_declarations)
+                             subtitle=subtitle, depth=depth+1, audio_declarations=audio_declarations, entry=entry)
         if not playlist.segments:
             raise CheckIssue("Manifest contains no sampleable segments")
         segment = playlist.segments[0]
@@ -156,7 +174,7 @@ def probe_entry(entry, fetch):
         try:
             hls = entry.get("type") == "hls" if track != "subtitle" else urlsplit(url).path.lower().endswith(".m3u8")
             result = _resource(url, headers, fetch, hls=hls, subtitle=track == "subtitle",
-                               audio_declarations=declared_audio if track == "video" else None)
+                               audio_declarations=declared_audio if track == "video" else None, entry=entry)
         except ProviderDependencyError:
             raise
         except CheckIssue as issue:
@@ -174,14 +192,20 @@ def probe_entry(entry, fetch):
 
 def media_destination_allowed(provider_id, url):
     if provider_id == 'senshi':
-        from ..providers.senshi import _trusted_stream_url
-        return _trusted_stream_url(url, subtitle=True)
-    if provider_id not in ('anipm', 'reanime', 'anikoto', 'anidb', 'anizone', 'animegg', 'animexin') or not isinstance(url, str) or any(ord(c) < 33 or ord(c) == 127 for c in url):
+        return False  # Retired provider: do not import or contact its adapter.
+    if provider_id not in ('anipm', 'reanime', 'anikoto', 'anidb', 'anizone', 'animegg', 'animexin', 'gotaku') or not isinstance(url, str) or any(ord(c) < 33 or ord(c) == 127 for c in url):
         return False
     try:
         parsed = urlsplit(url)
         host = parsed.hostname or ''
         permitted = host == 'media.settlar.io' if provider_id == 'anipm' else (host == 'flixcloud.cc' or host.endswith('.flixcloud.cc') or host == 'dl.spacedl.top' or bool(re.fullmatch(r'vault-[0-9]+\.(?:cobaltcdn|soniccdn|rundowncdn)\.top', host)) or (host == 'enc-dec.app' and parsed.path == '/api/parse-flixcloud'))
+        if provider_id == 'gotaku':
+            permitted = (
+                host in ('gotakuplay.nl', 'gotaku.to')
+                or host.endswith('.gotakuplay.nl')
+                or host.endswith('.gotaku.to')
+                or bool(re.fullmatch(r'[a-zA-Z0-9_-]+\.(?:asilentharbor|anoblecascade|acobaltridge|apexnestdigital|atlaspulsehub)\.top', host))
+            )
         if provider_id == 'animexin':
             permitted = host == 'dmcdn.net' or host.endswith('.dmcdn.net') or (host == 'www.dailymotion.com' and parsed.path.startswith(('/subtitle/', '/cdn/subtitle/')))
         vidcache_port = None

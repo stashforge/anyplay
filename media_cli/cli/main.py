@@ -11,7 +11,29 @@ def run():
         from .args import parse_cli_args
 
         parsed = parse_cli_args()
-        args, _ = parsed
+        args, parser = parsed
+        from ..context import FLAGS
+        FLAGS.incognito_mode = bool(getattr(args, "incognito", False))
+        if FLAGS.incognito_mode and args.command == "service" and args.service_action != "status":
+            parser.error("--incognito cannot manage or run the persistent History service")
+        if args.command == "theme":
+            if args.theme_action == "list":
+                from .themes import list_themes
+                return list_themes()
+            # Select before importing any TUI theme consumers.
+            import os
+            os.environ['ANYPLAY_THEME'] = args.theme_name
+            preview_args = ['search']
+            if args.incognito:
+                preview_args.append('--incognito')
+            if args.debug:
+                preview_args.append('--debug')
+            parsed = parse_cli_args(preview_args)
+            args, parser = parsed
+        if args.command == "service":
+            from .service import handle_service_command
+
+            return handle_service_command(args.service_action)
         if args.command == "health":
             from .health import handle_health_command
 

@@ -65,3 +65,36 @@ def test_animethemes_search_status_uses_shared_adapter_and_retires(monkeypatch, 
     else:
         assert run() == "ANIMETHEMES_SEARCH"
     assert reads[-1] is False
+
+
+def test_live_poll_preserves_cover_notice_state(monkeypatch):
+    from media_cli.app import animethemes as flow
+    from media_cli.ui.poster import PosterManager
+    import time
+    workers = []
+    class DeferredThread:
+        def __init__(self, *, target, daemon):
+            workers.append(target)
+        def start(self):
+            pass
+    now = [100.0]
+    monkeypatch.setattr(time, 'time', lambda: now[0])
+    manager = PosterManager(enabled=lambda: True, cache_dir=lambda: '/tmp',
+                            hovered_show_id=lambda: None, request_redraw=lambda: None, loading_frame=lambda: '~')
+    monkeypatch.setattr(flow.threading, 'Thread', DeferredThread)
+    monkeypatch.setattr(flow.animethemes_service, 'search', lambda query: {'artists': [dict(id=1, name='Missing cover')]})
+    monkeypatch.setattr(flow.app_core, 'enter_alt_screen', lambda: None)
+    monkeypatch.setattr(flow.app_core, 'make_info_fn', lambda *args: None)
+    monkeypatch.setattr(flow.app_core, 'render_search_header', lambda *args, **kw: '')
+    monkeypatch.setattr(flow.app_core, '_get_poster', manager.get)
+    monkeypatch.setattr(flow.app_core, '_poster_footer_line', manager.footer_line)
+    def pick(*args, **kw):
+        workers[0]()
+        kw['live_fn']()
+        assert 'Cover unavailable' in kw['header_fn'](0)
+        now[0] += 4
+        kw['live_fn']()
+        assert 'Cover unavailable' not in kw['header_fn'](0)
+        return -2
+    monkeypatch.setattr(flow, 'tui_pick', pick)
+    assert flow.handle_animethemes_search_state(None, SimpleNamespace(), SimpleNamespace(query_str='oshi'), {}, SimpleNamespace(), 'sub') == 'ANIMETHEMES_SEARCH'

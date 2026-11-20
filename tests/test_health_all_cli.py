@@ -8,7 +8,7 @@ from media_cli.state import health_reports
 
 
 def setup(monkeypatch, tmp_path, callback):
-    monkeypatch.setattr(health, 'PROFILES', {pid: PROFILES[pid] for pid in ('senshi', 'animepahe', 'torrent')})
+    monkeypatch.setattr(health, 'PROFILES', {pid: PROFILES[pid] for pid in ('anipm', 'animepahe', 'torrent')})
     monkeypatch.setattr(health_reports, 'reports_directory', lambda: tmp_path)
     monkeypatch.setattr(runner, 'check_provider', callback)
     from media_cli import provider_manifest
@@ -29,7 +29,7 @@ def test_all_honors_disabled_config_and_keeps_independent_depths(monkeypatch, tm
         return outcome(pid, kwargs)
     setup(monkeypatch, tmp_path, collect)
     assert health.handle_health_command('all', seed=42, translation='both', plain=True) == 0
-    assert calls == [('senshi', 'http', 'both'), ('torrent', 'catalogue', 'both')]
+    assert calls == [('anipm', 'http', 'both'), ('torrent', 'catalogue', 'both')]
     saved = json.loads(next(tmp_path.glob('*/report.json')).read_text())
     assert saved['verification'] == 'mixed'
     assert [p['verification'] for p in saved['providers']] == ['http', 'catalogue']

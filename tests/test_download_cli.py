@@ -123,3 +123,18 @@ def test_provider_first_suggestion_preserves_quoted_query(capsys):
     args, _ = parse_cli_args(shlex.split(suggestion)[1:])
     assert args.provider == "animexin"
     assert args.query == ["renegade immortal"]
+
+
+@pytest.mark.parametrize("argv", [[], ["--debug"], ["--plain"]])
+def test_bare_invocation_defaults_to_search(argv):
+    implicit, _ = parse_cli_args(argv)
+    explicit, _ = parse_cli_args(["search", *argv])
+    assert vars(implicit) == vars(explicit)
+    assert implicit.command == "search" and implicit.query == []
+
+
+def test_root_help_remains_available(capsys):
+    with pytest.raises(SystemExit) as exc:
+        parse_cli_args(["-h"])
+    assert exc.value.code == 0
+    assert "Main commands" in capsys.readouterr().out

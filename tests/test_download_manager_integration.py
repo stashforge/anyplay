@@ -123,7 +123,7 @@ def test_has_tracked_downloads_does_not_create_global_worker():
     assert get_global_worker_if_started() is None
 
 
-def test_has_active_downloads_counts_paused_as_unfinished():
+def test_has_active_downloads_excludes_paused_entries():
     with tempfile.TemporaryDirectory() as tmpdir:
         stop_global_worker()
         gw = get_global_worker(download_dir=tmpdir)
@@ -139,7 +139,7 @@ def test_has_active_downloads_counts_paused_as_unfinished():
 
         active, queued = has_active_downloads()
 
-        assert active == 1
+        assert active == 0
         assert queued == 0
         gw.cancel_item(item.id)
         stop_global_worker()
@@ -437,7 +437,7 @@ def test_download_worker_ffmpeg_writes_hidden_partial_then_commits(monkeypatch):
         ]
 
 
-def test_download_worker_auto_prefers_ffmpeg_for_hls_when_available(monkeypatch):
+def test_download_worker_auto_prefers_ytdlp_for_hls_when_available(monkeypatch):
     from media_cli.media import download_worker
 
     monkeypatch.setattr(
@@ -446,7 +446,7 @@ def test_download_worker_auto_prefers_ffmpeg_for_hls_when_available(monkeypatch)
         lambda name: f"/usr/bin/{name}" if name in {"yt-dlp", "ffmpeg", "aria2c"} else None,
     )
 
-    assert download_worker._select_download_engine("auto", "https://stream.example.com/master.m3u8") == "ffmpeg"
+    assert download_worker._select_download_engine("auto", "https://stream.example.com/master.m3u8") == "yt-dlp"
 
 
 def test_download_worker_auto_uses_ytdlp_for_hls_without_ffmpeg(monkeypatch):
@@ -1178,7 +1178,7 @@ def test_download_manager_owns_resize_signal_while_running(monkeypatch):
 
     monkeypatch.setattr(signal, "getsignal", lambda signum: previous_resize_handler)
     monkeypatch.setattr(signal, "signal", fake_signal)
-    monkeypatch.setattr(download_manager.curses, "wrapper", fake_wrapper)
+    monkeypatch.setattr("media_cli.ui.download_surface.queue_wrapper", fake_wrapper)
     monkeypatch.setattr(download_manager, "_handle_resize_event", lambda stdscr: resize_calls.append(stdscr))
     monkeypatch.setattr(download_manager, "SystemStats", DummyStats)
     monkeypatch.setattr(download_manager.curses, "curs_set", noop)
@@ -1435,7 +1435,7 @@ def test_download_manager_finish_quit_stays_visible_until_downloads_finish(monke
                     title="Finish Quit",
                     episode="Episode 1",
                     destination_path="/tmp/finish-quit.mp4",
-                    status=DownloadStatus.PAUSED,
+                    status=DownloadStatus.QUEUED,
                 )
             ]
 
@@ -2163,3 +2163,31 @@ def test_system_cpu_reading_is_throttled_and_smoothed(monkeypatch):
     assert first == second
     assert open_count == 2
     assert 0.0 < third[1] < 100.0
+
+
+def test_cancel_exit_prompt_invalidates_the_shared_frame(monkeypatch):
+    import io
+    import termios
+    import tty
+    from media_cli.ui import display, download_manager, frame_surface
+    from media_cli.ui.list_screen import ScreenFrame
+    from media_cli.core.terminal import strip_ansi
+    monkeypatch.setattr(download_manager.sys, 'stdin', type('Input', (), {'isatty': lambda self: True, 'fileno': lambda self: 9})())
+    monkeypatch.setattr(display, 'is_alt_screen_active', lambda: True)
+    monkeypatch.setattr('media_cli.ui.terminal_output.write_terminal', lambda *args, **kwargs: None)
+    monkeypatch.setattr(termios, 'tcgetattr', lambda fd: [])
+    monkeypatch.setattr(termios, 'tcsetattr', lambda *args: None)
+    monkeypatch.setattr(tty, 'setraw', lambda fd: None)
+    monkeypatch.setattr(download_manager.os, 'read', lambda *args: b'c')
+    frame = ScreenFrame(['Anyplay · Download Manager'] + [''] * 23)
+    frame_surface.compose(frame,24,80)
+    assert download_manager.prompt_download_exit_cli(0,2,tty_fd=9) == 'CANCEL'
+    repaint = frame_surface.compose(frame,24,80)
+    assert 'Anyplay · Download Manager' in repaint
+
+
+def test_app_cancel_quit_returns_to_originating_screen(monkeypatch):
+    from media_cli.app import orchestrator
+    monkeypatch.setattr('media_cli.media.download_worker.has_active_downloads', lambda: (1,0))
+    monkeypatch.setattr('media_cli.ui.download_manager.prompt_download_exit_cli', lambda *args: 'CANCEL')
+    assert orchestrator._resolve_quit_with_active_downloads(cancel_state='HISTORY') == 'HISTORY'

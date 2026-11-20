@@ -59,6 +59,7 @@ class HistoryMenuController:
         self.diagnostics = diagnostics if diagnostics is not None else HistoryDiagnostics()
         self._published = self._read()
         self._validate(self._published)
+        self._tab_positions: dict[str | None, tuple[str | None, int]] = {}
         self.session = ViewSession(self._published, self._handle_event)
 
     def _validate(self, view: ViewSpec) -> None:
@@ -118,7 +119,13 @@ class HistoryMenuController:
             if event.kind == "tab":
                 if not isinstance(event.value, str):
                     raise TypeError("History tab requires a mode ID")
+                position = self.session.position
+                previous_tab = self._published.active_tab_id
+                previous_position = (position.selected_id, position.scroll)
                 self._switch(event.value)
+                if event.value != previous_tab:
+                    self._tab_positions[previous_tab] = previous_position
+                    position.selected_id, position.scroll = self._tab_positions.get(event.value, (None, 0))
             elif event.kind == "action" and event.value == "refresh_view":
                 self._refresh_view()
             else:

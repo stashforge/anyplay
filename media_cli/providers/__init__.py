@@ -227,7 +227,8 @@ def get_provider(provider_id=_DEFAULT_PROVIDER_ID, request_json_fn=None):
     if getattr(factory, "reuse_session_instance", False):
         # The instance retains its callback, so its identity cannot be recycled
         # while cached. Other providers keep their existing instance lifecycle.
-        session_key = (key, factory, id(request_json_fn), tuple(meta.get("domains") or ()))
+        session_key = (key, factory, id(request_json_fn), tuple(meta.get("domains") or ()),
+                       tuple(meta.get("service_domains") or ()))
         with _SESSION_PROVIDERS_LOCK:
             inst = _SESSION_PROVIDERS.get(session_key)
             if inst is None:

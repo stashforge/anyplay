@@ -8,6 +8,8 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from .loading_messages import catalog_loading_message
+
 from ..domain.titles import title_provider_key
 
 from media_cli import app_core
@@ -41,6 +43,9 @@ def handle_details_state(
     resolve_tracking_fn,) -> str:
     s = ui.ui_show_ctx
     ttype_local = ui.ui_ttype_ctx
+    if ms.just_picked_anime:
+        from ..core.storage import acknowledge_history_release
+        acknowledge_history_release(s, ttype_local)
 
     has_provider_link = bool((s.get("_provider") or s.get("provider")) and s.get("_has_provider_link") is not False)
     _is_dl = getattr(ms, "_is_downloads", False)
@@ -135,7 +140,7 @@ def handle_details_state(
         ids = []
         if has_provider_link or _is_dl:
             if status_cb:
-                status_cb("Loading episodes…")
+                status_cb(catalog_loading_message(show, translation_type))
             ids = list(known_ids) if known_ids is not None else app_core.ensure_episode_ids(show, translation_type)
             if not ids and _is_dl:
                 ids = show.get("_episode_ids") or show.get("_downloaded_episodes") or []
@@ -168,7 +173,7 @@ def handle_details_state(
         return finish_preparation(show, ids, translation_type, status_cb)
 
     try:
-        prepared = app_core.with_loading("Loading episodes…", prepare_details)
+        prepared = app_core.with_loading(catalog_loading_message(original, ttype_local), prepare_details)
         if prepared.needs_manual_match:
             # The interactive picker must keep ownership of the UI thread.
             matched = app_core._run_manual_anilist_match(
