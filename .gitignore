@@ -17,3 +17,6 @@ venv/
 scratch/
 .ruff_cache/
 docs/
+
+# Retired provider snapshots are local reference material.
+/archive/providers/
